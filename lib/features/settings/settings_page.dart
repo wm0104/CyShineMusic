@@ -40,6 +40,22 @@ import 'widgets/storage_folder_picker_sheet.dart';
 import 'widgets/theme_mode_row.dart';
 import 'widgets/theme_seed_row.dart';
 
+int _crossfadeMillis(double seconds) => seconds <= 0
+    ? 0
+    : (seconds * Duration.millisecondsPerSecond).round().clamp(
+        1,
+        kMaxCrossfadeMilliseconds,
+      );
+
+String _crossfadeLabel(int milliseconds) {
+  if (milliseconds == 0) return '关闭';
+  if (milliseconds < 100) return '小于 0.1 秒';
+  final tenths = (milliseconds + 50) ~/ 100;
+  return tenths % 10 == 0
+      ? '${tenths ~/ 10} 秒'
+      : '${tenths ~/ 10}.${tenths % 10} 秒';
+}
+
 class SettingsPage extends ConsumerWidget {
   const SettingsPage({super.key});
 
@@ -212,9 +228,9 @@ class SettingsPage extends ConsumerWidget {
                             SettingsAction(
                               icon: Icons.multitrack_audio_rounded,
                               title: '淡入/淡出',
-                              subtitle: settings.crossfadeSeconds == 0
+                              subtitle: settings.crossfadeMilliseconds == 0
                                   ? '已关闭 · 0 秒'
-                                  : '${settings.crossfadeSeconds} 秒 · 歌曲切换时交叠播放',
+                                  : '${_crossfadeLabel(settings.crossfadeMilliseconds)} · 歌曲切换时交叠播放',
                               trailing: Symbols.chevron_right,
                               onTap: () => _openSheet<void>(
                                 context,
@@ -537,8 +553,8 @@ class SettingsPage extends ConsumerWidget {
   }
 
   List<Widget> _crossfadeSettings(BuildContext context, WidgetRef ref) {
-    final seconds = ref.watch(
-      settingsProvider.select((s) => s.crossfadeSeconds),
+    final milliseconds = ref.watch(
+      settingsProvider.select((s) => s.crossfadeMilliseconds),
     );
     return [
       Text(
@@ -551,16 +567,18 @@ class SettingsPage extends ConsumerWidget {
       SettingsNumberControl(
         icon: Icons.multitrack_audio_rounded,
         label: '过渡时长（秒）',
-        value: seconds.toDouble(),
+        value: milliseconds / Duration.millisecondsPerSecond,
         min: 0,
-        max: kMaxCrossfadeSeconds.toDouble(),
+        max: kMaxCrossfadeMilliseconds / Duration.millisecondsPerSecond,
         step: 1,
-        onChanged: (value) => ref
+        continuousLabel: (seconds) =>
+            _crossfadeLabel(_crossfadeMillis(seconds)),
+        onChanged: (seconds) => ref
             .read(settingsProvider.notifier)
-            .setCrossfadeSeconds(value.round()),
+            .setCrossfadeMilliseconds(_crossfadeMillis(seconds)),
       ),
       const SizedBox(height: 12),
-      Text(seconds == 0 ? '0 秒 · 已关闭淡入/淡出' : '上一首的最后 $seconds 秒渐弱，同时下一首渐强。'),
+      const Text('滑到最左端即可关闭。'),
     ];
   }
 

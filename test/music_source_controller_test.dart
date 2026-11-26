@@ -222,6 +222,43 @@ void main() {
   );
 
   test(
+    'manual backups preserve local limits without removing any installed source',
+    () async {
+      const script = '// @name Extra';
+      final id = musicSourceId(parseMusicSourceMetadata(script));
+      final payload = {
+        'records': [_record(id, name: 'Extra', author: '').toJson()],
+        'enabledIds': [id],
+        'scripts': {id: script},
+      };
+      for (final count in [5, 20]) {
+        final local = List.generate(count, (i) => _record('installed-$i'));
+        final enabled = local.take(5).map((r) => r.id).toList();
+        final h = await _Harness.create(
+          MusicSourceState(records: local, enabledIds: enabled),
+          failingIds: {id},
+        );
+        addTearDown(h.container.dispose);
+        final controller = h.container.read(
+          musicSourceControllerProvider.notifier,
+        );
+        if (count == 20) {
+          await expectLater(
+            controller.restoreMissingFromBackup(payload),
+            throwsA(isA<MusicSourceRuntimeException>()),
+          );
+          expect(h.store.current.records, local);
+        } else {
+          expect(await controller.restoreMissingFromBackup(payload), 1);
+          expect(h.store.current.records.last.id, id);
+          expect(h.store.scripts[id], script);
+        }
+        expect(h.store.current.enabledIds, enabled);
+      }
+    },
+  );
+
+  test(
     'startup checks enabled and disabled sources and continues after a failure',
     () async {
       final initial = MusicSourceState(

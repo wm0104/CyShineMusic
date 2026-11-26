@@ -787,7 +787,8 @@ void main() {
       await _openSettingsRow(tester, '淡入/淡出');
       final slider = find.byType(Slider);
       final control = tester.widget<Slider>(slider);
-      expect((control.min, control.max, control.divisions), (0, 12, 12));
+      expect((control.min, control.max, control.divisions), (0, 12, null));
+      expect(control.label, '关闭');
       expect(
         tester
             .widget<IconButton>(
@@ -796,19 +797,45 @@ void main() {
             .onPressed,
         isNull,
       );
-      await tester.tapAt(tester.getCenter(slider));
+      final gesture = await tester.startGesture(tester.getCenter(slider));
+      await gesture.moveBy(const Offset(25, 0));
+      await tester.pump();
+      await gesture.moveBy(const Offset(7, 0));
+      await tester.pump();
+      final dragged = tester.widget<Slider>(slider);
+      expect(dragged.value % 1, isNot(0));
+      expect(
+        dragged.label,
+        '${double.parse(dragged.value.toStringAsFixed(1))} 秒',
+      );
+      expect(
+        SliderTheme.of(tester.element(slider)).showValueIndicator,
+        ShowValueIndicator.onDrag,
+      );
+      expect(container.read(settingsProvider).crossfadeMilliseconds, 0);
+      await gesture.up();
       await tester.pumpAndSettle();
-      expect(container.read(settingsProvider).crossfadeSeconds, 6);
+      final draggedMs = (dragged.value * 1000).round();
+      expect(container.read(settingsProvider).crossfadeMilliseconds, draggedMs);
       await tester.tap(find.byTooltip('减小过渡时长（秒）'));
       await tester.pumpAndSettle();
-      expect(find.text('上一首的最后 5 秒渐弱，同时下一首渐强。'), findsOneWidget);
+      expect(
+        container.read(settingsProvider).crossfadeMilliseconds,
+        draggedMs - 1000,
+      );
       await tester.tap(find.byTooltip('增大过渡时长（秒）'));
       await tester.pumpAndSettle();
-      expect(container.read(settingsProvider).crossfadeSeconds, 6);
-      await tester.enterText(find.byType(TextField), '20');
+      expect(container.read(settingsProvider).crossfadeMilliseconds, draggedMs);
+      final input = find.byType(TextField);
+      await tester.enterText(input, '2.36');
       await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pumpAndSettle();
-      expect(container.read(settingsProvider).crossfadeSeconds, 12);
+      expect(tester.widget<Slider>(slider).label, '2.4 秒');
+      expect(container.read(settingsProvider).crossfadeMilliseconds, 2360);
+      await tester.enterText(input, '20');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(container.read(settingsProvider).crossfadeMilliseconds, 12000);
       expect(
         tester
             .widget<IconButton>(
@@ -817,13 +844,23 @@ void main() {
             .onPressed,
         isNull,
       );
+      await tester.enterText(input, '0.006');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Slider>(slider).label, '小于 0.1 秒');
+      expect(container.read(settingsProvider).crossfadeMilliseconds, 6);
+      final formatLabel = tester.widget<Slider>(slider).semanticFormatterCallback!;
+      expect(formatLabel(0), '关闭');
+      expect(formatLabel(0.0002), '小于 0.1 秒');
+      expect(formatLabel(0.099), '小于 0.1 秒');
+      expect(formatLabel(0.1), '0.1 秒');
       await _openSettingsRow(tester, '完成');
-      expect(find.text('12 秒 · 歌曲切换时交叠播放'), findsOneWidget);
+      expect(find.text('小于 0.1 秒 · 歌曲切换时交叠播放'), findsOneWidget);
       final restored = _settingsContainer(prefs);
       addTearDown(restored.dispose);
-      expect(restored.read(settingsProvider).crossfadeSeconds, 12);
+      expect(restored.read(settingsProvider).crossfadeMilliseconds, 6);
       await _openSettingsRow(tester, '淡入/淡出');
-      await tester.enterText(find.byType(TextField), '0');
+      await tester.enterText(input, '0');
       await _openSettingsRow(tester, '完成');
       expect(find.text('已关闭 · 0 秒'), findsOneWidget);
       expect(tester.takeException(), isNull);

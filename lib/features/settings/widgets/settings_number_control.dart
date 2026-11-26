@@ -11,6 +11,7 @@ class SettingsNumberControl extends StatefulWidget {
     required this.max,
     required this.step,
     required this.onChanged,
+    this.continuousLabel,
   });
 
   final IconData icon;
@@ -20,6 +21,8 @@ class SettingsNumberControl extends StatefulWidget {
   final double max;
   final double step;
   final ValueChanged<double> onChanged;
+  // A continuous slider previews locally and commits its position on release.
+  final String Function(double)? continuousLabel;
 
   @override
   State<SettingsNumberControl> createState() => SettingsNumberControlState();
@@ -27,14 +30,22 @@ class SettingsNumberControl extends StatefulWidget {
 
 class SettingsNumberControlState extends State<SettingsNumberControl> {
   late final _controller = TextEditingController(
-    text: widget.value.round().toString(),
+    text: _inputText(widget.value),
   );
   final _focus = FocusNode();
 
-  double _snap(double value) =>
-      ((value.clamp(widget.min, widget.max) / widget.step).round() *
-              widget.step)
-          .clamp(widget.min, widget.max);
+  double? _dragValue;
+  bool get _continuous => widget.continuousLabel != null;
+
+  String _inputText(double value) => _continuous
+      ? value.toStringAsFixed(3).replaceFirst(RegExp(r'\.?0+$'), '')
+      : value.round().toString();
+
+  double _snap(double value) => _continuous
+      ? value.clamp(widget.min, widget.max)
+      : ((value.clamp(widget.min, widget.max) / widget.step).round() *
+                widget.step)
+            .clamp(widget.min, widget.max);
 
   @override
   void initState() {
@@ -46,7 +57,7 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
   void didUpdateWidget(covariant SettingsNumberControl oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!_focus.hasFocus && widget.value != oldWidget.value) {
-      _controller.text = widget.value.round().toString();
+      _controller.text = _inputText(widget.value);
     }
   }
 
@@ -55,21 +66,21 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
   }
 
   void commitInput() {
-    final parsed = double.tryParse(_controller.text);
+    final parsed = double.tryParse(_controller.text.replaceAll(',', '.'));
     final value = _snap(parsed ?? widget.value);
-    _controller.text = value.round().toString();
+    _controller.text = _inputText(value);
     if (value != widget.value) widget.onChanged(value);
   }
 
   void setValue(double value) {
     final next = _snap(value);
-    _controller.text = next.round().toString();
+    _controller.text = _inputText(next);
     _focus.unfocus();
     widget.onChanged(next);
   }
 
   void _onTextChanged(String value) {
-    final parsed = double.tryParse(value);
+    final parsed = double.tryParse(value.replaceAll(',', '.'));
     if (parsed != null) widget.onChanged(_snap(parsed));
   }
 
@@ -113,8 +124,9 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    '${widget.min.round()}–${widget.max.round()} '
-                    '· 每次 ${widget.step.round()}',
+                    _continuous
+                        ? '${widget.min.round()}–${widget.max.round()}'
+                        : '${widget.min.round()}–${widget.max.round()} · 每次 ${widget.step.round()}',
                     style: theme.bodySmall?.copyWith(
                       color: scheme.onSurfaceVariant,
                     ),
@@ -123,53 +135,67 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
               ),
             ),
             const SizedBox(width: 12),
-            SizedBox(
-              width: 102,
-              child: Semantics(
-                label: widget.label,
-                child: TextField(
-                  controller: _controller,
-                  focusNode: _focus,
-                  selectAllOnFocus: true,
-                  keyboardType: TextInputType.number,
-                  textInputAction: TextInputAction.done,
-                  textAlign: TextAlign.center,
-                  maxLines: 1,
-                  style: theme.titleMedium?.copyWith(
-                    color: scheme.primary,
-                    fontWeight: FontWeight.w600,
+            Visibility(
+              visible: _dragValue == null,
+              maintainState: true,
+              maintainAnimation: true,
+              maintainSize: true,
+              child: SizedBox(
+                width: 102,
+                child: Semantics(
+                  label: widget.label,
+                  child: TextField(
+                    controller: _controller,
+                    focusNode: _focus,
+                    selectAllOnFocus: true,
+                    keyboardType: _continuous
+                        ? const TextInputType.numberWithOptions(decimal: true)
+                        : TextInputType.number,
+                    textInputAction: TextInputAction.done,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    style: theme.titleMedium?.copyWith(
+                      color: scheme.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    inputFormatters: [
+                      TextInputFormatter.withFunction(
+                        (oldValue, newValue) =>
+                            (_continuous
+                                    ? RegExp(r'^\d{0,4}([.,]\d{0,3})?$')
+                                    : RegExp(r'^\d{0,4}$'))
+                                .hasMatch(newValue.text)
+                            ? newValue
+                            : oldValue,
+                      ),
+                    ],
+                    decoration: InputDecoration(
+                      filled: true,
+                      fillColor: scheme.surfaceContainerHighest,
+                      isDense: true,
+                      contentPadding: const EdgeInsets.fromLTRB(12, 12, 0, 12),
+                      border: border,
+                      enabledBorder: border,
+                      focusedBorder: border.copyWith(
+                        borderSide: BorderSide(
+                          color: scheme.primary,
+                          width: 1.5,
+                        ),
+                      ),
+                      suffixIcon: Icon(
+                        Icons.edit_outlined,
+                        size: 14,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                      suffixIconConstraints: const BoxConstraints(minWidth: 28),
+                    ),
+                    onChanged: _onTextChanged,
+                    onSubmitted: (_) {
+                      commitInput();
+                      _focus.unfocus();
+                    },
+                    onTapOutside: (_) => _focus.unfocus(),
                   ),
-                  inputFormatters: [
-                    TextInputFormatter.withFunction(
-                      (oldValue, newValue) =>
-                          RegExp(r'^\d{0,4}$').hasMatch(newValue.text)
-                          ? newValue
-                          : oldValue,
-                    ),
-                  ],
-                  decoration: InputDecoration(
-                    filled: true,
-                    fillColor: scheme.surfaceContainerHighest,
-                    isDense: true,
-                    contentPadding: const EdgeInsets.fromLTRB(12, 12, 0, 12),
-                    border: border,
-                    enabledBorder: border,
-                    focusedBorder: border.copyWith(
-                      borderSide: BorderSide(color: scheme.primary, width: 1.5),
-                    ),
-                    suffixIcon: Icon(
-                      Icons.edit_outlined,
-                      size: 14,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                    suffixIconConstraints: const BoxConstraints(minWidth: 28),
-                  ),
-                  onChanged: _onTextChanged,
-                  onSubmitted: (_) {
-                    commitInput();
-                    _focus.unfocus();
-                  },
-                  onTapOutside: (_) => _focus.unfocus(),
                 ),
               ),
             ),
@@ -201,16 +227,34 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
                   ),
                   activeTickMarkColor: Colors.transparent,
                   inactiveTickMarkColor: Colors.transparent,
-                  showValueIndicator: ShowValueIndicator.never,
+                  showValueIndicator: _continuous
+                      ? ShowValueIndicator.onDrag
+                      : ShowValueIndicator.never,
+                  valueIndicatorShape:
+                      const RoundedRectSliderValueIndicatorShape(),
                 ),
                 child: Slider(
-                  value: widget.value,
+                  value: _dragValue ?? widget.value,
+                  label: widget.continuousLabel?.call(
+                    _dragValue ?? widget.value,
+                  ),
                   min: widget.min,
                   max: widget.max,
-                  divisions: ((widget.max - widget.min) / widget.step).round(),
-                  semanticFormatterCallback: (value) =>
-                      value.round().toString(),
-                  onChanged: setValue,
+                  divisions: _continuous
+                      ? null
+                      : ((widget.max - widget.min) / widget.step).round(),
+                  semanticFormatterCallback:
+                      widget.continuousLabel ?? _inputText,
+                  onChangeStart: _continuous ? (_) => _focus.unfocus() : null,
+                  onChanged: _continuous
+                      ? (value) => setState(() => _dragValue = value)
+                      : setValue,
+                  onChangeEnd: _continuous
+                      ? (value) {
+                          setState(() => _dragValue = null);
+                          widget.onChanged(value);
+                        }
+                      : null,
                 ),
               ),
             ),

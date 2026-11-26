@@ -65,6 +65,7 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
   private var outgoing: Output?
   private var fadeToken: Int?
   private var fadeDurationMs = 0
+  private var fadeTickMs: Int { min(20, max(1, fadeDurationMs / 8)) }
   private var fadeTimer: DispatchSourceTimer?
   private var playing = false
   private var completed = false
@@ -541,7 +542,7 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
     processingState = .ready
     refreshPlaybackState()
     let timer = DispatchSource.makeTimerSource(queue: engineQueue)
-    timer.schedule(deadline: .now(), repeating: .milliseconds(20))
+    timer.schedule(deadline: .now(), repeating: .milliseconds(fadeTickMs))
     timer.setEventHandler { [weak self] in self?.updateFade() }
     fadeTimer = timer
     timer.resume()
@@ -592,7 +593,7 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
        BASS_ChannelIsActive(outgoing.handle) == UInt32(BASS_ACTIVE_PAUSED) {
       _ = BASS_ChannelPlay(outgoing.handle, 0)
     }
-    fadeTimer?.schedule(deadline: .now(), repeating: .milliseconds(20))
+    fadeTimer?.schedule(deadline: .now(), repeating: .milliseconds(fadeTickMs))
     refreshPlaybackState()
     emitSnapshot()
     return snapshot()

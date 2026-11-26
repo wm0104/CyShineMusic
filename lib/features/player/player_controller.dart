@@ -109,9 +109,13 @@ class PlayerController extends StateNotifier<PlayerState>
       _audioHandler.errorStream.listen(_handlePlaybackError),
     ];
     _ref.listen<AppSettings>(settingsProvider, (previous, next) {
-      if (previous?.crossfadeSeconds != next.crossfadeSeconds &&
-          next.crossfadeSeconds == 0) {
-        _cancelCrossfade();
+      if (previous?.crossfadeMilliseconds != next.crossfadeMilliseconds) {
+        if (next.crossfadeMilliseconds == 0) {
+          _cancelCrossfade();
+        } else if (_crossfade?.cue != null) {
+          _crossfade?.cue?.cancel();
+          _checkCrossfade();
+        }
       }
       if (previous?.allowMixWithOthers != next.allowMixWithOthers) {
         unawaited(_applyAudioMixingPreference(next.allowMixWithOthers));
@@ -1076,7 +1080,7 @@ class PlayerController extends StateNotifier<PlayerState>
     _persistPositionCheckpoint();
   }
 
-  void _checkCrossfade() {
+  void _checkCrossfade({bool scheduled = false}) {
     if (!mounted ||
         _transportSuppressionToken != null ||
         _pausedBySleepTimer ||
@@ -1087,11 +1091,12 @@ class PlayerController extends StateNotifier<PlayerState>
         state.playbackMode == PlayerPlaybackMode.repeatOne) {
       return;
     }
-    final seconds = _ref.read(settingsProvider).crossfadeSeconds;
-    if (seconds == 0) return;
-    final remaining = state.duration - state.position;
-    final window = Duration(seconds: seconds);
-    if (remaining <= Duration.zero ||
+    final milliseconds = _ref.read(settingsProvider).crossfadeMilliseconds;
+    if (milliseconds == 0) return;
+    final remaining = state.duration - _audioHandler.position;
+    final window = Duration(milliseconds: milliseconds);
+    if (state.duration <= Duration.zero ||
+        (!scheduled && remaining <= Duration.zero) ||
         remaining > window + const Duration(seconds: 8)) {
       return;
     }
@@ -1102,8 +1107,28 @@ class PlayerController extends StateNotifier<PlayerState>
       final candidate = _QueueCrossfade(++_nextCrossfadeToken, _queue[next]);
       _crossfade = candidate;
       unawaited(_prepareCrossfade(candidate));
-    } else if (remaining <= window && pending.track != null) {
-      unawaited(_startCrossfade(pending, remaining));
+    } else if (pending.track != null) {
+      if (remaining > window) {
+        // A short transition can fall entirely between two UI clock ticks.
+        // Keep one timer during preloading, then re-anchor it on the final ticks.
+        final delay = remaining - window;
+        if ((pending.cue?.isActive ?? false) &&
+            delay > const Duration(milliseconds: 100)) {
+          return;
+        }
+        pending.cue?.cancel();
+        pending.cue = Timer(delay, () {
+          if (_crossfade == pending) _checkCrossfade(scheduled: true);
+        });
+      } else {
+        pending.cue?.cancel();
+        // Keep a prepared cue's requested span across timer/bridge jitter.
+        // For a late preparation, overlap only the remaining part of the track.
+        final durationMs = scheduled
+            ? milliseconds
+            : (remaining.inMicroseconds + 999) ~/ 1000;
+        unawaited(_startCrossfade(pending, Duration(milliseconds: durationMs)));
+      }
     }
   }
 
@@ -1298,6 +1323,7 @@ class PlayerController extends StateNotifier<PlayerState>
   void _cancelPreparedCrossfade() {
     final pending = _crossfade;
     if (pending == null) return;
+    pending.cue?.cancel();
     _crossfade = null;
     _discardFade(pending.token);
   }
@@ -2052,6 +2078,7 @@ class _QueueCrossfade {
   _QueueCrossfade(this.token, this.entry);
   final int token;
   final DownloadHistoryEntry entry;
+  Timer? cue;
   PlayerTrack? track;
   Set<String> attemptedSources = {};
   Object? playbackError;

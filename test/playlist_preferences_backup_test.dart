@@ -1,4 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
+
+import 'package:cy_shine_music/core/models/enums.dart';
+import 'package:cy_shine_music/core/music_sources/music_source_controller.dart';
+import 'package:cy_shine_music/core/music_sources/music_source_models.dart';
+import 'package:cy_shine_music/core/music_sources/music_source_runtime.dart';
+import 'package:cy_shine_music/core/music_sources/music_source_store.dart';
 
 import 'package:cy_shine_music/core/storage/app_preferences_backup.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
@@ -10,6 +17,7 @@ import 'package:cy_shine_music/features/equalizer/equalizer_store.dart';
 import 'package:cy_shine_music/features/playlists/playlist_store.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,12 +26,14 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late SharedPreferences prefs;
   late ProviderContainer container;
+  late _SourceRuntime runtime;
   String? picked;
   String? saved;
   final cloud = <String, String>{};
 
   ProviderContainer open() => ProviderContainer(overrides: [
     sharedPreferencesProvider.overrideWithValue(prefs),
+    musicSourceRuntimeProvider.overrideWithValue(runtime),
     playlistBackupFilePickerProvider.overrideWithValue(() async => picked),
     playlistBackupFileSaverProvider.overrideWithValue((name, text) async {
       saved = text;
@@ -42,6 +52,7 @@ void main() {
       'sentinel_credential': 'test-only-secret',
     });
     prefs = await SharedPreferences.getInstance();
+    runtime = _SourceRuntime();
     picked = null;
     saved = null;
     cloud.clear();
@@ -49,13 +60,72 @@ void main() {
   });
   tearDown(() => container.dispose());
 
+  Future<void> mockSourceFiles() async {
+    final root = await Directory.systemTemp.createTemp('cyshine-manual-backup-');
+    const channel = MethodChannel('plugins.flutter.io/path_provider');
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (_) async => root.path);
+    addTearDown(() async {
+      messenger.setMockMethodCallHandler(channel, null);
+      await root.delete(recursive: true);
+    });
+  }
+
   for (final remote in [false, true]) {
+    test('${remote ? 'cloud' : 'local'} manual backup restores scripts, capabilities and enabled order', () async {
+      await mockSourceFiles();
+      final sources = container.read(musicSourceControllerProvider.notifier);
+      const firstScript = '// @name One\n// @author Test';
+      const dormantScript = '// @name Dormant\n// @author Test';
+      const lastScript = '// @name Last\n// @author Test';
+      const newerScript = '// @name One\n// @author Test\n// @version 2';
+      final first = await sources.importScript(script: firstScript, origin: '/device/source.js');
+      final dormant = await sources.importScript(script: dormantScript, origin: 'test');
+      await sources.deactivate(dormant.id);
+      final last = await sources.importScript(script: lastScript, origin: 'test');
+      final service = container.read(playlistBackupServiceProvider);
+      if (remote) {
+        await service.uploadCloud();
+        saved = cloud.values.single;
+      } else {
+        await service.exportLocal();
+        picked = saved;
+      }
+      final section = (jsonDecode(saved!) as Map)['musicSources'] as Map;
+      expect((section['scripts'] as Map).length, 3);
+      expect(saved, isNot(contains('/device/source.js')));
+      expect(section['enabledIds'], [first.id, last.id]);
+
+      for (final record in [first, dormant, last]) {
+        await sources.remove(record.id);
+      }
+      final local = await sources.importScript(script: '// @name Local', origin: 'local');
+      runtime.failOn = dormant.id; // A disabled or offline script need not initialize.
+      Future<int?> restore() => remote ? service.restoreCloud(cloud.keys.single) : service.importLocal();
+      expect(await restore(), 3);
+      expect(container.read(musicSourceControllerProvider).requireValue.enabledIds, [local.id, first.id, last.id]);
+      await sources.importScript(script: newerScript, origin: 'local');
+      await sources.deactivate(first.id);
+      expect(await restore(), 0);
+      container.dispose();
+      await prefs.reload();
+      container = open();
+      final recovered = await container.read(musicSourceControllerProvider.future);
+      expect(recovered.records.map((row) => row.id), [local.id, first.id, dormant.id, last.id]);
+      expect(recovered.enabledIds, [local.id, last.id]);
+      expect(recovered.records.last.supports(MusicSource.kw), isTrue);
+      final store = container.read(musicSourceStoreProvider);
+      expect(await store.readScript(first.id), newerScript);
+      expect(await store.readScript(dormant.id), dormantScript);
+      expect(await store.readScript(last.id), lastScript);
+    });
+
     test('${remote ? 'cloud' : 'local'} backup restores preferences and equalizer durably', () async {
       final settings = container.read(settingsProvider.notifier);
       await settings.setThemeMode(ThemeMode.dark);
       await settings.setNavigationMode(AppNavigationMode.dualCapsule);
       await settings.setAutoPlayOnStartup(true);
-      await settings.setCrossfadeSeconds(5);
+      await settings.setCrossfadeMilliseconds(6);
       container.read(equalizerProvider.notifier).setEnabled(true);
       await container.read(localPlaylistsProvider.notifier).create('portable');
       final service = container.read(playlistBackupServiceProvider);
@@ -69,7 +139,7 @@ void main() {
       expect(document['version'], 1);
       final preferences = document['preferences'] as Map;
       expect(preferences.length, 28);
-      expect(preferences['crossfadeSeconds'], 5);
+      expect(preferences['crossfadeMilliseconds'], 6);
       expect(preferences['themeMode'], 'dark');
       expect((preferences['equalizer'] as Map)['enabled'], isTrue);
       expect(saved, isNot(contains('test-only-secret')));
@@ -81,7 +151,7 @@ void main() {
       await settings.setThemeMode(ThemeMode.light);
       await settings.setNavigationMode(AppNavigationMode.native);
       await settings.setAutoPlayOnStartup(false);
-      await settings.setCrossfadeSeconds(0);
+      await settings.setCrossfadeMilliseconds(0);
       container.read(equalizerProvider.notifier).setEnabled(false);
       if (remote) {
         await service.restoreCloud(cloud.keys.single);
@@ -96,7 +166,7 @@ void main() {
       expect(restored.themeMode, ThemeMode.dark);
       expect(restored.navigationMode, AppNavigationMode.dualCapsule);
       expect(restored.autoPlayOnStartup, isTrue);
-      expect(restored.crossfadeSeconds, 5);
+      expect(restored.crossfadeMilliseconds, 6);
       expect(container.read(equalizerProvider).enabled, isTrue);
       expect(prefs.getString('sentinel_credential'), 'test-only-secret');
       expect(restored.downloadDir, '/device/downloads');
@@ -104,21 +174,82 @@ void main() {
     });
   }
 
+  test('a bad source or failed initialization cannot partially import a playlist or preferences', () async {
+    await mockSourceFiles();
+    final sources = container.read(musicSourceControllerProvider.notifier);
+    final record = await sources.importScript(script: '// @name Fixture', origin: 'test');
+    final playlists = container.read(localPlaylistsProvider.notifier);
+    final service = container.read(playlistBackupServiceProvider);
+    final playlist = await playlists.create('inside backup');
+    await container.read(settingsProvider.notifier).setThemeMode(ThemeMode.dark);
+    await service.exportLocal();
+    await playlists.delete(playlist.id);
+    await sources.remove(record.id);
+    await container.read(settingsProvider.notifier).setThemeMode(ThemeMode.light);
+    for (final damageScript in [true, false]) {
+      final file = jsonDecode(saved!) as Map;
+      if (damageScript) {
+        file['musicSources']['scripts'][record.id] = '// @name Different';
+      } else {
+        runtime.failOn = record.id;
+      }
+      picked = jsonEncode(file);
+      await expectLater(service.importLocal(), throwsA(isA<MusicSourceRuntimeException>()));
+      expect(container.read(musicSourceControllerProvider).requireValue.records, isEmpty);
+      expect(container.read(settingsProvider).themeMode, ThemeMode.light);
+      expect(container.read(localPlaylistsProvider), isEmpty);
+    }
+  });
+
+  test('legacy whole seconds migrate and a saved zero takes precedence on restart', () async {
+    await prefs.setInt('crossfade_seconds', 4);
+    final settings = container.read(settingsProvider.notifier);
+    expect(container.read(settingsProvider).crossfadeMilliseconds, 4000);
+    expect(settings.exportPreferencesForBackup()['crossfadeMilliseconds'], 4000);
+
+    await settings.setCrossfadeMilliseconds(0);
+    container.dispose();
+    await prefs.reload();
+    container = open();
+    expect(container.read(settingsProvider).crossfadeMilliseconds, 0);
+  });
+
+  test('restores legacy crossfade seconds, preferring an exact value when both are present', () async {
+    final document = jsonDecode(container.read(localPlaylistsProvider.notifier).exportBackup()) as Map;
+    final service = container.read(playlistBackupServiceProvider);
+    picked = jsonEncode({...document, 'preferences': {'crossfadeSeconds': 12}});
+    await service.importLocal();
+    expect(container.read(settingsProvider).crossfadeMilliseconds, 12000);
+
+    picked = jsonEncode({...document, 'preferences': {
+      'crossfadeMilliseconds': 2360, 'crossfadeSeconds': 2,
+    }});
+    await service.importLocal();
+    expect(container.read(settingsProvider).crossfadeMilliseconds, 2360);
+  });
+
   test('legacy backup and picker cancellation do not touch preferences', () async {
     final settings = container.read(settingsProvider.notifier);
     await settings.setThemeMode(ThemeMode.dark);
+    await mockSourceFiles();
+    final record = await container.read(musicSourceControllerProvider.notifier)
+        .importScript(script: '// @name Keep', origin: '/device/example.js');
     final before = {for (final key in prefs.getKeys()) key: prefs.get(key)};
     expect(await container.read(playlistBackupServiceProvider).importLocal(), isNull);
     expect({for (final key in prefs.getKeys()) key: prefs.get(key)}, before);
     picked = container.read(localPlaylistsProvider.notifier).exportBackup();
     await container.read(playlistBackupServiceProvider).importLocal();
+    final old = jsonDecode(picked!) as Map;
+    picked = jsonEncode({...old, 'musicSources': {'records': [], 'enabledIds': [], 'scripts': {}}});
+    await container.read(playlistBackupServiceProvider).importLocal();
     expect({for (final key in prefs.getKeys()) key: prefs.get(key)}, before);
+    expect(container.read(musicSourceControllerProvider).requireValue.enabledIds, [record.id]);
   });
 
   test('partial restore preserves dynamic artwork and translation after restart', () async {
     final settings = container.read(settingsProvider.notifier);
     await settings.setPlaylistArtworkColorsEnabled(true);
-    await settings.setCrossfadeSeconds(7);
+    await settings.setCrossfadeMilliseconds(2360);
     // No stored translation style: preserve the current derived values too.
     final original = container.read(settingsProvider);
     picked = jsonEncode({
@@ -138,7 +269,7 @@ void main() {
     final restored = container.read(settingsProvider);
     expect(restored.customTheme.enabled, isTrue);
     expect(restored.playlistArtworkColorsEnabled, isTrue);
-    expect(restored.crossfadeSeconds, 7);
+    expect(restored.crossfadeMilliseconds, 2360);
     expect(restored.lyricFontSize, 48);
     expect(restored.lyricFontWeight, 800);
     expect(restored.lyricTranslationFontSize, original.lyricTranslationFontSize);
@@ -161,6 +292,8 @@ void main() {
       {'themeSeedArgb': -1},
       {'lyricFontSize': 57},
       {'crossfadeSeconds': -1}, {'crossfadeSeconds': 13}, {'crossfadeSeconds': 1.5},
+      {'crossfadeMilliseconds': -1}, {'crossfadeMilliseconds': 12001},
+      {'crossfadeMilliseconds': 0.5},
       {'onlinePlaybackQuality': 'master'},
       {'enabledSearchSources': ['wy', 'wy']},
       {'enabledSearchSources': []},
@@ -189,7 +322,7 @@ void main() {
       'lyricFontSize': 45.0, 'lyricTranslationFontSize': 22.0,
       'navigationMode': 'dual_capsule', 'carPadModeEnabled': true,
       'skipStartupScreen': true, 'autoPlayOnStartup': true,
-      'showMiniLyrics': false, 'allowMixWithOthers': true, 'crossfadeSeconds': 12,
+      'showMiniLyrics': false, 'allowMixWithOthers': true, 'crossfadeMilliseconds': 12000,
       'bluetoothLyricEnabled': true, 'bluetoothFullLyricEnabled': true,
       'onlinePlaybackQuality': 'flac', 'batchDownloadQuality': '320k',
       'enabledSearchSources': ['kw', 'mg'],
@@ -292,4 +425,16 @@ class _Cloud extends WebDavClient {
   Future<List<String>> listPlaylistBackups() async => files.keys.toList();
   @override
   Future<String> readPlaylistBackup(String name) async => files[name]!;
+}
+
+class _SourceRuntime extends MusicSourceRuntime {
+  _SourceRuntime() : super(Dio(), channel: const MethodChannel('mock/backup-source'));
+  String? failOn;
+  @override
+  Future<Map<MusicSource, List<Quality>>> load(MusicSourceRecord record, String script) async {
+    if (record.id == failOn) throw const MusicSourceRuntimeException('fixture unavailable');
+    return const {MusicSource.kw: [Quality.k128]};
+  }
+  @override
+  Future<void> disposeRuntime() async {}
 }

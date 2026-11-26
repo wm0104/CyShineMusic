@@ -109,7 +109,9 @@ class BassPlayerPlugin :
     private val fadeTick = object : Runnable {
         override fun run() {
             updateFade()
-            if (outgoing != null && playing) engineHandler.postDelayed(this, 20L)
+            if (outgoing != null && playing) {
+                engineHandler.postDelayed(this, (fadeDurationMs / 8).coerceIn(1L, 20L))
+            }
         }
     }
 

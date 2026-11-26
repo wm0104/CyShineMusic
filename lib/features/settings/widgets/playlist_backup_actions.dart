@@ -34,13 +34,13 @@ class _PlaylistBackupActionsState extends ConsumerState<PlaylistBackupActions> {
     SettingsAction(
       key: const ValueKey('playlist-backup-export'),
       icon: Icons.file_upload_outlined, title: '导出备份',
-      subtitle: '保存歌单与 App 偏好，不包含音频',
+      subtitle: '保存歌单、音源和 App 偏好',
       onTap: () => _run((service) async => await service.exportLocal() ? '备份已导出' : null),
     ),
     SettingsAction(
       key: const ValueKey('playlist-backup-import'),
       icon: Icons.file_download_outlined, title: '导入备份',
-      subtitle: '歌单合并补缺，偏好随备份恢复',
+      subtitle: '合并缺少的歌单和音源，恢复备份中的偏好',
       onTap: () => _run((service) async {
         final added = await service.importLocal();
         return added == null ? null : '备份已导入，补入 $added 项';

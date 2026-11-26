@@ -11,6 +11,7 @@ import '../../features/playlists/playlist_store.dart';
 import '../../features/playlists/playlist_backup.dart';
 import '../../features/equalizer/equalizer_store.dart';
 import '../storage/settings_store.dart';
+import '../music_sources/music_source_controller.dart';
 import '../storage/app_preferences_backup.dart';
 import 'webdav_client.dart';
 import 'webdav_config_store.dart';
@@ -62,8 +63,10 @@ class PlaylistBackupService {
     return '栖弦备份-${now.year}-$month-$day.json';
   }
 
-  String _export() => jsonEncode({
+  Future<String> _export() async => jsonEncode({
     ...jsonDecode(ref.read(localPlaylistsProvider.notifier).exportBackup()) as Map,
+    'musicSources': await ref.read(musicSourceControllerProvider.notifier)
+        .exportForSync(fileOrigin: '备份文件'),
     'preferences': {
       ...ref.read(settingsProvider.notifier).exportPreferencesForBackup(),
       'equalizer': ref.read(equalizerProvider).toJson(),
@@ -76,7 +79,13 @@ class PlaylistBackupService {
     final document = jsonDecode(text) as Map;
     final preferences = document.containsKey('preferences')
         ? decodeAppPreferencesBackup(document['preferences']) : null;
-    final added = await ref.read(localPlaylistsProvider.notifier).importBackup(text);
+    var sourceCount = 0;
+    final added = await ref.read(localPlaylistsProvider.notifier).importBackup(text,
+      beforeWrite: document.containsKey('musicSources') ? () async {
+        sourceCount = await ref.read(musicSourceControllerProvider.notifier)
+            .restoreMissingFromBackup(document['musicSources']);
+      } : null,
+    );
     // Playlist conflicts must never restore preferences first.
     if (preferences != null && preferences.isNotEmpty) {
       await ref.read(settingsProvider.notifier).applyValidatedPreferencesBackup(preferences);
@@ -86,11 +95,11 @@ class PlaylistBackupService {
         );
       }
     }
-    return added;
+    return added + sourceCount;
   }
 
-  Future<bool> exportLocal() {
-    final text = _export();
+  Future<bool> exportLocal() async {
+    final text = await _export();
     return ref.read(playlistBackupFileSaverProvider)(_name(), text);
   }
 
@@ -107,7 +116,7 @@ class PlaylistBackupService {
   }
 
   Future<void> uploadCloud() async {
-    final text = _export();
+    final text = await _export();
     final client = await _client();
     try {
       final stem = _name().replaceFirst('.json', '');

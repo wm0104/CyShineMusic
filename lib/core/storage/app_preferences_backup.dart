@@ -42,8 +42,16 @@ Map<String, dynamic> decodeAppPreferencesBackup(Object? value) {
   }
   if (value.containsKey('crossfadeSeconds')) {
     final raw = value['crossfadeSeconds'];
-    if (raw is! int || raw < 0 || raw > kMaxCrossfadeSeconds) throw invalid;
-    result['crossfadeSeconds'] = raw;
+    if (raw is! int || raw < 0 ||
+        raw > kMaxCrossfadeMilliseconds ~/ Duration.millisecondsPerSecond) {
+      throw invalid;
+    }
+    result['crossfadeMilliseconds'] = Duration(seconds: raw).inMilliseconds;
+  }
+  if (value.containsKey('crossfadeMilliseconds')) {
+    final raw = value['crossfadeMilliseconds'];
+    if (raw is! int || raw < 0 || raw > kMaxCrossfadeMilliseconds) throw invalid;
+    result['crossfadeMilliseconds'] = raw;
   }
   final ranges = <String, (double, double)>{
     'lyricFontWeight': (kLyricFontWeightMin, kLyricFontWeightMax),

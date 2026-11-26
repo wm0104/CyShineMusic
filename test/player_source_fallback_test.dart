@@ -645,6 +645,40 @@ void main() {
   });
 
   group('automatic crossfade', () {
+    test('a prepared 6 ms fade starts between position events', () async {
+      final harness = await _startCrossfadeQueue(seconds: 0);
+      final settings = harness.container.read(settingsProvider.notifier);
+      await settings.setCrossfadeMilliseconds(6);
+      // Prepare well ahead, then deliver the last UI tick before the cue.
+      harness.audio.emitPosition(const Duration(seconds: 179));
+      await _waitUntil(() => harness.audio.preparedUris.isNotEmpty);
+      await Future<void>.delayed(Duration.zero);
+      harness.audio.emitPosition(const Duration(milliseconds: 179970));
+      expect(harness.audio.startedFades, isEmpty);
+      // The native clock advances without broadcasting another position event.
+      harness.audio._position = const Duration(milliseconds: 179994);
+      await _waitUntil(() => harness.audio.startedFades.isNotEmpty);
+      expect(harness.audio.startedFades.single, const Duration(milliseconds: 6));
+    });
+
+    test('disabling a prepared short fade cancels its pending cue', () async {
+      final harness = await _startCrossfadeQueue(seconds: 0);
+      final settings = harness.container.read(settingsProvider.notifier);
+      await settings.setCrossfadeMilliseconds(6);
+      harness.audio.emitPosition(const Duration(seconds: 179));
+      await _waitUntil(() => harness.audio.preparedUris.isNotEmpty);
+      await Future<void>.delayed(Duration.zero);
+      harness.audio.emitPosition(const Duration(milliseconds: 179970));
+      await settings.setCrossfadeMilliseconds(0);
+      harness.audio._position = const Duration(milliseconds: 179994);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(harness.audio.startedFades, isEmpty);
+      expect(
+        harness.audio.cancelledFades,
+        contains(harness.audio.preparedTokens.single),
+      );
+    });
+
     test(
       'zero seconds keeps natural completion as the only transition',
       () async {

@@ -43,8 +43,9 @@ const String _kNetworkAdapterModeKey = 'network_adapter_mode';
 const String _kEnabledSearchSourcesKey = 'enabled_search_source_codes';
 const String _kDiscoverySourceOrderKey = 'discovery_source_order';
 const String _kOnlinePlaybackQualityKey = 'online_playback_quality';
-const String _kCrossfadeSecondsKey = 'crossfade_seconds';
-const int kMaxCrossfadeSeconds = 12;
+const String _kCrossfadeMillisecondsKey = 'crossfade_milliseconds';
+const String _kLegacyCrossfadeSecondsKey = 'crossfade_seconds';
+const int kMaxCrossfadeMilliseconds = 12 * Duration.millisecondsPerSecond;
 const String _kBatchDownloadQualityKey = 'batch_download_quality';
 const String _kShowMiniLyricsKey = 'show_mini_lyrics';
 const String _kAllowMixWithOthersKey = 'allow_mix_with_others';
@@ -129,7 +130,7 @@ class AppSettings {
     required this.discoverySourceOrder,
     required this.onlinePlaybackQuality,
     required this.batchDownloadQuality,
-    this.crossfadeSeconds = 0,
+    this.crossfadeMilliseconds = 0,
     required this.showMiniLyrics,
     required this.allowMixWithOthers,
     required this.bluetoothLyricEnabled,
@@ -175,7 +176,7 @@ class AppSettings {
   final List<MusicSource> discoverySourceOrder;
   final OnlinePlaybackQuality onlinePlaybackQuality;
   final OnlinePlaybackQuality batchDownloadQuality;
-  final int crossfadeSeconds;
+  final int crossfadeMilliseconds;
   final bool showMiniLyrics;
 
   /// Whether playback should avoid taking exclusive audio focus so other apps
@@ -215,7 +216,7 @@ class AppSettings {
     List<MusicSource>? discoverySourceOrder,
     OnlinePlaybackQuality? onlinePlaybackQuality,
     OnlinePlaybackQuality? batchDownloadQuality,
-    int? crossfadeSeconds,
+    int? crossfadeMilliseconds,
     bool? showMiniLyrics,
     bool? allowMixWithOthers,
     bool? bluetoothLyricEnabled,
@@ -261,7 +262,7 @@ class AppSettings {
     discoverySourceOrder: discoverySourceOrder ?? this.discoverySourceOrder,
     onlinePlaybackQuality: onlinePlaybackQuality ?? this.onlinePlaybackQuality,
     batchDownloadQuality: batchDownloadQuality ?? this.batchDownloadQuality,
-    crossfadeSeconds: crossfadeSeconds ?? this.crossfadeSeconds,
+    crossfadeMilliseconds: crossfadeMilliseconds ?? this.crossfadeMilliseconds,
     showMiniLyrics: showMiniLyrics ?? this.showMiniLyrics,
     allowMixWithOthers: allowMixWithOthers ?? this.allowMixWithOthers,
     bluetoothLyricEnabled: bluetoothLyricEnabled ?? this.bluetoothLyricEnabled,
@@ -338,9 +339,9 @@ class SettingsNotifier extends Notifier<AppSettings> {
                 lyricSize /
                 kLyricFontSizeDefault,
           );
-    final fade = _prefs.get(_kCrossfadeSecondsKey);
+
     return AppSettings(
-      crossfadeSeconds: fade is int ? fade.clamp(0, kMaxCrossfadeSeconds) : 0,
+      crossfadeMilliseconds: _readCrossfadeMilliseconds(),
       downloadDir: downloadDir,
       localMusicDir: _prefs.getString(_kLocalMusicDirKey) ?? downloadDir,
       useBuiltInSourceFilePicker:
@@ -611,7 +612,7 @@ class SettingsNotifier extends Notifier<AppSettings> {
     'bluetoothFullLyricEnabled': state.bluetoothFullLyricEnabled,
     'onlinePlaybackQuality': state.onlinePlaybackQuality.code,
     'batchDownloadQuality': state.batchDownloadQuality.code,
-    'crossfadeSeconds': state.crossfadeSeconds,
+    'crossfadeMilliseconds': state.crossfadeMilliseconds,
     'enabledSearchSources': [
       for (final source in kManageableSearchSources)
         if (state.enabledSearchSources.contains(source)) source.code,
@@ -664,8 +665,8 @@ class SettingsNotifier extends Notifier<AppSettings> {
     if (json.containsKey('onlinePlaybackQuality')) {
       await setOnlinePlaybackQuality(OnlinePlaybackQuality.fromCode(json['onlinePlaybackQuality'] as String));
     }
-    if (json.containsKey('crossfadeSeconds')) {
-      await setCrossfadeSeconds(json['crossfadeSeconds'] as int);
+    if (json.containsKey('crossfadeMilliseconds')) {
+      await setCrossfadeMilliseconds(json['crossfadeMilliseconds'] as int);
     }
     if (json.containsKey('batchDownloadQuality')) {
       await setBatchDownloadQuality(OnlinePlaybackQuality.fromCode(json['batchDownloadQuality'] as String));
@@ -921,11 +922,25 @@ class SettingsNotifier extends Notifier<AppSettings> {
     state = state.copyWith(onlinePlaybackQuality: quality);
   }
 
-  Future<void> setCrossfadeSeconds(int seconds) async {
-    final value = seconds.clamp(0, kMaxCrossfadeSeconds);
-    if (value == state.crossfadeSeconds) return;
-    state = state.copyWith(crossfadeSeconds: value);
-    await _prefs.setInt(_kCrossfadeSecondsKey, value);
+  int _readCrossfadeMilliseconds() {
+    final milliseconds = _prefs.get(_kCrossfadeMillisecondsKey);
+    if (milliseconds is int) {
+      return milliseconds.clamp(0, kMaxCrossfadeMilliseconds);
+    }
+    final legacy = _prefs.get(_kLegacyCrossfadeSecondsKey);
+    if (legacy is! int) return 0;
+    final seconds = legacy.clamp(
+      0,
+      kMaxCrossfadeMilliseconds ~/ Duration.millisecondsPerSecond,
+    );
+    return Duration(seconds: seconds).inMilliseconds;
+  }
+
+  Future<void> setCrossfadeMilliseconds(int milliseconds) async {
+    final value = milliseconds.clamp(0, kMaxCrossfadeMilliseconds);
+    if (value == state.crossfadeMilliseconds) return;
+    state = state.copyWith(crossfadeMilliseconds: value);
+    await _prefs.setInt(_kCrossfadeMillisecondsKey, value);
   }
 
   Future<void> setBatchDownloadQuality(OnlinePlaybackQuality quality) async {

@@ -442,7 +442,7 @@ class LocalPlaylistNotifier extends Notifier<List<LocalPlaylist>> {
 
   /// Validate once, then rebase if local edits happen during the durable write.
   /// Never publish a candidate built from an older local state snapshot.
-  Future<int> importBackup(String text) async {
+  Future<int> importBackup(String text, {Future<void> Function()? beforeWrite}) async {
     final incoming = decodePlaylistBackup(text);
     var mustWrite = false;
     while (true) {
@@ -488,6 +488,13 @@ class LocalPlaylistNotifier extends Notifier<List<LocalPlaylist>> {
             ...?local.movedOutTrackProviders,
           },
         );
+      }
+      // A complete manual backup can also restore sources. Check all playlist
+      // identities first, and only persist once that section has succeeded.
+      if (beforeWrite != null) {
+        await beforeWrite();
+        beforeWrite = null;
+        if (!identical(state, snapshot)) continue;
       }
       final rows = [for (final playlist in next) jsonEncode(playlist.toJson())];
       final currentRows = [for (final playlist in snapshot) jsonEncode(playlist.toJson())];
