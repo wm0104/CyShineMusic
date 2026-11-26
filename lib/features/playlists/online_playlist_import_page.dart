@@ -974,7 +974,7 @@ class _OnlineTrackTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final task = ref.watch(
       downloadProgressProvider.select(
-        (value) => value.latestTaskForMusic(music.id),
+        (value) => value.latestTaskForMusic(music),
       ),
     );
     return SearchResultTile(

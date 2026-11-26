@@ -58,9 +58,9 @@ class KwLyricx {
 
     final transLines = <String>[];
     for (final line in sorted.trans) {
-      final plain = _stripWordTimes(line.text);
-      if (plain.trim().isNotEmpty) {
-        transLines.add('[${line.time}]$plain');
+      if (_stripWordTimes(line.text).trim().isNotEmpty) {
+        final normalized = _normalizeWordLine(line.text, clock);
+        transLines.add('[${line.time}]${normalized.text}');
       }
     }
 

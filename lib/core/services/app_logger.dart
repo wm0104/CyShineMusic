@@ -205,11 +205,6 @@ class AppLogger {
     } catch (_) {}
   }
 
-  static Future<File?> currentLogFile() async {
-    await _ensureInit();
-    return _file;
-  }
-
   static Future<void> flush() async {
     await _ensureInit();
     await _sink?.flush();

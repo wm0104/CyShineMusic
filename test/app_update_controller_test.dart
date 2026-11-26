@@ -115,7 +115,7 @@ void main() {
 
   test('invalid official version is a failure rather than newest', () async {
     service.latest = AppRelease(version: Version(2, 0, 9), tagName: 'invalid',
-      pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic-iOS/releases'), title: 'invalid');
+      pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic/releases'), title: 'invalid');
     final c = controller('2.0.9');
     expect(await c.check(), UpdateCheckResult.failed);
     expect(c.release, isNull);
@@ -144,8 +144,8 @@ void main() {
 AppRelease _release(String version, {int? build, String? digest}) => AppRelease(
   version: Version.parse(version), tagName: 'ios-v$version', title: version,
   manifestVersion: version, buildNumber: build, ipaSha256: digest,
-  pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic-iOS/releases/tag/ios-v$version'),
-  ipaUri: Uri.parse('https://github.com/wm0104/CyShineMusic-iOS/releases/download/ios-v$version/CyShineMusic-unsigned.ipa'),
+  pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic/releases/tag/ios-v$version'),
+  ipaUri: Uri.parse('https://github.com/wm0104/CyShineMusic/releases/download/ios-v$version/CyShineMusic-unsigned.ipa'),
   notes: '完善在线更新体验。',
 );
 class _Service implements AppUpdateService {

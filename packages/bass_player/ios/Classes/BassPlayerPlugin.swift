@@ -3,13 +3,12 @@
 // 与 Android 端 packages/bass_player/android/.../BassPlayerPlugin.kt 保持完全相同的
 // 对外契约：
 //   MethodChannel  com.cyshine.music/bass_player/methods
-//     initialize / load / play / pause / stop / seek / setVolume / setEqualizer / dispose
+//     initialize / load / prepareCrossfade / startCrossfade / cancelCrossfade
+//     play / pause / stop / seek / setVolume / setEqualizer / dispose
 //   EventChannel   com.cyshine.music/bass_player/events
 //     {event:"snapshot"|"error", playing, processingState, positionMs,
 //      bufferedPositionMs, durationMs, [errorCode, bassCode, errorMessage, operation]}
 //   错误码格式 BASS_<int>（dart 侧 BassPlayerException 用正则 ^BASS_(-?\d+)$ 解析）
-//
-// 因为契约一致，lib/ 与 packages/bass_player/lib/bass_player.dart 都不需要改动。
 
 import Flutter
 import Foundation
@@ -50,15 +49,24 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
 
   // MARK: - 内部状态
 
-  /// 所有 BASS 调用都在这条串行队列上执行，等价于 Android 端的 engineThread。
+  /// Playback state is owned by engineQueue. Only opening a standby stream runs elsewhere.
   private let engineQueue = DispatchQueue(label: "com.cyshine.music.bass.engine")
 
   private let sinkLock = NSLock()
   private var eventSink: FlutterEventSink?
 
   private var initialized = false
-  private var stream: HSTREAM = 0
-  private var remoteSource = false
+  private var active: Output?
+  private var stream: HSTREAM { active?.handle ?? 0 }
+  private var remoteSource: Bool { active?.remote ?? false }
+
+  private let preloadQueue = DispatchQueue(label: "com.cyshine.music.bass.preload")
+  private var preparation: Preparation?
+  private var outgoing: Output?
+  private var fadeToken: Int?
+  private var fadeDurationMs = 0
+  private var fadeTickMs: Int { min(20, max(1, fadeDurationMs / 8)) }
+  private var fadeTimer: DispatchSourceTimer?
   private var playing = false
   private var completed = false
   private var processingState: PlaybackState = .idle
@@ -71,13 +79,92 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
   /// 用于取消进行中的 load（Android 端用 AtomicInteger 生成号做同一件事）。
   private var loadGeneration = 0
 
-  private var endSync: HSYNC = 0
-  private var stallSync: HSYNC = 0
-  private var downloadSync: HSYNC = 0
-  private var deviceFailureSync: HSYNC = 0
+  private final class Filters {
+    let chain: OpaquePointer
+    let channels: UInt32
 
-  private var eqChain: OpaquePointer?
-  private var eqDsp: HDSP = 0
+    init?(for handle: HSTREAM) {
+      var info = BASS_CHANNELINFO()
+      let known = BASS_ChannelGetInfo(handle, &info) != 0
+      let rate = known && info.freq > 0 ? Double(info.freq) : 44_100
+      guard let chain = cyshine_biquad_chain_create(rate) else { return nil }
+      self.chain = chain
+      channels = known ? max(info.chans, 1) : 2
+    }
+
+    deinit { cyshine_biquad_chain_destroy(chain) }
+  }
+
+  /// Each decoder owns its callbacks and filter history, including during overlap.
+  private final class Output {
+    let handle: HSTREAM
+    let remote: Bool
+    var endSync: HSYNC = 0
+    var stallSync: HSYNC = 0
+    var downloadSync: HSYNC = 0
+    var deviceFailureSync: HSYNC = 0
+    var filters: Filters?
+    var eqDsp: HDSP = 0
+
+    init(handle: HSTREAM, remote: Bool) {
+      self.handle = handle
+      self.remote = remote
+    }
+
+    func detachEqualizer() {
+      if eqDsp != 0 { _ = BASS_ChannelRemoveDSP(handle, eqDsp) }
+      eqDsp = 0
+      filters = nil
+    }
+
+    deinit {
+      detachEqualizer()
+      for sync in [endSync, stallSync, downloadSync, deviceFailureSync] where sync != 0 {
+        _ = BASS_ChannelRemoveSync(handle, sync)
+      }
+      _ = BASS_StreamFree(handle)
+    }
+  }
+
+  /// The worker may finish after cancellation. Transfer ownership under the lock
+  /// so a decoder is always freed before BASS_Free, even during engine teardown.
+  private final class Preparation {
+    let token: Int
+    private let lock = NSLock()
+    private var cancelled = false
+    private var output: Output?
+
+    init(token: Int) { self.token = token }
+
+    var isCancelled: Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return cancelled
+    }
+
+    func store(_ opened: Output) {
+      lock.lock()
+      defer { lock.unlock() }
+      if !cancelled { output = opened }
+    }
+
+    func take() -> Output? {
+      lock.lock()
+      defer { lock.unlock() }
+      let opened = output
+      output = nil
+      return opened
+    }
+
+    func cancel() {
+      lock.lock()
+      cancelled = true
+      output = nil
+      lock.unlock()
+      _ = BASS_StreamCancel(Unmanaged.passUnretained(self).toOpaque())
+    }
+  }
+
   private var currentEq: [String: Any]?
 
   private var tickTimer: DispatchSourceTimer?
@@ -101,7 +188,7 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
         }
       }
 
-    case "load":
+    case "load", "prepareCrossfade":
       guard let args = call.arguments as? [String: Any],
             let uri = args["uri"] as? String, !uri.isEmpty else {
         result(FlutterError(code: "BASS_ARGUMENT", message: "uri is required", details: nil))
@@ -112,16 +199,47 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
         for (key, value) in raw { headers[key] = String(describing: value) }
       }
       let formatHint = args["formatHint"] as? String
+      let requestHeaders = headers
+      if call.method == "prepareCrossfade" {
+        guard let token = args["token"] as? Int else {
+          result(["prepared": false])
+          return
+        }
+        engineQueue.async {
+          self.prepareCrossfade(uri, headers: requestHeaders, formatHint: formatHint,
+                                token: token, result: result)
+        }
+        return
+      }
       engineQueue.async {
         self.loadGeneration += 1
         let generation = self.loadGeneration
         do {
-          let value = try self.load(uri, headers: headers, formatHint: formatHint,
+          let value = try self.load(uri, headers: requestHeaders, formatHint: formatHint,
                                     generation: generation)
           DispatchQueue.main.async { result(value) }
         } catch {
           DispatchQueue.main.async { result(BassPlayerPlugin.flutterError(error)) }
         }
+      }
+
+    case "startCrossfade":
+      let args = call.arguments as? [String: Any]
+      let token = args?["token"] as? Int
+      let duration = args?["durationMs"] as? Int ?? 0
+      engineQueue.async {
+        let value = self.startCrossfade(token: token, duration: duration)
+        DispatchQueue.main.async { result(value) }
+      }
+
+    case "cancelCrossfade":
+      let token = (call.arguments as? [String: Any])?["token"] as? Int
+      engineQueue.async {
+        if let token {
+          if self.preparation?.token == token { self.cancelPreparation() }
+          if self.fadeToken == token { self.finishFade() }
+        }
+        DispatchQueue.main.async { result([String: Any]()) }
       }
 
     case "play":
@@ -315,55 +433,22 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
     processingState = .loading
     emitSnapshot()
 
-    let flags = UInt32(BASS_SAMPLE_FLOAT)
-    // 用 `?? ""` 归一成非可选再 switch：避免依赖 Swift 对 Optional 的模式匹配推断。
-    let scheme = URL(string: source)?.scheme?.lowercased() ?? ""
-    let format = BassPlayerPlugin.normalizedFormat(formatHint, source: source)
-    let isRemote = ["http", "https", "ftp"].contains(scheme)
-
-    var handle: HSTREAM = 0
     do {
-      switch scheme {
-      case "http", "https", "ftp":
-        handle = createNetworkStream(format: format,
-                                     request: BassPlayerPlugin.urlWithHeaders(source, headers),
-                                     flags: flags)
-      case "file":
-        let path = URL(string: source)?.path ?? source
-        handle = createFileStream(format: format, path: path, flags: flags)
-      case "":
-        // 没有 scheme 说明传进来的就是本地文件路径。
-        handle = createFileStream(format: format, path: source, flags: flags)
-      default:
-        throw BassError(code: Int32(BASS_ERROR_FILEOPEN), operation: "load",
-                        message: "不支持的 URI scheme: \(scheme)")
-      }
+      active = try openOutput(source, headers: headers, formatHint: formatHint)
     } catch {
       processingState = .error
       emitSnapshot()
       throw error
     }
 
-    if generation != loadGeneration {
-      if handle != 0 { _ = BASS_StreamFree(handle) }
-      throw BassError(code: BassPlayerPlugin.cancelledCode, operation: "load",
-                      message: "load cancelled")
-    }
-    if handle == 0 {
-      processingState = .error
-      emitSnapshot()
-      throw BassError.fromLastError(operation: "load stream")
-    }
-
-    stream = handle
-    remoteSource = isRemote
-
     do {
       if BASS_ChannelSetAttribute(stream, UInt32(BASS_ATTRIB_VOL), channelVolume) == 0 {
         throw BassError.fromLastError(operation: "set volume")
       }
-      try installSynchronizers()
-      try applyEqualizer(currentEq, forceRebuild: true)
+      if let active {
+        try installSynchronizers(for: active)
+        try applyEqualizer(currentEq, to: active)
+      }
       durationMs = readDurationMs()
       processingState = .ready
       refreshPlaybackState()
@@ -375,6 +460,118 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
 
     emitSnapshot()
     return snapshot()
+  }
+
+  private func openOutput(_ source: String, headers: [String: String],
+                          formatHint: String?, request: Preparation? = nil) throws -> Output {
+    let scheme = URL(string: source)?.scheme?.lowercased() ?? ""
+    let format = BassPlayerPlugin.normalizedFormat(formatHint, source: source)
+    let flags = UInt32(BASS_SAMPLE_FLOAT)
+    let handle: HSTREAM
+    let remote: Bool
+    switch scheme {
+    case "http", "https", "ftp":
+      remote = true
+      handle = createNetworkStream(format: format,
+                                   request: BassPlayerPlugin.urlWithHeaders(source, headers),
+                                   flags: flags, preparation: request)
+    case "", "file":
+      remote = false
+      let path = scheme == "file" ? URL(string: source)?.path ?? source : source
+      handle = createFileStream(format: format, path: path, flags: flags)
+    default:
+      throw BassError(code: Int32(BASS_ERROR_FILEOPEN), operation: "load",
+                      message: "不支持的 URI scheme: \(scheme)")
+    }
+    if handle == 0 { throw BassError.fromLastError(operation: "load stream") }
+    return Output(handle: handle, remote: remote)
+  }
+
+  private func prepareCrossfade(_ source: String, headers: [String: String],
+                                formatHint: String?, token: Int, result: @escaping FlutterResult) {
+    cancelPreparation()
+    guard let active, initialized else {
+      DispatchQueue.main.async { result(["prepared": false]) }
+      return
+    }
+    let request = Preparation(token: token)
+    preparation = request
+    let device = BASS_ChannelGetDevice(active.handle)
+    preloadQueue.async {
+      var prepared = false
+      if !request.isCancelled, BASS_SetDevice(device) != 0,
+         let output = try? self.openOutput(source, headers: headers, formatHint: formatHint,
+                                          request: request) {
+        request.store(output)
+        prepared = true
+      }
+      let opened = prepared
+      self.engineQueue.async {
+        let valid = opened && self.preparation === request
+        DispatchQueue.main.async { result(["prepared": valid]) }
+      }
+    }
+  }
+
+  private func cancelPreparation() {
+    preparation?.cancel()
+    preparation = nil
+  }
+
+  private func startCrossfade(token: Int?, duration: Int) -> [String: Any?] {
+    guard let token, let request = preparation, request.token == token, duration > 0,
+          let previous = active, !completed,
+          BASS_ChannelIsActive(previous.handle) == UInt32(BASS_ACTIVE_PLAYING),
+          let next = request.take() else { return ["started": false] }
+    preparation = nil
+    do {
+      try installSynchronizers(for: next)
+      try applyEqualizer(currentEq, to: next)
+    } catch {
+      return ["started": false]
+    }
+    guard BASS_ChannelSetAttribute(next.handle, UInt32(BASS_ATTRIB_VOL), 0) != 0,
+          BASS_ChannelPlay(next.handle, 0) != 0 else { return ["started": false] }
+
+    finishFade()
+    outgoing = previous
+    active = next
+    fadeToken = token
+    fadeDurationMs = duration
+    durationMs = readDurationMs()
+    processingState = .ready
+    refreshPlaybackState()
+    let timer = DispatchSource.makeTimerSource(queue: engineQueue)
+    timer.schedule(deadline: .now(), repeating: .milliseconds(fadeTickMs))
+    timer.setEventHandler { [weak self] in self?.updateFade() }
+    fadeTimer = timer
+    timer.resume()
+    var value = snapshot()
+    value["started"] = true
+    return value
+  }
+
+  private func updateFade() {
+    guard let outgoing else { return }
+    // The incoming playback clock freezes on pause and while it is buffering.
+    let progress = min(1, Double(readPositionMs()) / Double(fadeDurationMs))
+    if progress >= 1 || BASS_ChannelIsActive(outgoing.handle) == UInt32(BASS_ACTIVE_STOPPED) {
+      finishFade()
+      return
+    }
+    let angle = progress * .pi / 2
+    _ = BASS_ChannelSetAttribute(stream, UInt32(BASS_ATTRIB_VOL), channelVolume * Float(sin(angle)))
+    _ = BASS_ChannelSetAttribute(outgoing.handle, UInt32(BASS_ATTRIB_VOL),
+                                 channelVolume * Float(cos(angle)))
+  }
+
+  private func finishFade() {
+    fadeTimer?.cancel()
+    fadeTimer = nil
+    guard outgoing != nil else { return }
+    outgoing = nil
+    fadeToken = nil
+    _ = BASS_ChannelSetAttribute(stream, UInt32(BASS_ATTRIB_VOL), channelVolume)
   }
 
   private func play() throws -> [String: Any?] {
@@ -392,6 +589,11 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
     if BASS_ChannelPlay(stream, 0) == 0 {
       throw BassError.fromLastError(operation: "play")
     }
+    if let outgoing,
+       BASS_ChannelIsActive(outgoing.handle) == UInt32(BASS_ACTIVE_PAUSED) {
+      _ = BASS_ChannelPlay(outgoing.handle, 0)
+    }
+    fadeTimer?.schedule(deadline: .now(), repeating: .milliseconds(fadeTickMs))
     refreshPlaybackState()
     emitSnapshot()
     return snapshot()
@@ -402,12 +604,16 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
     if BASS_ChannelPause(stream) == 0 {
       throw BassError.fromLastError(operation: "pause")
     }
+    if let outgoing { _ = BASS_ChannelPause(outgoing.handle) }
+    fadeTimer?.schedule(deadline: .distantFuture)
     refreshPlaybackState()
     emitSnapshot()
     return snapshot()
   }
 
   private func stop() throws -> [String: Any?] {
+    cancelPreparation()
+    finishFade()
     if stream == 0 { return snapshot() }
     if BASS_ChannelStop(stream) == 0 {
       throw BassError.fromLastError(operation: "stop")
@@ -423,6 +629,8 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
   }
 
   private func seek(_ positionMs: Int) throws -> [String: Any?] {
+    cancelPreparation()
+    finishFade()
     if stream == 0 { return snapshot() }
     let seconds = max(0.0, Double(positionMs) / 1000.0)
     let position = BASS_ChannelSeconds2Bytes(stream, seconds)
@@ -441,7 +649,9 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
 
   private func setVolume(_ volume: Float) throws -> [String: Any?] {
     channelVolume = min(max(volume, 0), 1)
-    if stream != 0 {
+    if outgoing != nil {
+      updateFade()
+    } else if stream != 0 {
       if BASS_ChannelSetAttribute(stream, UInt32(BASS_ATTRIB_VOL), channelVolume) == 0 {
         throw BassError.fromLastError(operation: "set volume")
       }
@@ -453,16 +663,15 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
 
   private func setEqualizer(_ configuration: [String: Any]) throws -> [String: Any?] {
     currentEq = configuration
-    try applyEqualizer(configuration, forceRebuild: false)
+    if let active { try applyEqualizer(configuration, to: active) }
+    if let outgoing { try applyEqualizer(configuration, to: outgoing) }
     return snapshot()
   }
 
-  private func applyEqualizer(_ configuration: [String: Any]?, forceRebuild: Bool) throws {
-    guard stream != 0 else { return }
-
+  private func applyEqualizer(_ configuration: [String: Any]?, to output: Output) throws {
     let enabled = configuration?["enabled"] as? Bool ?? false
     if !enabled {
-      detachEqualizer()
+      output.detachEqualizer()
       return
     }
 
@@ -474,36 +683,33 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
       .prefix(Int(CYSHINE_MAX_BIQUAD_BANDS))
 
     if bands.isEmpty && abs(inputGainDb) < 0.001 && abs(outputGainDb) < 0.001 {
-      detachEqualizer()
+      output.detachEqualizer()
       return
     }
 
-    if eqChain == nil || forceRebuild {
-      detachEqualizer()
-      guard let chain = cyshine_biquad_chain_create(sampleRate()) else {
+    if output.filters == nil {
+      guard let filters = Filters(for: output.handle) else {
         throw BassError(code: -1, operation: "setEqualizer",
                         message: "无法创建均衡器处理链")
       }
-      eqChain = chain
-      eqDsp = BASS_ChannelSetDSP(
-        stream,
-        { (_, channel, buffer, length, user) in
+      output.filters = filters
+      output.eqDsp = BASS_ChannelSetDSP(
+        output.handle,
+        { (_, _, buffer, length, user) in
           guard let user, let buffer else { return }
-          let plugin = Unmanaged<BassPlayerPlugin>.fromOpaque(user).takeUnretainedValue()
-          plugin.processDsp(channel: channel,
-                            buffer: buffer.assumingMemoryBound(to: Float.self),
-                            length: length)
+          let owner = Unmanaged<Filters>.fromOpaque(user).takeUnretainedValue()
+          let frames = length / (UInt32(MemoryLayout<Float>.size) * owner.channels)
+          cyshine_biquad_chain_process(owner.chain, buffer.assumingMemoryBound(to: Float.self),
+                                       UInt(frames), owner.channels)
         },
-        Unmanaged.passUnretained(self).toOpaque(),
-        0)
-      if eqDsp == 0 {
-        cyshine_biquad_chain_destroy(eqChain)
-        eqChain = nil
+        Unmanaged.passUnretained(filters).toOpaque(), 0)
+      if output.eqDsp == 0 {
+        output.detachEqualizer()
         throw BassError.fromLastError(operation: "setEqualizer")
       }
     }
 
-    guard let chain = eqChain else { return }
+    guard let chain = output.filters?.chain else { return }
 
     var cBands = bands.map { band -> CyShineBiquadBand in
       CyShineBiquadBand(type: Int32(band.filterType.rawValue),
@@ -515,82 +721,50 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
     cyshine_biquad_chain_configure(chain, inputGainDb, outputGainDb, &cBands, Int32(cBands.count))
   }
 
-  private func detachEqualizer() {
-    if eqDsp != 0 && stream != 0 {
-      _ = BASS_ChannelRemoveDSP(stream, eqDsp)
-    }
-    eqDsp = 0
-    if let chain = eqChain {
-      cyshine_biquad_chain_destroy(chain)
-      eqChain = nil
-    }
-  }
-
   private func resetEqualizerState() {
-    guard let chain = eqChain else { return }
+    guard let chain = active?.filters?.chain else { return }
     cyshine_biquad_chain_reset(chain)
-  }
-
-  /// DSP 在 BASS 的混音线程上执行，这里只做纯计算。
-  fileprivate func processDsp(channel: HSTREAM, buffer: UnsafeMutablePointer<Float>, length: UInt32) {
-    guard let chain = eqChain else { return }
-    let channels = max(streamChannels, 1)
-    let frameBytes = UInt32(MemoryLayout<Float>.size) * channels
-    guard frameBytes > 0 else { return }
-    let frames = length / frameBytes
-    if frames == 0 { return }
-    cyshine_biquad_chain_process(chain, buffer, UInt(frames), channels)
-  }
-
-  /// 交错声道数在 load 时由 BASS_ChannelGetInfo 缓存，避免在音频线程回调 BASS。
-  private var streamChannels: UInt32 = 2
-
-  private func sampleRate() -> Double {
-    guard stream != 0 else { return 44_100 }
-    var info = BASS_CHANNELINFO()
-    if BASS_ChannelGetInfo(stream, &info) != 0 {
-      if info.freq > 0 { streamChannels = max(info.chans, 1) }
-      if info.freq > 0 { return Double(info.freq) }
-    }
-    return 44_100
   }
 
   // MARK: - 流创建
 
   private func createNetworkStream(format: String, request: String,
-                                   flags: UInt32) -> HSTREAM {
+                                   flags: UInt32, preparation: Preparation?) -> HSTREAM {
+    let user = preparation.map { Unmanaged.passUnretained($0).toOpaque() }
     func core() -> HSTREAM {
-      request.withCString { BASS_StreamCreateURL($0, 0, flags, nil, nil) }
+      guard preparation?.isCancelled != true else { return 0 }
+      return request.withCString { BASS_StreamCreateURL($0, 0, flags, nil, user) }
     }
     func specialized(_ make: (UnsafePointer<CChar>) -> HSTREAM) -> HSTREAM {
+      guard preparation?.isCancelled != true else { return 0 }
       let handle = request.withCString { make($0) }
       return handle != 0 ? handle : core()
     }
 
     switch format {
     case "flac":
-      return specialized { BASS_FLAC_StreamCreateURL($0, 0, flags, nil, nil) }
+      return specialized { BASS_FLAC_StreamCreateURL($0, 0, flags, nil, user) }
     case "ape":
-      return specialized { BASS_APE_StreamCreateURL($0, 0, flags, nil, nil) }
+      return specialized { BASS_APE_StreamCreateURL($0, 0, flags, nil, user) }
     case "wv":
-      return specialized { BASS_WV_StreamCreateURL($0, 0, flags, nil, nil) }
+      return specialized { BASS_WV_StreamCreateURL($0, 0, flags, nil, user) }
     case "opus":
-      return specialized { BASS_OPUS_StreamCreateURL($0, 0, flags, nil, nil) }
+      return specialized { BASS_OPUS_StreamCreateURL($0, 0, flags, nil, user) }
     case "dsd":
       // BASS_DSD_* 比其它附加库多一个 freq 参数（0 = 保持源采样率）。
-      return specialized { BASS_DSD_StreamCreateURL($0, 0, flags, nil, nil, 0) }
+      return specialized { BASS_DSD_StreamCreateURL($0, 0, flags, nil, user, 0) }
     case "m4a", "alac":
       // Apple 平台 BASS 核心直接走 CoreAudio 解 ALAC/AAC。
       return core()
     case "lossless":
       let generic = core()
       if generic != 0 { return generic }
-      return specialized { BASS_FLAC_StreamCreateURL($0, 0, flags, nil, nil) }
+      return specialized { BASS_FLAC_StreamCreateURL($0, 0, flags, nil, user) }
     default:
       // generic / null / 未知：先试核心，核心不认再按 FLAC 猜一次。
       let generic = core()
       if generic != 0 { return generic }
-      return specialized { BASS_FLAC_StreamCreateURL($0, 0, flags, nil, nil) }
+      return specialized { BASS_FLAC_StreamCreateURL($0, 0, flags, nil, user) }
     }
   }
 
@@ -622,39 +796,40 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
 
   // MARK: - 同步点
 
-  private func installSynchronizers() throws {
+  private func installSynchronizers(for output: Output) throws {
     let user = Unmanaged.passUnretained(self).toOpaque()
 
-    endSync = BASS_ChannelSetSync(
-      stream, UInt32(BASS_SYNC_END), 0,
+    output.endSync = BASS_ChannelSetSync(
+      output.handle, UInt32(BASS_SYNC_END), 0,
       { handle, channel, _, user in
         guard let user else { return }
         let plugin = Unmanaged<BassPlayerPlugin>.fromOpaque(user).takeUnretainedValue()
         plugin.engineQueue.async {
-          guard channel == plugin.stream, handle == plugin.endSync else { return }
+          guard channel == plugin.stream, handle == plugin.active?.endSync else { return }
           plugin.handleStreamEnded()
         }
       }, user)
 
-    stallSync = BASS_ChannelSetSync(
-      stream, UInt32(BASS_SYNC_STALL), 0,
+    output.stallSync = BASS_ChannelSetSync(
+      output.handle, UInt32(BASS_SYNC_STALL), 0,
       { handle, channel, _, user in
         guard let user else { return }
         let plugin = Unmanaged<BassPlayerPlugin>.fromOpaque(user).takeUnretainedValue()
         plugin.engineQueue.async {
-          guard channel == plugin.stream, handle == plugin.stallSync else { return }
+          guard channel == plugin.stream, handle == plugin.active?.stallSync else { return }
           plugin.refreshPlaybackState()
           plugin.emitSnapshot()
         }
       }, user)
 
-    deviceFailureSync = BASS_ChannelSetSync(
-      stream, UInt32(BASS_SYNC_DEV_FAIL), 0,
+    output.deviceFailureSync = BASS_ChannelSetSync(
+      output.handle, UInt32(BASS_SYNC_DEV_FAIL), 0,
       { handle, channel, _, user in
         guard let user else { return }
         let plugin = Unmanaged<BassPlayerPlugin>.fromOpaque(user).takeUnretainedValue()
         plugin.engineQueue.async {
-          guard channel == plugin.stream, handle == plugin.deviceFailureSync else { return }
+          guard channel == plugin.stream, handle == plugin.active?.deviceFailureSync else { return }
+          plugin.finishFade()
           plugin.processingState = .error
           plugin.playing = false
           plugin.emitSnapshot()
@@ -664,19 +839,19 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
         }
       }, user)
 
-    if endSync == 0 || stallSync == 0 || deviceFailureSync == 0 {
+    if output.endSync == 0 || output.stallSync == 0 || output.deviceFailureSync == 0 {
       throw BassError.fromLastError(operation: "install playback synchronizers")
     }
 
     // 下载进度同步点只对网络流有意义，失败不算错误。
-    if remoteSource {
-      downloadSync = BASS_ChannelSetSync(
-        stream, UInt32(BASS_SYNC_DOWNLOAD), 0,
+    if output.remote {
+      output.downloadSync = BASS_ChannelSetSync(
+        output.handle, UInt32(BASS_SYNC_DOWNLOAD), 0,
         { handle, channel, _, user in
           guard let user else { return }
           let plugin = Unmanaged<BassPlayerPlugin>.fromOpaque(user).takeUnretainedValue()
           plugin.engineQueue.async {
-            guard channel == plugin.stream, handle == plugin.downloadSync else { return }
+            guard channel == plugin.stream, handle == plugin.active?.downloadSync else { return }
             plugin.emitSnapshot()
           }
         }, user)
@@ -684,6 +859,7 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
   }
 
   private func handleStreamEnded() {
+    finishFade()
     processingState = .completed
     playing = false
     completed = true
@@ -824,25 +1000,15 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
 
   private func releaseStream() {
     stopTicking()
-    detachEqualizer()
-    if stream != 0 {
-      if endSync != 0 { _ = BASS_ChannelRemoveSync(stream, endSync) }
-      if stallSync != 0 { _ = BASS_ChannelRemoveSync(stream, stallSync) }
-      if downloadSync != 0 { _ = BASS_ChannelRemoveSync(stream, downloadSync) }
-      if deviceFailureSync != 0 { _ = BASS_ChannelRemoveSync(stream, deviceFailureSync) }
-      _ = BASS_StreamFree(stream)
-    }
-    endSync = 0
-    stallSync = 0
-    downloadSync = 0
-    deviceFailureSync = 0
-    stream = 0
-    remoteSource = false
+    cancelPreparation()
+    finishFade()
+    active = nil
   }
 
   private func disposeEngine() {
     releaseStream()
-    detachEqualizer()
+    // A cancelled URL decoder can still be returning on the worker.
+    preloadQueue.sync {}
     if initialized {
       _ = BASS_Free()
     }
@@ -854,9 +1020,7 @@ public final class BassPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandl
   }
 
   deinit {
-    stopTicking()
     releaseStream()
-    detachEqualizer()
   }
 
   // MARK: - 工具

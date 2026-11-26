@@ -38,6 +38,7 @@ class LiveActivityService {
   bool _available = false;
   bool _checking = false;
   bool _subscriptionsReady = false;
+  bool _openPlayerRequested = false;
   String? _lastSignature;
   int _revision = 0;
   PlayerState _playerState = const PlayerState();
@@ -115,10 +116,21 @@ class LiveActivityService {
             });
         return true;
       case 'openPlayer':
-        await onOpenPlayer?.call();
+        await _requestOpenPlayer();
         return true;
     }
     throw MissingPluginException('未知的 Widget 同步方法: ${call.method}');
+  }
+
+  bool takeOpenPlayerRequest() {
+    final requested = _openPlayerRequested;
+    _openPlayerRequested = false;
+    return requested;
+  }
+
+  Future<void> _requestOpenPlayer() async {
+    _openPlayerRequested = true;
+    await onOpenPlayer?.call();
   }
 
   Future<void> _control(String action) async {
@@ -126,7 +138,7 @@ class LiveActivityService {
     final player = _ref.read(playerControllerProvider.notifier);
     await player.waitForSessionRestore();
     if (!_ref.read(playerControllerProvider).hasTrack) {
-      await onOpenPlayer?.call();
+      await _requestOpenPlayer();
       return;
     }
     switch (action) {

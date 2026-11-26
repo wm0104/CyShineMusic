@@ -41,7 +41,7 @@ class AppRelease {
 
   String get comparisonVersion => manifestVersion ?? tagName;
   String get versionLabel => OfficialAppVersion.tryParse(comparisonVersion)?.core ?? version.toString();
-  String get displayVersion => buildNumber == null ? versionLabel : '$versionLabel ($buildNumber)';
+  String get displayVersion => versionLabel;
 }
 
 class AppUpdateService {
@@ -166,7 +166,7 @@ bool _isGithubReleaseUri(Uri? uri, String repository) {
   return uri.path.startsWith('/$repository/releases/');
 }
 
-const iosUpdateRepository = 'wm0104/CyShineMusic-iOS';
+const iosUpdateRepository = 'wm0104/CyShineMusic';
 const iosUpdateIpaName = 'CyShineMusic-unsigned.ipa';
 const iosUpdateManifestUrl = 'https://github.com/$iosUpdateRepository/releases/latest/download/ios-update.json';
 

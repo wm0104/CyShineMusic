@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cy_shine_music/core/app_info.dart';
 import 'package:cy_shine_music/core/services/app_update_service.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
+import 'package:cy_shine_music/features/settings/widgets/settings_action.dart';
 import 'package:cy_shine_music/features/update/app_update_controller.dart';
 import 'package:cy_shine_music/features/update/app_update_section.dart';
 import 'package:cy_shine_music/features/update/ipa_download.dart';
@@ -19,6 +21,142 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('cy_shine_music/audio_intent');
+
+  testWidgets('inline update results leave room for following settings', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 300));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final controller = AppUpdateController(
+      service: _Service(_release()),
+      preferences: prefs,
+      installedVersion: () async => '2.0.14',
+    );
+    final router = GoRouter(initialLocation: '/settings', routes: [
+      GoRoute(path: '/settings', builder: (_, _) => const Scaffold(
+        body: SingleChildScrollView(
+          child: SettingsCard(
+            title: '关于',
+            children: [AppUpdateSection(), Text('备份与恢复'), Text('调试模式')],
+          ),
+        ),
+      )),
+    ]);
+    addTearDown(router.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          appUpdateControllerProvider.overrideWith((ref) => controller),
+          _idleDownloadOverride(),
+        ],
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final backup = find.text('备份与恢复');
+    final before = tester.getTopLeft(backup).dy;
+    await tester.tap(find.byKey(const ValueKey('check-update-setting')));
+    await tester.pumpAndSettle();
+    expect(find.text('已是最新版（2.0.14）'), findsOneWidget);
+    expect(tester.getTopLeft(backup).dy, greaterThan(before));
+    expect(tester.getTopLeft(backup).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(find.text('重新检查')).dy));
+    await tester.ensureVisible(find.text('调试模式'));
+    await tester.pumpAndSettle();
+    expect(find.text('调试模式').hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('collapsing a running update check leaves it in progress', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final service = _DelayedService();
+    final controller = AppUpdateController(
+      service: service, preferences: prefs, installedVersion: () async => '2.0.8',
+    );
+    final router = GoRouter(initialLocation: '/settings', routes: [
+      GoRoute(path: '/settings', builder: (_, _) => const Scaffold(
+        body: SingleChildScrollView(child: Column(children: [
+          AppUpdateSection(), Text('备份与恢复'),
+        ])),
+      )),
+    ]);
+    addTearDown(router.dispose);
+    await tester.pumpWidget(ProviderScope(overrides: [
+      sharedPreferencesProvider.overrideWithValue(prefs),
+      appUpdateControllerProvider.overrideWith((ref) => controller),
+      _idleDownloadOverride(),
+    ], child: MaterialApp.router(routerConfig: router)));
+    await tester.pumpAndSettle();
+    final header = find.byKey(const ValueKey('check-update-setting'));
+    final backup = find.text('备份与恢复');
+    final collapsedY = tester.getTopLeft(backup).dy;
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(controller.checking, isTrue);
+    expect(find.text('正在检查更新…'), findsOneWidget);
+    expect(tester.getTopLeft(backup).dy, greaterThan(collapsedY));
+
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(controller.checking, isTrue);
+    expect(find.text('正在检查更新…'), findsNothing);
+    expect(tester.getTopLeft(backup).dy, closeTo(collapsedY, 0.01));
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(find.text('正在检查更新…'), findsOneWidget);
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    service.pending.complete(_release());
+    await tester.pumpAndSettle();
+    expect(controller.release?.tagName, 'ios-v2.0.9');
+    expect(find.text('下载 IPA'), findsNothing);
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(find.text('下载 IPA'), findsOneWidget);
+    expect(service.requests, 1);
+  });
+
+  testWidgets('a pending update can be collapsed and reopened', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final service = _Service(_release());
+    final controller = AppUpdateController(
+      service: service,
+      preferences: prefs,
+      installedVersion: () async => '2.0.8',
+    );
+    await controller.check();
+    final router = GoRouter(initialLocation: '/settings', routes: [
+      GoRoute(path: '/settings', builder: (_, _) => const Scaffold(
+        body: SingleChildScrollView(child: AppUpdateSection()),
+      )),
+    ]);
+    addTearDown(router.dispose);
+    await tester.pumpWidget(ProviderScope(overrides: [
+      sharedPreferencesProvider.overrideWithValue(prefs),
+      appUpdateControllerProvider.overrideWith((ref) => controller),
+      _idleDownloadOverride(),
+    ], child: MaterialApp.router(routerConfig: router)));
+    await tester.pumpAndSettle();
+
+    final header = find.byKey(const ValueKey('check-update-setting'));
+    final download = find.text('下载 IPA');
+    expect(download, findsOneWidget);
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(download, findsNothing);
+
+    service.release = _release(build: 10);
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(download, findsOneWidget);
+    expect(controller.release!.buildNumber, 9);
+  });
+
   for (final saved in [true, false]) {
     testWidgets('IPA export result $saved reflects the system picker result', (tester) async {
       SharedPreferences.setMockInitialValues({});
@@ -64,6 +202,10 @@ void main() {
         )),
       ], child: MaterialApp.router(routerConfig: router)));
       await tester.pumpAndSettle();
+      expect(find.text('当前版本：$appDisplayName 2.0.8'), findsOneWidget);
+      expect(find.text('当前版本：$appDisplayName 2.0.8 (6)'), findsNothing);
+      expect(find.text('2.0.9'), findsOneWidget);
+      expect(find.text('2.0.9 (9)'), findsNothing);
       expect(find.text('TrollStore 更新安装'), findsOneWidget);
       expect(find.text('下载 IPA'), findsOneWidget);
       final save = find.text('保存到文件');
@@ -79,7 +221,9 @@ void main() {
       service.release = _release(build: 10);
       await controller.check();
       await tester.pumpAndSettle();
-      expect(find.text('2.0.9 (10)'), findsOneWidget);
+      expect(find.text('2.0.9'), findsOneWidget);
+      expect(find.text('2.0.9 (10)'), findsNothing);
+      expect(controller.release!.buildNumber, 10);
       expect(find.text('保存到文件'), findsNothing,
           reason: 'an older build with the same tag is not offered as the new package');
       expect(find.text('分享安装'), findsNothing);
@@ -89,11 +233,20 @@ void main() {
   }
 }
 
+Override _idleDownloadOverride() => ipaDownloadProvider.overrideWith((ref) {
+  final dio = Dio();
+  ref.onDispose(() => dio.close(force: true));
+  return IpaDownload(
+    dio: dio,
+    stagingDirectory: () async => throw StateError('Unexpected IPA download'),
+  );
+});
+
 AppRelease _release({int build = 9}) => AppRelease(
   version: Version(2, 0, 9), tagName: 'ios-v2.0.9', title: '2.0.9',
   manifestVersion: '2.0.9', buildNumber: build, ipaSha256: 'a' * 64,
-  pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic-iOS/releases/tag/ios-v2.0.9'),
-  ipaUri: Uri.parse('https://github.com/wm0104/CyShineMusic-iOS/releases/download/ios-v2.0.9/CyShineMusic-unsigned.ipa'),
+  pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic/releases/tag/ios-v2.0.9'),
+  ipaUri: Uri.parse('https://github.com/wm0104/CyShineMusic/releases/download/ios-v2.0.9/CyShineMusic-unsigned.ipa'),
   notes: '完善在线更新体验。',
 );
 
@@ -102,4 +255,14 @@ class _Service implements AppUpdateService {
   AppRelease release;
   @override
   Future<AppRelease?> fetchLatestRelease() async => release;
+}
+
+class _DelayedService implements AppUpdateService {
+  final pending = Completer<AppRelease?>();
+  int requests = 0;
+  @override
+  Future<AppRelease?> fetchLatestRelease() {
+    requests++;
+    return pending.future;
+  }
 }

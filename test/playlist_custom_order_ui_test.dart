@@ -13,6 +13,7 @@ import 'package:cy_shine_music/features/playlists/playlist_detail_page.dart';
 import 'package:cy_shine_music/features/playlists/playlist_management_page.dart';
 import 'package:cy_shine_music/features/playlists/playlist_models.dart';
 import 'package:cy_shine_music/features/playlists/playlist_store.dart';
+import 'package:cy_shine_music/features/playlists/widgets/playlist_track_tile.dart';
 import 'package:cy_shine_music/features/shell/shell_toolbar_visibility.dart';
 import 'package:cy_shine_music/features/player/player_audio_handler.dart';
 import 'package:cy_shine_music/features/player/player_controller.dart';
@@ -22,34 +23,28 @@ import 'package:cy_shine_music/router.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('custom entry opens full draft; cancel restores toolbar without saving', (tester) async {
+  testWidgets('same pointer from row whitespace drags in place and saves on release', (tester) async {
     final container = await _pumpPlaylist(tester);
-    await _startOrdering(tester);
-    expect(find.text('整理顺序'), findsOneWidget);
-    expect(find.byType(ReorderableDragStartListener), findsNWidgets(3));
-    expect(container.read(shellToolbarVisibleProvider), isFalse);
-    expect(tester.widget<FilledButton>(find.byKey(const ValueKey('playlist-play-all'))).onPressed, isNull);
+    expect(find.byType(ReorderableDelayedDragStartListener), findsNWidgets(3));
+    expect(find.byIcon(Icons.drag_handle_rounded), findsNothing);
+    await _moveFirstToEnd(tester, beforeRelease: () {
+      expect(container.read(localPlaylistsProvider).single.customTrackOrder, isNull);
+      expect(find.text('整理顺序'), findsNothing);
+      expect(find.text('取消'), findsNothing);
+      expect(find.text('完成'), findsNothing);
+      expect(find.byKey(const ValueKey('immersive-playlist-header')), findsOneWidget);
+      expect(find.byKey(const ValueKey('playlist-play-all')), findsOneWidget);
+      expect(container.read(shellToolbarVisibleProvider), isTrue);
+    });
+    expect(container.read(localPlaylistsProvider).single.customOrderedTracks.map((t) => t.name), ['Bravo', 'Charlie', 'Alpha']);
     expect(find.byType(Checkbox), findsNothing);
-    expect(find.byKey(const ValueKey('playlist-download-action')), findsNothing);
-    await _moveFirstToEnd(tester);
-    expect(container.read(localPlaylistsProvider).single.customTrackOrder, isNull);
-    await tester.ensureVisible(find.text('取消'));
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect(container.read(localPlaylistsProvider).single.customTrackOrder, isNull);
-    expect(container.read(shellToolbarVisibleProvider), isTrue);
-    expect(find.byType(ReorderableDragStartListener), findsNothing);
-    _expectOrder(tester, ['Alpha', 'Bravo', 'Charlie']);
+    expect(tester.takeException(), isNull);
   });
 
-  testWidgets('complete persists custom order, reload defaults custom, rules retain baseline', (tester) async {
+  testWidgets('drop persists custom order, reload defaults custom, rules retain baseline', (tester) async {
     final container = await _pumpPlaylist(tester);
     final baseline = container.read(localPlaylistsProvider).single.tracks.map((track) => track.identityKey).toList();
-    await _startOrdering(tester);
     await _moveFirstToEnd(tester);
-    await tester.ensureVisible(find.text('完成'));
-    await tester.tap(find.text('完成'));
-    await tester.pumpAndSettle();
     expect(container.read(localPlaylistsProvider).single.customTrackOrder,
       [baseline[1], baseline[2], baseline[0]]);
     expect(container.read(localPlaylistsProvider).single.tracks.map((track) => track.identityKey), baseline);
@@ -72,6 +67,7 @@ void main() {
     _expectOrder(tester, ['Bravo', 'Charlie', 'Alpha']);
     await tester.tap(find.byKey(const ValueKey('playlist-sort-button')));
     await tester.pumpAndSettle();
+    expect(find.text('自定义排序'), findsNothing);
     await tester.tap(find.text('标题'));
     await tester.pumpAndSettle();
     await tester.tapAt(const Offset(5, 5));
@@ -89,33 +85,34 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('search exits before ordering and saves the complete playlist', (tester) async {
+  testWidgets('search keeps query and never saves a partial reorder', (tester) async {
     final container = await _pumpPlaylist(tester);
     await tester.tap(find.byTooltip('搜索歌单歌曲'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(SongsSearchBar), 'Bravo');
     await tester.pumpAndSettle();
-    expect(find.text('Alpha'), findsNothing);
-    await _startOrdering(tester);
-    expect(find.byType(SongsSearchBar), findsNothing);
-    expect(find.byType(ReorderableDragStartListener), findsNWidgets(3));
-    await _moveFirstToEnd(tester);
-    await tester.ensureVisible(find.text('完成'));
-    await tester.tap(find.text('完成'));
+    final track = find.descendant(
+      of: find.byType(PlaylistTrackTile), matching: find.text('Bravo'),
+    );
+    expect(track, findsOneWidget);
+    final gesture = await tester.startGesture(tester.getCenter(track));
+    await tester.pump(const Duration(milliseconds: 600));
+    await gesture.moveBy(const Offset(0, 80));
+    await tester.pump();
+    await gesture.up();
     await tester.pumpAndSettle();
-    expect(container.read(localPlaylistsProvider).single.customOrderedTracks.map((track) => track.name), ['Bravo', 'Charlie', 'Alpha']);
-    expect(container.read(shellToolbarVisibleProvider), isTrue);
+    expect(tester.widget<EditableText>(find.byType(EditableText)).controller.text, 'Bravo');
+    expect(find.text('Alpha'), findsNothing);
+    expect(find.byType(SongsSearchBar), findsOneWidget);
+    expect(find.byType(ReorderableDelayedDragStartListener), findsNothing);
+    expect(container.read(localPlaylistsProvider).single.customTrackOrder, isNull);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('wide layout can reorder and system back cancels without saving', (tester) async {
+  testWidgets('wide layout cancelled pointer never saves a draft', (tester) async {
     final container = await _pumpPlaylist(tester, size: const Size(1200, 800));
     expect(find.byKey(const ValueKey('playlist-wide-layout')), findsOneWidget);
-    await _startOrdering(tester);
-    await _moveFirstToEnd(tester);
-    await tester.binding.handlePopRoute();
-    await tester.pumpAndSettle();
-    expect(find.byType(ReorderableDragStartListener), findsNothing);
+    await _moveFirstToEnd(tester, cancel: true);
     expect(container.read(localPlaylistsProvider).single.customTrackOrder, isNull);
     expect(container.read(shellToolbarVisibleProvider), isTrue);
     _expectOrder(tester, ['Alpha', 'Bravo', 'Charlie']);
@@ -125,7 +122,7 @@ void main() {
   testWidgets('iOS edge back exits playlist modes before leaving the detail', (
     tester,
   ) async {
-    final container = await _pumpPlaylist(tester, withAppRouter: true);
+    await _pumpPlaylist(tester, withAppRouter: true);
 
     Future<void> swipeBack() async {
       await tester.dragFrom(const Offset(4, 400), const Offset(210, 0));
@@ -146,37 +143,75 @@ void main() {
     expect(find.byTooltip('退出批量管理'), findsNothing);
     expect(find.byType(PlaylistDetailPage), findsOneWidget);
 
-    await _startOrdering(tester);
-    await _moveFirstToEnd(tester);
-    await swipeBack();
-    expect(find.byType(ReorderableDragStartListener), findsNothing);
-    expect(find.byType(PlaylistDetailPage), findsOneWidget);
-    expect(container.read(localPlaylistsProvider).single.customTrackOrder, isNull);
-    _expectOrder(tester, ['Alpha', 'Bravo', 'Charlie']);
-
     await swipeBack();
     expect(find.byType(PlaylistManagementPage), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('concurrent removal rejects stale completion instead of losing songs', (tester) async {
+  for (final origin in [null, 'wy', 'spotify']) {
+    testWidgets('saved ${origin ?? 'manual'} playlist supports the same direct drag', (tester) async {
+      final container = await _pumpPlaylist(tester, origin: origin);
+      await _moveFirstToEnd(tester);
+      expect(container.read(localPlaylistsProvider).single.customOrderedTracks.map((t) => t.name),
+          ['Bravo', 'Charlie', 'Alpha']);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('cancelled card gesture leaves the saved list and original regions intact', (tester) async {
     final container = await _pumpPlaylist(tester);
-    await _startOrdering(tester);
-    final removed = container.read(localPlaylistsProvider).single.tracks.last.identityKey;
-    await container.read(localPlaylistsProvider.notifier).removeTrack('order', removed);
+    await container.read(localPlaylistsProvider.notifier).create('Second');
+    await container.read(localPlaylistsProvider.notifier).create('Third');
+    final baseline = container.read(localPlaylistsProvider).map((p) => p.id).toList();
+    await tester.pumpWidget(UncontrolledProviderScope(container: container,
+      child: const MaterialApp(home: PlaylistManagementPage())));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('完成'));
-    await tester.tap(find.text('完成'));
+    await _moveFirstToEnd(tester, cancel: true, expectMoved: false);
+    expect(container.read(localPlaylistsProvider).map((p) => p.id), baseline);
+    expect(find.text('整理你的音乐收藏'), findsOneWidget);
+    expect(find.text('新建歌单'), findsOneWidget);
+    expect(find.text('在线导入'), findsOneWidget);
+    expect(find.text('洛雪导入'), findsOneWidget);
+    expect(find.byTooltip('歌单选项'), findsNWidgets(3));
+    expect(find.text('取消'), findsNothing);
+    expect(find.text('完成'), findsNothing);
+    await _moveFirstToEnd(tester, expectMoved: false, beforeRelease: () async {
+      await container.read(localPlaylistsProvider.notifier).create('Concurrent');
+      await tester.pump();
+    });
+    expect(container.read(localPlaylistsProvider).take(3).map((p) => p.id), baseline);
+    expect(container.read(localPlaylistsProvider).last.name, 'Concurrent');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('concurrent same-identity custom order wins over a stale drop', (tester) async {
+    final container = await _pumpPlaylist(tester);
+    final otherOrder = container.read(localPlaylistsProvider).single.tracks
+        .reversed.map((t) => t.identityKey).toList();
+    await _moveFirstToEnd(tester, expectMoved: false, beforeRelease: () async {
+      await container.read(localPlaylistsProvider.notifier)
+          .setCustomTrackOrder('order', otherOrder);
+      await tester.pump();
+    });
+    expect(container.read(localPlaylistsProvider).single.customTrackOrder, otherOrder);
+    expect(container.read(localPlaylistsProvider).single.tracks.map((t) => t.name),
+        ['Alpha', 'Bravo', 'Charlie']);
+    await tester.pump(const Duration(seconds: 4));
     await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('concurrent removal rejects stale drop instead of losing songs', (tester) async {
+    final container = await _pumpPlaylist(tester);
+    await _moveFirstToEnd(tester, expectMoved: false, beforeRelease: () async {
+      final removed = container.read(localPlaylistsProvider).single.tracks.last.identityKey;
+      await container.read(localPlaylistsProvider.notifier).removeTrack('order', removed);
+      await tester.pump();
+    });
     expect(container.read(localPlaylistsProvider).single.customTrackOrder, isNull);
     expect(container.read(localPlaylistsProvider).single.tracks.length, 2);
-    expect(find.text('整理顺序'), findsOneWidget);
-    expect(find.text('歌单歌曲已变化，请重新整理'), findsOneWidget);
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
+    expect(find.text('整理顺序'), findsNothing);
     expect(container.read(shellToolbarVisibleProvider), isTrue);
-    // pumpAndSettle stops once animation frames settle, not when the toast's
-    // three-second auto-close timer expires.
     await tester.pump(const Duration(seconds: 4));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
@@ -186,6 +221,7 @@ void main() {
 Future<ProviderContainer> _pumpPlaylist(WidgetTester tester, {
   Size size = const Size(390, 1000),
   bool withAppRouter = false,
+  String? origin,
 }) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
@@ -215,6 +251,8 @@ Future<ProviderContainer> _pumpPlaylist(WidgetTester tester, {
   SharedPreferences.setMockInitialValues({
     localPlaylistsStorageKey: [jsonEncode(LocalPlaylist(
       id: 'order', name: 'Order test', tracks: tracks,
+      originPlaylistId: origin == null ? null : 'saved-source',
+      originSourceCode: origin,
       createdAt: DateTime.utc(2026), updatedAt: DateTime.utc(2026),
     ).toJson())],
   });
@@ -251,37 +289,32 @@ Future<ProviderContainer> _pumpPlaylist(WidgetTester tester, {
   return container;
 }
 
-Future<void> _startOrdering(WidgetTester tester) async {
-  final button = find.byKey(const ValueKey('playlist-sort-button'));
-  await tester.ensureVisible(button);
-  await tester.tap(button);
-  await tester.pumpAndSettle();
-  await tester.tap(find.text('自定义排序'));
-  await tester.pumpAndSettle();
-}
-
-Future<void> _moveFirstToEnd(WidgetTester tester) async {
-  final handles = find.byType(ReorderableDragStartListener);
-  final start = tester.getCenter(handles.first);
-  final end = tester.getCenter(handles.last);
-  final rowExtent = (end.dy - start.dy) / 2;
+Future<void> _moveFirstToEnd(WidgetTester tester, {
+  FutureOr<void> Function()? beforeRelease,
+  bool cancel = false,
+  bool expectMoved = true,
+}) async {
+  final rows = find.byType(ReorderableDelayedDragStartListener);
+  final first = tester.getRect(rows.first);
+  final last = tester.getRect(rows.last);
+  // Empty strip below the title/artist, not a handle or a child button.
+  final start = Offset(first.left + first.width * .55, first.bottom - 3);
+  final end = Offset(start.dx, last.bottom + first.height);
   final gesture = await tester.startGesture(start);
-  await tester.pump();
-  // Cross the last row with the proxy's leading edge, not just the pointer.
-  // Allow intermediate gap animations to update the SDK's target geometry.
-  await gesture.moveBy(const Offset(0, 10));
-  await tester.pump();
-  final destination = end + Offset(0, rowExtent);
+  await tester.pump(const Duration(milliseconds: 600));
   for (var step = 1; step <= 12; step++) {
-    await gesture.moveTo(
-      Offset.lerp(start + const Offset(0, 10), destination, step / 12)!,
-    );
+    await gesture.moveTo(Offset.lerp(start, end, step / 12)!);
     await tester.pump(const Duration(milliseconds: 40));
   }
   await tester.pumpAndSettle();
-  await gesture.up();
+  await beforeRelease?.call();
+  if (cancel) {
+    await gesture.cancel();
+  } else {
+    await gesture.up();
+  }
   await tester.pumpAndSettle();
-  _expectOrder(tester, ['Bravo', 'Charlie', 'Alpha']);
+  if (!cancel && expectMoved) _expectOrder(tester, ['Bravo', 'Charlie', 'Alpha']);
 }
 
 void _expectOrder(WidgetTester tester, List<String> names) {

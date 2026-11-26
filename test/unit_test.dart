@@ -504,8 +504,14 @@ void main() {
           version: 'invalidate',
         );
         EmbeddedArtworkCache.evictPath(file.path);
+        final fresh = EmbeddedArtworkCache.subscribe(
+          file.path,
+          version: 'invalidate',
+        );
         expect(await invalidated.future, isNull);
+        expect(await fresh.future, [9, 8, 7, 6]);
         invalidated.cancel();
+        fresh.cancel();
 
         final rewritten = await file.readAsBytes();
         expect(
@@ -647,6 +653,64 @@ void main() {
       expect(out, '[00:01.000]<00:01.500>He<00:01.750>llo<00:02.000>');
     });
 
+    for (final wordLine in ['00:01.120', '00:01.620']) {
+      test(
+        'download round-trip aligns the translation at $wordLine and preserves its own clock',
+        () {
+          final info = LyricInfo(
+            lyric: '[00:01.12]Come close',
+            lxlyric: '[$wordLine]<0,150>Come <700,250>close',
+            tlyric: '[00:01.12]<50,200>靠<900,150>近',
+            rlyric: '[00:01.12]kao jin',
+          );
+          final online = KaraokeLyricsParser.parse(info).lines.single;
+          final download = LyricBuilder.build(
+            info,
+            const LyricEmbedOptions(format: EmbeddedLyricFormat.wordTimed),
+          );
+          final local = KaraokeLyricsParser.parseEmbedded(
+            download,
+          ).lines.single;
+          expect(local.startMs, online.startMs);
+          expect(local.text, online.text);
+          expect(local.translation, '靠近');
+          expect(local.roman, 'kao jin');
+          expect(local.words.last.endMs, online.words.last.endMs);
+          expect(
+            local.translationWords.map((word) => (word.startMs, word.endMs)),
+            [(1170, 1370), (2020, 2170)],
+          );
+        },
+      );
+    }
+
+    test(
+      'preserves the free prefix and own word timing on repeated translation labels',
+      () {
+        const info = LyricInfo(
+          lyric: '[00:01][00:04]Hello',
+          lxlyric: '[00:01.500][00:04.500]<0,400>Hello',
+          tlyric: '[00:01][00:04]今天<300,200>好',
+        );
+        final download = LyricBuilder.build(
+          info,
+          const LyricEmbedOptions(format: EmbeddedLyricFormat.wordTimed),
+        );
+        final online = KaraokeLyricsParser.parse(info);
+        final local = KaraokeLyricsParser.parseEmbedded(download);
+        for (final lyrics in [online, local]) {
+          expect(lyrics.lines.map((line) => line.translation), ['今天好', '今天好']);
+          expect(
+            lyrics.lines.first.translationWords.map(
+              (word) => (word.text, word.startMs, word.endMs),
+            ),
+            [('今天', 1000, 1300), ('好', 1300, 1500)],
+          );
+          expect(lyrics.lines.last.translationWords.last.startMs, 4300);
+        }
+      },
+    );
+
     test('falls back to plain lyric when lxlyric is unavailable', () {
       const info = LyricInfo(lyric: '[00:01.00]Hello');
       final out = LyricBuilder.build(info, const LyricEmbedOptions());
@@ -741,6 +805,72 @@ void main() {
   });
 
   group('KaraokeLyricsParser', () {
+    test(
+      'untimed local and online lyrics keep text without a playback index',
+      () {
+        const raw = '[ar:Artist]\rFirst\rSecond';
+        final lyrics = KaraokeLyricsParser.parse(
+          const LyricInfo(lyric: raw, tlyric: '第一\n第二'),
+        );
+        expect(lyrics.lines.map((line) => line.text), ['First', 'Second']);
+        expect(lyrics.lines.map((line) => line.translation), ['第一', '第二']);
+        expect(lyrics.activeIndex(const Duration(seconds: 50)), -1);
+        expect(
+          KaraokeLyricsParser.parseEmbedded(raw).lines.map((line) => line.text),
+          ['First', 'Second'],
+        );
+        expect(
+          KaraokeLyricsParser.parseEmbedded('[ti:Title]\n[00:00.00]').isEmpty,
+          isTrue,
+        );
+      },
+    );
+
+    test('aligns a plain translation by line only when counts agree', () {
+      const main = '[00:01]First\n[00:03]Second';
+      final lyrics = KaraokeLyricsParser.parse(
+        const LyricInfo(lyric: main, tlyric: '第一\n第二'),
+      );
+      expect(lyrics.lines.map((line) => line.translation), ['第一', '第二']);
+      final ambiguous = KaraokeLyricsParser.parse(
+        const LyricInfo(lyric: main, tlyric: '独立的译文'),
+      );
+      expect(ambiguous.lines.every((line) => line.translation == null), isTrue);
+    });
+
+    test('keeps native translation timings with their own LRC anchor', () {
+      final line = KaraokeLyricsParser.parse(
+        const LyricInfo(
+          lyric: '[00:01.000]One two',
+          lxlyric: '[00:01.500]<0,150>One <700,300>two',
+          tlyric: '[00:01.030]<50,120>一<850,350>二',
+        ),
+      ).lines.single;
+      expect(line.text, 'One two');
+      expect(line.translation, '一二');
+      expect(
+        line.translationWords.map(
+          (word) => (word.text, word.startMs, word.endMs),
+        ),
+        [('一', 1080, 1200), ('二', 1880, 2230)],
+      );
+    });
+
+    test('keeps both enhanced LRC tracks including an open final word', () {
+      final first = KaraokeLyricsParser.parseEmbedded(
+        '[00:01]<00:01.100>One <00:01.200><00:01.500>two<00:02>\n'
+        '[00:03]Next\n'
+        '[00:01]<00:01.200>一<00:01.600><00:02.500>二',
+      ).lines.first;
+      expect(first.text, 'One two');
+      expect(first.translation, '一二');
+      expect(first.words.last.endMs, 2000);
+      expect(first.translationWords.map((word) => (word.startMs, word.endMs)), [
+        (1200, 1600),
+        (2500, 3000),
+      ]);
+    });
+
     test('parses word-level lxlyric into absolute karaoke timings', () {
       const info = LyricInfo(
         lyric: '[00:10.000]七里香',
@@ -1054,6 +1184,45 @@ void main() {
   });
 
   group('KwLyricx', () {
+    test(
+      'preserves translation word timings online and in enhanced downloads',
+      () {
+        final info = KwLyricx.parse(
+          '[kuwo:051]\n'
+          '[00:01.00]<693,-693>Sing\n'
+          '[00:03.00]<330,-330>来<1680,960>唱\n'
+          '[00:03.00]<693,-693>Next',
+        );
+        final words = KaraokeLyricsParser.parse(
+          info,
+        ).lines.first.translationWords;
+        expect(words.map((word) => (word.text, word.startMs, word.endMs)), [
+          ('来', 1000, 1330),
+          ('唱', 1330, 1690),
+        ]);
+        final embedded = LyricBuilder.build(
+          info,
+          const LyricEmbedOptions(source: MusicSource.kw),
+        );
+        expect(
+          embedded,
+          contains('[00:01.000]<00:01.000>来<00:01.330>唱<00:01.690>'),
+        );
+        expect(
+          KaraokeLyricsParser.parseEmbedded(
+            embedded,
+          ).lines.first.translationWords.last.endMs,
+          1690,
+        );
+        final plain = LyricBuilder.build(
+          info,
+          const LyricEmbedOptions(format: EmbeddedLyricFormat.lrc),
+        );
+        expect(plain, contains('[00:01.000]来唱'));
+        expect(plain, isNot(contains('<')));
+      },
+    );
+
     test('decodes Kuwo private word timing into lxlyric offsets', () {
       const raw =
           '[kuwo:051]\n'

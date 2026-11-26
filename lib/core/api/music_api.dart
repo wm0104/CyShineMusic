@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/album_info.dart';
 import '../models/artist_info.dart';
 import '../models/enums.dart';
 import '../models/leaderboard_info.dart';
@@ -9,6 +10,7 @@ import '../models/music_info.dart';
 import '../models/playlist_info.dart';
 import '../models/playlist_summary.dart';
 import '../models/search_response.dart';
+import '../sdk/album_sdk.dart';
 import '../sdk/extra_artist_sdk.dart';
 import '../sdk/leaderboard_sdk.dart';
 import '../sdk/music_sdk.dart' as sdk;
@@ -28,6 +30,70 @@ class MusicApi {
 
   final Set<MusicSource> _enabledSearchSources;
   final List<MusicSource> _searchSourceOrder;
+
+  static Set<MusicSource> get albumSources => AlbumSdk.sources;
+
+  Future<AlbumPage> searchAlbums({
+    required String keyword,
+    required MusicSource source,
+    int page = 1,
+    int limit = 30,
+  }) async {
+    if (page < 1 || limit < 1) throw ArgumentError('专辑分页参数无效');
+    if (source != MusicSource.all) {
+      if (!albumSources.contains(source)) {
+        throw UnsupportedError('当前平台不支持专辑搜索');
+      }
+      if (!_enabledSearchSources.contains(source)) {
+        throw StateError('当前平台未启用专辑搜索');
+      }
+      return AlbumSdk.searchAlbums(
+        keyword: keyword,
+        source: source,
+        page: page,
+        limit: limit,
+      );
+    }
+    final sources = [
+      ..._searchSourceOrder,
+      ...MusicSource.values,
+    ].toSet().where((s) => _enabledSearchSources.contains(s) && albumSources.contains(s));
+    final failures = <Object>[];
+    final results = await Future.wait<AlbumPage?>([
+      for (final s in sources)
+        () async {
+          try {
+            return await AlbumSdk.searchAlbums(keyword: keyword, source: s, page: page, limit: limit);
+          } on Object catch (error) {
+            failures.add(error);
+            return null;
+          }
+        }(),
+    ]);
+    final pages = results.whereType<AlbumPage>().toList();
+    if (pages.isEmpty && failures.isNotEmpty) throw failures.first;
+    return AlbumPage(
+      albums: [for (final result in pages) ...result.albums],
+      offset: (page - 1) * limit,
+      limit: limit,
+      total: failures.isEmpty && pages.every((p) => p.total != null)
+          ? pages.fold<int>(0, (sum, p) => sum + p.total!) : null,
+      hasMore: pages.any((p) => p.hasMore),
+      hasFailedSources: failures.isNotEmpty,
+    );
+  }
+
+  Future<AlbumPage> artistAlbums({
+    required String artistId,
+    required MusicSource source,
+    int offset = 0,
+    int limit = 30,
+  }) => AlbumSdk.artistAlbums(artistId: artistId, source: source, offset: offset, limit: limit);
+
+  Future<PlaylistInfo> albumDetail({
+    required String albumId,
+    required MusicSource source,
+  }) => AlbumSdk.albumDetail(albumId: albumId, source: source);
 
   static Set<MusicSource> get artistSources => {
     MusicSource.wy,

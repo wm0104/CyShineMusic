@@ -29,9 +29,10 @@ bool isImmersivePlaylistDetailLocation(String location) {
 bool isDiscoveryLocation(String location) =>
     location == '/' || location.startsWith('/discover/');
 
-bool isPlaybackArtistLocation(String location) =>
+bool isPlaybackDetailLocation(String location) =>
     location == '/player/track-artists' ||
-    location.startsWith('/player/artists/');
+    location.startsWith('/player/artists/') ||
+    location.startsWith('/player/albums/');
 
 bool isTopLevelShellLocation(String location) =>
     location == '/' || location == '/songs' || location == '/settings';

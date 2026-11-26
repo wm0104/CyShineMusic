@@ -1,3 +1,4 @@
+import 'album_info.dart';
 import 'artist_info.dart';
 import 'enums.dart';
 import 'music_info.dart';
@@ -12,6 +13,9 @@ class SearchResponse {
     required this.total,
     required this.source,
     this.hasFailedSources = false,
+    this.albums = const [],
+    this.hasMore,
+    this.totalIsExact = true,
   });
 
   final List<MusicInfo> list;
@@ -22,6 +26,11 @@ class SearchResponse {
   final int total;
   final MusicSource source;
   final bool hasFailedSources;
+  final List<AlbumInfo> albums;
+  final bool? hasMore;
+  final bool totalIsExact;
+
+  bool get hasNextPage => hasMore ?? (allPage <= 0 || page < allPage);
 
   factory SearchResponse.fromJson(Map<String, dynamic> json) {
     final listRaw = json['list'];

@@ -61,7 +61,15 @@ void openPlayer(BuildContext context, {required String returnLocation}) {
   }
 }
 
-/// Reveals the existing player beneath playback artist pages where possible.
+// Returning to the player from its credits or artist track list reveals the
+// original player. An album is a browsing destination; its route and scroll
+// position stay underneath the player when choosing a track.
+bool _revealsOriginalPlayer(String? path) =>
+    switch (path == null ? null : Uri.parse(path).pathSegments) {
+      ['player', 'track-artists'] || ['player', 'artists', _, _] => true,
+      _ => false,
+    };
+
 void openPlayerRoute(GoRouter router, {String? returnLocation}) {
   final location = router.routeInformationProvider.value.uri;
   if (location.path == '/player') return;
@@ -72,7 +80,7 @@ void openPlayerRoute(GoRouter router, {String? returnLocation}) {
   }
 
   var top = topPath();
-  while (top != null && isPlaybackArtistLocation(top) && router.canPop()) {
+  while (_revealsOriginalPlayer(top) && router.canPop()) {
     router.pop();
     top = topPath();
   }
@@ -82,7 +90,7 @@ void openPlayerRoute(GoRouter router, {String? returnLocation}) {
     returnLocation ?? location.toString(),
     '/songs',
   );
-  if (top != null && isPlaybackArtistLocation(top)) {
+  if (_revealsOriginalPlayer(top)) {
     // A standalone artist route has no player under it to reveal.
     router.go('/player', extra: origin);
   } else {

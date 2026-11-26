@@ -160,7 +160,7 @@ void main() {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     try {
       final service = _FakeAppUpdateService(release: _release(version: '2.0.9',
-        pageUri: 'https://github.com/wm0104/CyShineMusic-iOS/releases/tag/v2.0.9'));
+        pageUri: 'https://github.com/wm0104/CyShineMusic/releases/tag/v2.0.9'));
       final launched = <Uri>[];
       AppUpdateCheckOutcome? outcome;
       await _pumpHarness(tester, service: service,

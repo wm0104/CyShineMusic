@@ -33,10 +33,28 @@ import 'widgets/custom_theme_sheet.dart';
 import 'widgets/discovery_source_order_sheet.dart';
 import 'widgets/player_interface_settings_sheet.dart';
 import 'widgets/settings_action.dart';
+import 'widgets/playlist_backup_actions.dart';
 import 'widgets/settings_menu.dart';
+import 'widgets/settings_number_control.dart';
 import 'widgets/storage_folder_picker_sheet.dart';
 import 'widgets/theme_mode_row.dart';
 import 'widgets/theme_seed_row.dart';
+
+int _crossfadeMillis(double seconds) => seconds <= 0
+    ? 0
+    : (seconds * Duration.millisecondsPerSecond).round().clamp(
+        1,
+        kMaxCrossfadeMilliseconds,
+      );
+
+String _crossfadeLabel(int milliseconds) {
+  if (milliseconds == 0) return '关闭';
+  if (milliseconds < 100) return '小于 0.1 秒';
+  final tenths = (milliseconds + 50) ~/ 100;
+  return tenths % 10 == 0
+      ? '${tenths ~/ 10} 秒'
+      : '${tenths ~/ 10}.${tenths % 10} 秒';
+}
 
 class SettingsPage extends ConsumerWidget {
   const SettingsPage({super.key});
@@ -45,46 +63,10 @@ class SettingsPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(settingsProvider);
     final sourceState = ref.watch(musicSourceControllerProvider);
-    final webDavState = ref.watch(webDavSyncControllerProvider);
-    final dynamicColor = ref.watch(dynamicColorStatusProvider);
     final equalizer = ref.watch(equalizerProvider);
     final versionLabel = ref.watch(appVersionLabelProvider);
     final baseTheme = Theme.of(context);
     final scheme = baseTheme.colorScheme;
-
-    Widget themePresets = Column(
-      children: [
-        ThemeSeedRow(
-          value: settings.themeSeed,
-          onPick: (color) =>
-              ref.read(settingsProvider.notifier).setThemeSeed(color),
-          onCustomize: () => _pickThemeSeed(context, ref),
-        ),
-        const SizedBox(height: 18),
-        ColorStyleRow(
-          value: settings.colorStyle,
-          seed: settings.themeSeed,
-          enabled:
-              settings.customTheme.enabled ||
-              !(settings.useDynamicColor && dynamicColor.available),
-          onPick: (style) =>
-              ref.read(settingsProvider.notifier).setColorStyle(style),
-        ),
-        const SizedBox(height: 18),
-        DynamicColorRow(
-          value: settings.useDynamicColor,
-          available: dynamicColor.available,
-          onChanged: (value) =>
-              ref.read(settingsProvider.notifier).setUseDynamicColor(value),
-        ),
-      ],
-    );
-    if (settings.customTheme.enabled) {
-      themePresets = Semantics(
-        enabled: false,
-        child: ExcludeFocus(child: IgnorePointer(child: themePresets)),
-      );
-    }
 
     return Theme(
       data: baseTheme.copyWith(scaffoldBackgroundColor: scheme.surface),
@@ -114,7 +96,7 @@ class SettingsPage extends ConsumerWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         SettingsCard(
-                          title: '音源与网络',
+                          title: '音源与搜索',
                           children: [
                             SettingsAction(
                               icon: Symbols.audio_file,
@@ -140,52 +122,6 @@ class SettingsPage extends ConsumerWidget {
                                   .read(settingsProvider.notifier)
                                   .setUseBuiltInSourceFilePicker(value),
                             ),
-                            SettingsAction(
-                              key: const ValueKey('webdav-sync-setting'),
-                              icon: Icons.cloud_sync_outlined,
-                              title: 'WebDAV 同步',
-                              subtitle: _webDavSubtitle(webDavState),
-                              trailing: Symbols.chevron_right,
-                              onTap: () => context.go('/settings/webdav'),
-                            ),
-                            SettingsMenuAction(
-                              key: const ValueKey('network-adapter-menu'),
-                              menuId: 'network-adapter-menu',
-                              icon: Icons.cable_rounded,
-                              title: '网络适配器',
-                              subtitle:
-                                  '${settings.networkAdapterMode.label} · '
-                                  '${settings.networkAdapterMode.description}',
-                              options: [
-                                for (final mode in NetworkAdapterMode.values)
-                                  SettingsMenuOption(
-                                    id: mode.code,
-                                    label: mode.label,
-                                    selected:
-                                        mode == settings.networkAdapterMode,
-                                    onSelected: () =>
-                                        _setNetworkAdapter(context, ref, mode),
-                                  ),
-                              ],
-                            ),
-                            SettingsAction(
-                              key: const ValueKey('discovery-source-order'),
-                              icon: Icons.explore_outlined,
-                              title: '发现页平台顺序',
-                              subtitle: settings.discoverySourceOrder
-                                  .map((source) => source.label)
-                                  .join('、'),
-                              trailing: Icons.chevron_right_rounded,
-                              onTap: () => unawaited(
-                                _showDiscoverySourceOrderSheet(context, ref),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 30),
-                        SettingsCard(
-                          title: '搜索与播放',
-                          children: [
                             SettingsMenuAction(
                               key: const ValueKey('search-source-menu'),
                               menuId: 'search-source-menu',
@@ -218,6 +154,44 @@ class SettingsPage extends ConsumerWidget {
                                   ),
                               ],
                             ),
+                            SettingsAction(
+                              key: const ValueKey('discovery-source-order'),
+                              icon: Icons.explore_outlined,
+                              title: '发现页平台顺序',
+                              subtitle: settings.discoverySourceOrder
+                                  .map((source) => source.label)
+                                  .join('、'),
+                              trailing: Icons.chevron_right_rounded,
+                              onTap: () => unawaited(
+                                _showDiscoverySourceOrderSheet(context, ref),
+                              ),
+                            ),
+                            SettingsMenuAction(
+                              key: const ValueKey('network-adapter-menu'),
+                              menuId: 'network-adapter-menu',
+                              icon: Icons.cable_rounded,
+                              title: '网络适配器',
+                              subtitle:
+                                  '${settings.networkAdapterMode.label} · '
+                                  '${settings.networkAdapterMode.description}',
+                              options: [
+                                for (final mode in NetworkAdapterMode.values)
+                                  SettingsMenuOption(
+                                    id: mode.code,
+                                    label: mode.label,
+                                    selected:
+                                        mode == settings.networkAdapterMode,
+                                    onSelected: () =>
+                                        _setNetworkAdapter(context, ref, mode),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 30),
+                        SettingsCard(
+                          title: '播放',
+                          children: [
                             SettingsMenuAction(
                               key: const ValueKey('online-quality-menu'),
                               menuId: 'online-quality-menu',
@@ -250,6 +224,20 @@ class SettingsPage extends ConsumerWidget {
                               subtitle: equalizer.summary,
                               trailing: Symbols.chevron_right,
                               onTap: () => context.go('/settings/equalizer'),
+                            ),
+                            SettingsAction(
+                              icon: Icons.multitrack_audio_rounded,
+                              title: '淡入/淡出',
+                              subtitle: settings.crossfadeMilliseconds == 0
+                                  ? '已关闭 · 0 秒'
+                                  : '${_crossfadeLabel(settings.crossfadeMilliseconds)} · 歌曲切换时交叠播放',
+                              trailing: Symbols.chevron_right,
+                              onTap: () => _openSheet<void>(
+                                context,
+                                ref,
+                                '淡入/淡出',
+                                _crossfadeSettings,
+                              ),
                             ),
                             Consumer(
                               builder: (context, ref, _) {
@@ -296,38 +284,23 @@ class SettingsPage extends ConsumerWidget {
                                   .read(settingsProvider.notifier)
                                   .setAllowMixWithOthers(value),
                             ),
-                            SettingsSwitchAction(
-                              key: const ValueKey('bluetooth-lyric-setting'),
+                            SettingsAction(
                               icon: Icons.bluetooth_audio_rounded,
-                              title: '显示蓝牙歌词',
-                              subtitle: '将当前歌词行作为媒体标题发送到车机或蓝牙设备',
-                              value: settings.bluetoothLyricEnabled,
-                              onChanged: (value) => _setBluetoothLyricEnabled(
+                              title: '蓝牙歌词',
+                              subtitle: '显示蓝牙歌词、显示完整蓝牙歌词',
+                              trailing: Symbols.chevron_right,
+                              onTap: () => _openSheet<void>(
                                 context,
                                 ref,
-                                value,
+                                '蓝牙歌词',
+                                _bluetoothSettings,
                               ),
-                            ),
-                            SettingsSwitchAction(
-                              key: const ValueKey(
-                                'bluetooth-full-lyric-setting',
-                              ),
-                              icon: Icons.lyrics_rounded,
-                              title: '显示完整蓝牙歌词',
-                              subtitle: '写入完整 LRC，需接收设备支持',
-                              value: settings.bluetoothFullLyricEnabled,
-                              onChanged: (value) =>
-                                  _setBluetoothFullLyricEnabled(
-                                    context,
-                                    ref,
-                                    value,
-                                  ),
                             ),
                           ],
                         ),
                         const SizedBox(height: 30),
                         SettingsCard(
-                          title: '下载',
+                          title: '下载与本地音乐',
                           children: [
                             SettingsMenuAction(
                               key: const ValueKey(
@@ -361,167 +334,50 @@ class SettingsPage extends ConsumerWidget {
                               title: '下载位置',
                               subtitle: settings.downloadDir,
                               trailing: Symbols.chevron_right,
-                              onTap: () => _pickDownloadDir(context, ref),
-                            ),
-                            Padding(
-                              padding: const EdgeInsets.fromLTRB(4, 12, 8, 0),
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: Wrap(
-                                  spacing: 10,
-                                  runSpacing: 8,
-                                  children: [
-                                    FilledButton.tonalIcon(
-                                      onPressed: () =>
-                                          _resetDownloadDir(context, ref),
-                                      icon: VariedIcon.varied(
-                                        Symbols.restart_alt,
-                                        size: 18,
-                                        weight: 300,
-                                      ),
-                                      label: const Text('恢复默认'),
-                                      style: FilledButton.styleFrom(
-                                        minimumSize: const Size(0, 40),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 20,
-                                          vertical: 10,
-                                        ),
-                                        shape: const StadiumBorder(),
-                                      ),
-                                    ),
-                                    FilledButton.tonalIcon(
-                                      onPressed: () =>
-                                          _browseDownloadDir(context, ref),
-                                      icon: const Icon(
-                                        Icons.storage_rounded,
-                                        size: 18,
-                                      ),
-                                      label: const Text('浏览U盘'),
-                                      style: FilledButton.styleFrom(
-                                        minimumSize: const Size(0, 40),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 20,
-                                          vertical: 10,
-                                        ),
-                                        shape: const StadiumBorder(),
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                              onTap: () => _openDirectorySettings(
+                                context,
+                                ref,
+                                download: true,
                               ),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 30),
-                        SettingsCard(
-                          title: '本地音乐',
-                          children: [
                             SettingsAction(
                               icon: Icons.library_music_outlined,
                               title: '扫描文件夹',
                               subtitle: settings.localMusicDir,
                               trailing: Symbols.chevron_right,
-                              onTap: () => _pickLocalMusicDir(context, ref),
-                            ),
-                            Padding(
-                              padding: const EdgeInsets.fromLTRB(4, 12, 8, 0),
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: Wrap(
-                                  spacing: 10,
-                                  runSpacing: 8,
-                                  children: [
-                                    FilledButton.tonalIcon(
-                                      onPressed: () =>
-                                          _resetLocalMusicDir(context, ref),
-                                      icon: const Icon(
-                                        Icons.sync_rounded,
-                                        size: 18,
-                                      ),
-                                      label: const Text('恢复为下载位置'),
-                                      style: FilledButton.styleFrom(
-                                        minimumSize: const Size(0, 40),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 20,
-                                          vertical: 10,
-                                        ),
-                                        shape: const StadiumBorder(),
-                                      ),
-                                    ),
-                                    FilledButton.tonalIcon(
-                                      onPressed: () =>
-                                          _browseLocalMusicDir(context, ref),
-                                      icon: const Icon(
-                                        Icons.storage_rounded,
-                                        size: 18,
-                                      ),
-                                      label: const Text('浏览U盘'),
-                                      style: FilledButton.styleFrom(
-                                        minimumSize: const Size(0, 40),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 20,
-                                          vertical: 10,
-                                        ),
-                                        shape: const StadiumBorder(),
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                              onTap: () => _openDirectorySettings(
+                                context,
+                                ref,
+                                download: false,
                               ),
                             ),
                           ],
                         ),
                         const SizedBox(height: 30),
                         SettingsCard(
-                          title: '外观',
+                          title: '外观与界面',
                           children: [
-                            SettingsSwitchAction(
-                              key: const ValueKey(
-                                'skip-startup-screen-setting',
-                              ),
-                              icon: Icons.skip_next_rounded,
-                              title: '跳过启动页',
-                              subtitle: '下次启动生效，开启后直接进入主页',
-                              value: settings.skipStartupScreen,
-                              onChanged: (value) => ref
-                                  .read(settingsProvider.notifier)
-                                  .setSkipStartupScreen(value),
-                            ),
-                            const SizedBox(height: 4),
-                            Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 4,
-                              ),
-                              child: ThemeModeRow(value: settings.themeMode),
-                            ),
-                            const SizedBox(height: 18),
-                            Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 4,
-                              ),
-                              child: themePresets,
-                            ),
                             SettingsAction(
                               icon: Icons.palette_outlined,
-                              title: '自定义主题',
-                              subtitle: settings.customTheme.enabled
-                                  ? '已启用 · 分别设置浅色和深色配色'
-                                  : '独立设置强调色、背景、卡片和文字',
-                              trailing: Icons.chevron_right,
-                              onTap: () => _customizeTheme(context, ref),
+                              title: '主题与配色',
+                              subtitle: '跟随系统、主题颜色与配色风格',
+                              trailing: Symbols.chevron_right,
+                              onTap: () => _openSheet<void>(
+                                context,
+                                ref,
+                                '主题与配色',
+                                _themeSettings,
+                              ),
                             ),
-                            SettingsSwitchAction(
-                              icon: Icons.auto_awesome_outlined,
-                              title: '歌单详情动态配色',
-                              subtitle: settings.playlistArtworkColorsEnabled
-                                  ? '根据歌单封面配色，会覆盖全局主题'
-                                  : '使用全局主题，不根据封面改变颜色',
-                              value: settings.playlistArtworkColorsEnabled,
-                              onChanged: (value) => ref
-                                  .read(settingsProvider.notifier)
-                                  .setPlaylistArtworkColorsEnabled(value),
+                            SettingsAction(
+                              key: const ValueKey('player-interface-setting'),
+                              icon: Icons.display_settings_rounded,
+                              title: '播放界面设置',
+                              subtitle: '封面、歌词与动态流光',
+                              trailing: Icons.chevron_right_rounded,
+                              onTap: () =>
+                                  _configurePlayerInterface(context, ref),
                             ),
-                            const SizedBox(height: 4),
                             SettingsMenuAction(
                               key: const ValueKey('navigation-mode-menu'),
                               menuId: 'navigation-mode-menu',
@@ -541,81 +397,29 @@ class SettingsPage extends ConsumerWidget {
                                   ),
                               ],
                             ),
-                            const SizedBox(height: 4),
-                            SettingsSwitchAction(
-                              key: const ValueKey('car-pad-mode-setting'),
-                              icon: Icons.directions_car_filled_rounded,
-                              title: '车机/Pad 模式',
-                              subtitle: settings.carPadModeEnabled
-                                  ? '播放页使用左右分栏宽屏布局'
-                                  : '关闭，播放页保持手机布局',
-                              value: settings.carPadModeEnabled,
-                              onChanged: (value) => ref
-                                  .read(settingsProvider.notifier)
-                                  .setCarPadModeEnabled(value),
-                            ),
-                            const SizedBox(height: 4),
-                            SettingsSwitchAction(
-                              key: const ValueKey('car-display-setting'),
-                              icon: Icons.display_settings_rounded,
-                              title: '车机显示适配',
-                              subtitle: settings.carDisplayEnabled
-                                  ? '已开启：全局放大、内容铺开、横屏分栏，仅此设备生效'
-                                  : '适合车机上文字按钮偏小、页面两侧留白过多的情况',
-                              value: settings.carDisplayEnabled,
-                              onChanged: (value) => ref
-                                  .read(settingsProvider.notifier)
-                                  .setCarDisplayEnabled(value),
-                            ),
-                            if (settings.carDisplayEnabled)
-                              SettingsMenuAction(
-                                menuId: 'car-display-size-menu',
-                                icon: Icons.format_size_rounded,
-                                title: '车机界面大小',
-                                subtitle: switch (settings.carDisplaySize) {
-                                  < 1 => '紧凑 · 显示更多内容',
-                                  > 1.1 => '更大 · 更易看清和点击',
-                                  _ => '标准 · 按当前窗口调整',
-                                },
-                                options: [
-                                  for (final option in {
-                                    0.85: '紧凑',
-                                    1.0: '标准',
-                                    1.25: '更大',
-                                  }.entries)
-                                    SettingsMenuOption(
-                                      id: option.key.toString(),
-                                      label: option.value,
-                                      selected:
-                                          settings.carDisplaySize == option.key,
-                                      onSelected: () => ref
-                                          .read(settingsProvider.notifier)
-                                          .setCarDisplaySize(option.key),
-                                    ),
-                                ],
-                              ),
-                            const SizedBox(height: 4),
-                            SettingsSwitchAction(
-                              key: const ValueKey('flowing-light-setting'),
-                              icon: Icons.blur_on_rounded,
-                              title: '动态流光',
-                              subtitle: settings.flowingLightEnabled
-                                  ? '播放页背景取封面主色缓慢流动'
-                                  : '播放页使用静态封面模糊背景',
-                              value: settings.flowingLightEnabled,
-                              onChanged: (value) => ref
-                                  .read(settingsProvider.notifier)
-                                  .setFlowingLightEnabled(value),
-                            ),
-                            const SizedBox(height: 4),
                             SettingsAction(
-                              key: const ValueKey('player-interface-setting'),
-                              icon: Icons.display_settings_rounded,
-                              title: '播放界面设置',
-                              subtitle: '歌词模糊、专辑封面与歌词字体',
-                              trailing: Icons.chevron_right_rounded,
-                              onTap: () =>
-                                  _configurePlayerInterface(context, ref),
+                              icon: Icons.directions_car_filled_rounded,
+                              title: '车机与平板',
+                              subtitle: '车机/Pad 模式与车机显示适配',
+                              trailing: Symbols.chevron_right,
+                              onTap: () => _openSheet<void>(
+                                context,
+                                ref,
+                                '车机与平板',
+                                _carSettings,
+                              ),
+                            ),
+                            SettingsSwitchAction(
+                              key: const ValueKey(
+                                'skip-startup-screen-setting',
+                              ),
+                              icon: Icons.skip_next_rounded,
+                              title: '跳过启动页',
+                              subtitle: '下次启动生效，开启后直接进入主页',
+                              value: settings.skipStartupScreen,
+                              onChanged: (value) => ref
+                                  .read(settingsProvider.notifier)
+                                  .setSkipStartupScreen(value),
                             ),
                           ],
                         ),
@@ -627,25 +431,27 @@ class SettingsPage extends ConsumerWidget {
                               const AppUpdateSection()
                             else
                               SettingsAction(
-                              key: const ValueKey('check-update-setting'),
-                              icon: Icons.system_update_alt_rounded,
-                              title: '检查更新',
-                              subtitle: '当前版本：$versionLabel',
-                              trailing: Symbols.chevron_right,
-                              onTap: () => unawaited(
-                                checkForAppUpdate(
-                                  context,
-                                  ref,
-                                  showFeedback: true,
+                                key: const ValueKey('check-update-setting'),
+                                icon: Icons.system_update_alt_rounded,
+                                title: '检查更新',
+                                subtitle: '当前版本：$versionLabel',
+                                trailing: Symbols.chevron_right,
+                                onTap: () => unawaited(
+                                  checkForAppUpdate(
+                                    context,
+                                    ref,
+                                    showFeedback: true,
+                                  ),
                                 ),
                               ),
+                            SettingsAction(
+                              key: const ValueKey('backup-and-restore-setting'),
+                              icon: Icons.cloud_upload_outlined,
+                              title: '备份与恢复',
+                              subtitle: '本地备份、云端恢复与 WebDAV',
+                              trailing: Symbols.chevron_right,
+                              onTap: () => _openBackupSettings(context, ref),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 30),
-                        SettingsCard(
-                          title: '调试',
-                          children: [
                             DebugModeRow(
                               value: settings.debugMode,
                               onChanged: (value) => ref
@@ -686,6 +492,281 @@ class SettingsPage extends ConsumerWidget {
       ),
     );
   }
+
+  Future<T?> _openSheet<T>(
+    BuildContext context,
+    WidgetRef ref,
+    String title,
+    List<Widget> Function(BuildContext, WidgetRef) content,
+  ) async {
+    final toolbar = ref.read(shellToolbarVisibleProvider.notifier);
+    final wasVisible = toolbar.state;
+    toolbar.state = false;
+    try {
+      return await showModalBottomSheet<T>(
+        context: context,
+        useRootNavigator: true,
+        useSafeArea: true,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (context) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.viewInsetsOf(context).bottom,
+          ),
+          child: SafeArea(
+            top: false,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * 0.8,
+              ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+                child: Consumer(
+                  builder: (context, ref, _) => Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      ...content(context, ref),
+                      const SizedBox(height: 16),
+                      FilledButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('完成'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    } finally {
+      if (toolbar.mounted) toolbar.state = wasVisible;
+    }
+  }
+
+  List<Widget> _crossfadeSettings(BuildContext context, WidgetRef ref) {
+    final milliseconds = ref.watch(
+      settingsProvider.select((s) => s.crossfadeMilliseconds),
+    );
+    return [
+      Text(
+        '切换歌曲时，上一首渐弱，下一首同时渐强。',
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+      const SizedBox(height: 24),
+      SettingsNumberControl(
+        icon: Icons.multitrack_audio_rounded,
+        label: '过渡时长（秒）',
+        value: milliseconds / Duration.millisecondsPerSecond,
+        min: 0,
+        max: kMaxCrossfadeMilliseconds / Duration.millisecondsPerSecond,
+        step: 1,
+        continuousLabel: (seconds) =>
+            _crossfadeLabel(_crossfadeMillis(seconds)),
+        onChanged: (seconds) => ref
+            .read(settingsProvider.notifier)
+            .setCrossfadeMilliseconds(_crossfadeMillis(seconds)),
+      ),
+      const SizedBox(height: 12),
+      const Text('滑到最左端即可关闭。'),
+    ];
+  }
+
+  List<Widget> _bluetoothSettings(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    return [
+      SettingsSwitchAction(
+        key: const ValueKey('bluetooth-lyric-setting'),
+        icon: Icons.bluetooth_audio_rounded,
+        title: '显示蓝牙歌词',
+        subtitle: '将当前歌词行作为媒体标题发送到车机或蓝牙设备',
+        value: settings.bluetoothLyricEnabled,
+        onChanged: (value) => _setBluetoothLyricEnabled(context, ref, value),
+      ),
+      SettingsSwitchAction(
+        key: const ValueKey('bluetooth-full-lyric-setting'),
+        icon: Icons.lyrics_rounded,
+        title: '显示完整蓝牙歌词',
+        subtitle: '写入完整 LRC，需接收设备支持',
+        value: settings.bluetoothFullLyricEnabled,
+        onChanged: (value) =>
+            _setBluetoothFullLyricEnabled(context, ref, value),
+      ),
+    ];
+  }
+
+  List<Widget> _carSettings(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    return [
+      SettingsSwitchAction(
+        key: const ValueKey('car-pad-mode-setting'),
+        icon: Icons.directions_car_filled_rounded,
+        title: '车机/Pad 模式',
+        subtitle: settings.carPadModeEnabled ? '播放页使用左右分栏宽屏布局' : '关闭，播放页保持手机布局',
+        value: settings.carPadModeEnabled,
+        onChanged: (value) =>
+            ref.read(settingsProvider.notifier).setCarPadModeEnabled(value),
+      ),
+      const SizedBox(height: 4),
+      SettingsSwitchAction(
+        key: const ValueKey('car-display-setting'),
+        icon: Icons.display_settings_rounded,
+        title: '车机显示适配',
+        subtitle: settings.carDisplayEnabled
+            ? '已开启：全局放大、内容铺开、横屏分栏，仅此设备生效'
+            : '适合车机上文字按钮偏小、页面两侧留白过多的情况',
+        value: settings.carDisplayEnabled,
+        onChanged: (value) =>
+            ref.read(settingsProvider.notifier).setCarDisplayEnabled(value),
+      ),
+      if (settings.carDisplayEnabled)
+        SettingsMenuAction(
+          menuId: 'car-display-size-menu',
+          icon: Icons.format_size_rounded,
+          title: '车机界面大小',
+          subtitle: switch (settings.carDisplaySize) {
+            < 1 => '紧凑 · 显示更多内容',
+            > 1.1 => '更大 · 更易看清和点击',
+            _ => '标准 · 按当前窗口调整',
+          },
+          options: [
+            for (final option in {0.85: '紧凑', 1.0: '标准', 1.25: '更大'}.entries)
+              SettingsMenuOption(
+                id: option.key.toString(),
+                label: option.value,
+                selected: settings.carDisplaySize == option.key,
+                onSelected: () => ref
+                    .read(settingsProvider.notifier)
+                    .setCarDisplaySize(option.key),
+              ),
+          ],
+        ),
+    ];
+  }
+
+  List<Widget> _themeSettings(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    final dynamicColor = ref.watch(dynamicColorStatusProvider);
+    Widget themePresets = Column(
+      children: [
+        ThemeSeedRow(
+          value: settings.themeSeed,
+          onPick: (color) =>
+              ref.read(settingsProvider.notifier).setThemeSeed(color),
+          onCustomize: () => _pickThemeSeed(context, ref),
+        ),
+        const SizedBox(height: 18),
+        ColorStyleRow(
+          value: settings.colorStyle,
+          seed: settings.themeSeed,
+          enabled:
+              settings.customTheme.enabled ||
+              !(settings.useDynamicColor && dynamicColor.available),
+          onPick: (style) =>
+              ref.read(settingsProvider.notifier).setColorStyle(style),
+        ),
+        const SizedBox(height: 18),
+        DynamicColorRow(
+          value: settings.useDynamicColor,
+          available: dynamicColor.available,
+          onChanged: (value) =>
+              ref.read(settingsProvider.notifier).setUseDynamicColor(value),
+        ),
+      ],
+    );
+    if (settings.customTheme.enabled) {
+      themePresets = Semantics(
+        enabled: false,
+        child: ExcludeFocus(child: IgnorePointer(child: themePresets)),
+      );
+    }
+    return [
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: ThemeModeRow(value: settings.themeMode),
+      ),
+      const SizedBox(height: 18),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: themePresets,
+      ),
+      SettingsAction(
+        icon: Icons.palette_outlined,
+        title: '自定义主题',
+        subtitle: settings.customTheme.enabled
+            ? '已启用 · 分别设置浅色和深色配色'
+            : '独立设置强调色、背景、卡片和文字',
+        trailing: Icons.chevron_right,
+        onTap: () => _customizeTheme(context, ref),
+      ),
+      SettingsSwitchAction(
+        icon: Icons.auto_awesome_outlined,
+        title: '歌单详情动态配色',
+        subtitle: settings.playlistArtworkColorsEnabled
+            ? '根据歌单封面配色，会覆盖全局主题'
+            : '使用全局主题，不根据封面改变颜色',
+        value: settings.playlistArtworkColorsEnabled,
+        onChanged: (value) => ref
+            .read(settingsProvider.notifier)
+            .setPlaylistArtworkColorsEnabled(value),
+      ),
+    ];
+  }
+
+  Future<void> _openDirectorySettings(
+    BuildContext context,
+    WidgetRef ref, {
+    required bool download,
+  }) => _openSheet<void>(context, ref, download ? '下载位置' : '扫描文件夹', (
+    context,
+    ref,
+  ) {
+    final settings = ref.watch(settingsProvider);
+    return [
+      SettingsAction(
+        icon: download ? Icons.folder_outlined : Icons.library_music_outlined,
+        title: '当前文件夹',
+        subtitle: download ? settings.downloadDir : settings.localMusicDir,
+        trailing: Symbols.chevron_right,
+        onTap: () => download
+            ? _pickDownloadDir(context, ref)
+            : _pickLocalMusicDir(context, ref),
+      ),
+      Wrap(
+        spacing: 10,
+        runSpacing: 8,
+        children: [
+          FilledButton.tonalIcon(
+            onPressed: () => download
+                ? _resetDownloadDir(context, ref)
+                : _resetLocalMusicDir(context, ref),
+            icon: Icon(
+              download ? Icons.restart_alt : Icons.sync_rounded,
+              size: 18,
+            ),
+            label: Text(download ? '恢复默认' : '恢复为下载位置'),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: () => download
+                ? _browseDownloadDir(context, ref)
+                : _browseLocalMusicDir(context, ref),
+            icon: const Icon(Icons.storage_rounded, size: 18),
+            label: const Text('浏览U盘'),
+          ),
+        ],
+      ),
+    ];
+  });
 
   Future<void> _setBluetoothLyricEnabled(
     BuildContext context,
@@ -1069,6 +1150,26 @@ class SettingsPage extends ConsumerWidget {
     } finally {
       if (toolbar.mounted) toolbar.state = wasToolbarVisible;
     }
+  }
+
+  Future<void> _openBackupSettings(BuildContext context, WidgetRef ref) async {
+    final openWebDav = await _openSheet<bool>(
+      context,
+      ref,
+      '备份与恢复',
+      (context, ref) => [
+        SettingsAction(
+          key: const ValueKey('webdav-sync-setting'),
+          icon: Icons.cloud_sync_outlined,
+          title: 'WebDAV 同步',
+          subtitle: _webDavSubtitle(ref.watch(webDavSyncControllerProvider)),
+          trailing: Symbols.chevron_right,
+          onTap: () => Navigator.of(context).pop(true),
+        ),
+        const PlaylistBackupActions(),
+      ],
+    );
+    if (openWebDav == true && context.mounted) context.go('/settings/webdav');
   }
 
   Future<void> _customizeTheme(BuildContext context, WidgetRef ref) async {

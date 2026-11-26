@@ -196,6 +196,7 @@ class BassPlayer {
   BassEqualizerConfiguration? _pendingEqualizer;
   bool _equalizerPumpRunning = false;
   bool _disposed = false;
+  int? _crossfadeToken;
 
   Stream<BassPlaybackSnapshot> get playbackEventStream =>
       _playbackController.stream;
@@ -249,6 +250,7 @@ class BassPlayer {
     Map<String, String> headers = const {},
     String? formatHint,
   }) async {
+    _crossfadeToken = null;
     await initialize();
     _applyLocalState(
       _snapshot.copyWith(
@@ -268,6 +270,47 @@ class BassPlayer {
     return _snapshot.duration;
   }
 
+  /// Opens a second stream without changing the audible track or its snapshot.
+  Future<bool> prepareCrossfade(
+    Uri source, {
+    required int token,
+    Map<String, String> headers = const {},
+    String? formatHint,
+  }) async {
+    _crossfadeToken = token;
+    await initialize();
+    if (_disposed || _crossfadeToken != token) return false;
+    final raw = await _invokeMap('prepareCrossfade', {
+      'token': token,
+      'uri': source.toString(),
+      'headers': headers,
+      'formatHint': formatHint,
+    });
+    return !_disposed && _crossfadeToken == token && raw['prepared'] == true;
+  }
+
+  /// Makes the incoming track current as both native streams begin the fade.
+  Future<bool> startCrossfade({
+    required int token,
+    required Duration duration,
+  }) async {
+    if (_disposed || _crossfadeToken != token) return false;
+    final raw = await _invokeMap('startCrossfade', {
+      'token': token,
+      'durationMs': duration.inMilliseconds,
+    });
+    if (_disposed || raw['started'] != true) return false;
+    _updateFromMap(raw, notifyPlayback: true);
+    return true;
+  }
+
+  Future<void> cancelCrossfade(int token) async {
+    if (_crossfadeToken == token) _crossfadeToken = null;
+    if (!_disposed && _initialization != null) {
+      await _invokeMap('cancelCrossfade', {'token': token});
+    }
+  }
+
   Future<void> play() async {
     await initialize();
     _updateFromMap(await _invokeMap('play'), notifyPlayback: true);
@@ -279,11 +322,13 @@ class BassPlayer {
   }
 
   Future<void> stop() async {
+    _crossfadeToken = null;
     if (_initialization == null) return;
     _updateFromMap(await _invokeMap('stop'), notifyPlayback: true);
   }
 
   Future<void> seek(Duration position) async {
+    _crossfadeToken = null;
     if (_initialization == null) return;
     _updateFromMap(
       await _invokeMap('seek', {'positionMs': position.inMilliseconds}),

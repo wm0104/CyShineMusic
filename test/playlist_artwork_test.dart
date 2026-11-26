@@ -54,7 +54,55 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('saved order determines each quadrant and uses embedded art', (
+  testWidgets('four slots preserve duplicate covers and refresh after removal', (tester) async {
+    await _cacheNetworkArtwork(_firstUrl);
+    await _cacheNetworkArtwork(_secondUrl);
+    final tracks = [
+      for (var i = 0; i < 5; i++)
+        _track('track-$i', url: i == 4 ? _secondUrl : _firstUrl),
+    ];
+    final playlist = _playlist(tracks);
+    await _pumpCover(tester, playlist);
+    final images = find.byType(PlaylistArtworkImage);
+    expect(images, findsNWidgets(4));
+    expect(_networkUrls(tester), List.filled(4, _firstUrl));
+    final origin = tester.getTopLeft(find.byType(PlaylistCover));
+    for (var i = 0; i < 4; i++) {
+      expect(tester.getTopLeft(images.at(i)),
+          origin + Offset((i % 2) * 30, (i ~/ 2) * 30));
+      expect(tester.getSize(images.at(i)), const Size.square(30));
+    }
+    await _pumpCover(tester, playlist.copyWith(tracks: tracks.skip(1).toList()));
+    expect(_networkUrls(tester), [...List.filled(3, _firstUrl), _secondUrl]);
+    await _pumpCover(tester, playlist.copyWith(tracks: [
+      _track('added', url: _secondUrl), ...tracks,
+    ]));
+    expect(_networkUrls(tester), [_secondUrl, ...List.filled(3, _firstUrl)]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('old pending artwork cannot overwrite a newer saved order', (tester) async {
+    final pending = Completer<ImageInfo>();
+    await _cacheNetworkArtwork(_firstUrl, image: pending.future);
+    await _cacheNetworkArtwork(_secondUrl);
+    final first = _track('pending', url: _firstUrl);
+    final second = _track('ready', url: _secondUrl);
+    final playlist = _playlist([first, second]);
+    await _pumpCover(tester, playlist, settle: false);
+    await _pumpCover(tester, playlist.copyWith(tracks: [second]));
+    expect(_networkUrls(tester), [_secondUrl]);
+    final recorder = PictureRecorder();
+    Canvas(recorder).drawColor(Colors.red, BlendMode.src);
+    final picture = recorder.endRecording();
+    final pixels = picture.toImageSync(2, 2);
+    picture.dispose();
+    pending.complete(ImageInfo(image: pixels));
+    await tester.pumpAndSettle();
+    expect(_networkUrls(tester), [_secondUrl]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('saved order determines each of four cells and uses embedded art', (
     tester,
   ) async {
     await _cacheNetworkArtwork(_firstUrl);

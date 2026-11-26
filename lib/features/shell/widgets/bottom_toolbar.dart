@@ -167,7 +167,7 @@ class _ToolbarPagerState extends State<_ToolbarPager>
   void didUpdateWidget(covariant _ToolbarPager oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.location != oldWidget.location &&
-        isPlaybackArtistLocation(widget.location)) {
+        isPlaybackDetailLocation(widget.location)) {
       // Show the Playback destination even when the mini player was visible.
       _page = 0;
       _dragSign = 0;

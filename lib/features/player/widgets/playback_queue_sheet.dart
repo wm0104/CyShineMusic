@@ -22,6 +22,7 @@ class PlaybackQueueButton extends StatelessWidget {
   const PlaybackQueueButton({
     super.key,
     this.color,
+    this.compact = false,
     required this.count,
     required this.enabled,
     required this.onPressed,
@@ -29,6 +30,7 @@ class PlaybackQueueButton extends StatelessWidget {
 
   final int count;
   final Color? color;
+  final bool compact;
   final bool enabled;
   final VoidCallback onPressed;
 
@@ -43,13 +45,17 @@ class PlaybackQueueButton extends StatelessWidget {
       style: IconButton.styleFrom(fixedSize: const Size.square(48)),
       icon: ExcludeSemantics(
         child: SizedBox.square(
-          dimension: 30,
+          dimension: compact ? 26 : 30,
           child: Stack(
             clipBehavior: Clip.none,
             children: [
               Align(
                 alignment: Alignment.center,
-                child: Icon(Icons.queue_music_rounded, color: color, size: 27),
+                child: Icon(
+                  Icons.queue_music_rounded,
+                  color: color,
+                  size: compact ? 22 : 27,
+                ),
               ),
               if (enabled && count > 0)
                 Positioned(

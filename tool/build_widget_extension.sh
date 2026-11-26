@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 编译 Widget Extension（灵动岛实时活动 + 桌面小组件）并塞进 Runner.app/PlugIns/。
+# 编译桌面小组件扩展并嵌入 Runner.app/PlugIns/。
 #
 # 为什么不用 Xcode 工程：Flutter 的 Runner.xcodeproj 是工具生成的，往里加一个
 # app-extension target 要改十几处 pbxproj（新 target + 依赖 + Embed App Extensions
@@ -34,8 +34,7 @@ SRC="$ROOT/ios/CyShineMusicWidget"
 BUILD="$ROOT/build/CyShineMusicWidget"
 
 NAME="CyShineMusicWidget"
-# 实时活动（ActivityKit）的最低版本，与 patch_xcodeproj.py 保持一致。
-# 16.2 而不是 16.1：Activity.request / update / end / ActivityContent 都是 16.2 起才有。
+# 与 patch_xcodeproj.py 设置的主 App 部署目标一致。
 MIN_IOS="16.2"
 
 if ! command -v xcrun >/dev/null 2>&1; then
@@ -44,8 +43,7 @@ if ! command -v xcrun >/dev/null 2>&1; then
 fi
 
 echo "[1/4] 检查源码"
-for f in CyShineActivityAttributes.swift CyShineLiveActivityWidget.swift \
-         CyShineHomeWidget.swift CyShineWidgetBundle.swift Info.plist; do
+for f in CyShineHomeWidget.swift CyShineWidgetBundle.swift Info.plist; do
   [ -f "$SRC/$f" ] || { echo "[error] 缺少 $SRC/$f" >&2; exit 1; }
 done
 ls -1 "$SRC" | sed 's/^/      /'
@@ -65,10 +63,7 @@ xcrun --sdk iphoneos swiftc \
   -module-name "$NAME" \
   -framework SwiftUI \
   -framework WidgetKit \
-  -framework ActivityKit \
   -o "$APPEX/$NAME" \
-  "$SRC/CyShineActivityAttributes.swift" \
-  "$SRC/CyShineLiveActivityWidget.swift" \
   "$SRC/CyShineHomeWidget.swift" \
   "$SRC/CyShineWidgetBundle.swift"
 
@@ -84,11 +79,11 @@ cp "$SRC/Info.plist" "$APPEX/Info.plist"
 
 # 版本号与主 App 对齐（主 App 由 --build-name / --build-number 注入）。
 # 扩展与主 App 的 CFBundleVersion 必须一致，否则 iOS 会拒绝加载扩展，
-# 表现为「灵动岛怎么都不出现」而控制台只有一条很含糊的提示。
+# 版本不一致时，桌面小组件可能无法加载。
 #
 # ★ UIDeviceFamily：Xcode 在真正 build extension target 时会自动注入这个键，
 #   但这里是手工组装 .appex，没人会替我们补。**缺失时 iOS 可能直接不加载扩展**
-#   —— 桌面小组件搜不到、灵动岛不出现，而主 App 完全正常、一条报错都没有。
+#   此时系统可能搜不到桌面小组件。
 #   已实测过我们 2.0.2 的包里 appex 就是缺这个键。
 #
 #   ⚠ Info.plist 里已经写死了 [1,2]，所以这里**只在缺失时补写**。
@@ -132,4 +127,4 @@ done
 /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" \
   "$APP_PATH/PlugIns/$NAME.appex/Info.plist" 2>/dev/null | sed 's/^/      NSExtensionPointIdentifier  /'
 echo
-echo "[done] 现在打出的 IPA 会带上灵动岛实时活动与桌面小组件"
+echo "[done] 现在打出的 IPA 会带上桌面小组件"

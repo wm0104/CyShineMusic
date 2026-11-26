@@ -43,6 +43,9 @@ const String _kNetworkAdapterModeKey = 'network_adapter_mode';
 const String _kEnabledSearchSourcesKey = 'enabled_search_source_codes';
 const String _kDiscoverySourceOrderKey = 'discovery_source_order';
 const String _kOnlinePlaybackQualityKey = 'online_playback_quality';
+const String _kCrossfadeMillisecondsKey = 'crossfade_milliseconds';
+const String _kLegacyCrossfadeSecondsKey = 'crossfade_seconds';
+const int kMaxCrossfadeMilliseconds = 12 * Duration.millisecondsPerSecond;
 const String _kBatchDownloadQualityKey = 'batch_download_quality';
 const String _kShowMiniLyricsKey = 'show_mini_lyrics';
 const String _kAllowMixWithOthersKey = 'allow_mix_with_others';
@@ -127,6 +130,7 @@ class AppSettings {
     required this.discoverySourceOrder,
     required this.onlinePlaybackQuality,
     required this.batchDownloadQuality,
+    this.crossfadeMilliseconds = 0,
     required this.showMiniLyrics,
     required this.allowMixWithOthers,
     required this.bluetoothLyricEnabled,
@@ -172,6 +176,7 @@ class AppSettings {
   final List<MusicSource> discoverySourceOrder;
   final OnlinePlaybackQuality onlinePlaybackQuality;
   final OnlinePlaybackQuality batchDownloadQuality;
+  final int crossfadeMilliseconds;
   final bool showMiniLyrics;
 
   /// Whether playback should avoid taking exclusive audio focus so other apps
@@ -211,6 +216,7 @@ class AppSettings {
     List<MusicSource>? discoverySourceOrder,
     OnlinePlaybackQuality? onlinePlaybackQuality,
     OnlinePlaybackQuality? batchDownloadQuality,
+    int? crossfadeMilliseconds,
     bool? showMiniLyrics,
     bool? allowMixWithOthers,
     bool? bluetoothLyricEnabled,
@@ -256,6 +262,7 @@ class AppSettings {
     discoverySourceOrder: discoverySourceOrder ?? this.discoverySourceOrder,
     onlinePlaybackQuality: onlinePlaybackQuality ?? this.onlinePlaybackQuality,
     batchDownloadQuality: batchDownloadQuality ?? this.batchDownloadQuality,
+    crossfadeMilliseconds: crossfadeMilliseconds ?? this.crossfadeMilliseconds,
     showMiniLyrics: showMiniLyrics ?? this.showMiniLyrics,
     allowMixWithOthers: allowMixWithOthers ?? this.allowMixWithOthers,
     bluetoothLyricEnabled: bluetoothLyricEnabled ?? this.bluetoothLyricEnabled,
@@ -332,7 +339,9 @@ class SettingsNotifier extends Notifier<AppSettings> {
                 lyricSize /
                 kLyricFontSizeDefault,
           );
+
     return AppSettings(
+      crossfadeMilliseconds: _readCrossfadeMilliseconds(),
       downloadDir: downloadDir,
       localMusicDir: _prefs.getString(_kLocalMusicDirKey) ?? downloadDir,
       useBuiltInSourceFilePicker:
@@ -590,6 +599,101 @@ class SettingsNotifier extends Notifier<AppSettings> {
     );
   }
 
+  /// Portable manual-backup whitelist; never enumerate SharedPreferences.
+  Map<String, dynamic> exportPreferencesForBackup() => {
+    ...exportAppearanceForSync(),
+    'navigationMode': state.navigationMode.code,
+    'carPadModeEnabled': state.carPadModeEnabled,
+    'skipStartupScreen': state.skipStartupScreen,
+    'autoPlayOnStartup': state.autoPlayOnStartup,
+    'showMiniLyrics': state.showMiniLyrics,
+    'allowMixWithOthers': state.allowMixWithOthers,
+    'bluetoothLyricEnabled': state.bluetoothLyricEnabled,
+    'bluetoothFullLyricEnabled': state.bluetoothFullLyricEnabled,
+    'onlinePlaybackQuality': state.onlinePlaybackQuality.code,
+    'batchDownloadQuality': state.batchDownloadQuality.code,
+    'crossfadeMilliseconds': state.crossfadeMilliseconds,
+    'enabledSearchSources': [
+      for (final source in kManageableSearchSources)
+        if (state.enabledSearchSources.contains(source)) source.code,
+    ],
+    'discoverySourceOrder': [for (final source in state.discoverySourceOrder) source.code],
+    'useBuiltInSourceFilePicker': state.useBuiltInSourceFilePicker,
+  };
+
+  /// Call only after decodeAppPreferencesBackup has validated the whole file.
+  /// Apply present keys only, without the live-sync compatibility side effects.
+  Future<void> applyValidatedPreferencesBackup(Map<String, dynamic> json) async {
+    if (json.containsKey('themeMode')) {
+      await setThemeMode(_decodeThemeMode(json['themeMode'] as String));
+    }
+    if (json.containsKey('themeSeedArgb')) {
+      await setThemeSeed(Color(json['themeSeedArgb'] as int));
+    }
+    if (json.containsKey('colorStyle')) {
+      await setColorStyle(AppColorStyle.fromCode(json['colorStyle'] as String));
+    }
+    if (json.containsKey('customTheme')) {
+      final theme = CustomTheme.fromJson(json['customTheme']);
+      // Restoring a theme must not disable an omitted artwork-color preference.
+      if (!await _prefs.setString(_kCustomThemeKey, jsonEncode(theme.toJson()))) {
+        throw StateError('无法保存备份偏好');
+      }
+      state = state.copyWith(customTheme: theme);
+    }
+    final switches = <String, Future<void> Function(bool)>{
+      'useDynamicColor': setUseDynamicColor,
+      'playlistArtworkColorsEnabled': setPlaylistArtworkColorsEnabled,
+      'flowingLightEnabled': setFlowingLightEnabled,
+      'lyricViewBlurDisabled': setLyricViewBlurDisabled,
+      'squareAlbumCoverEnabled': setSquareAlbumCoverEnabled,
+      'carPadModeEnabled': setCarPadModeEnabled,
+      'skipStartupScreen': setSkipStartupScreen,
+      'autoPlayOnStartup': setAutoPlayOnStartup,
+      'showMiniLyrics': setShowMiniLyrics,
+      'allowMixWithOthers': setAllowMixWithOthers,
+      'bluetoothLyricEnabled': setBluetoothLyricEnabled,
+      'bluetoothFullLyricEnabled': setBluetoothFullLyricEnabled,
+      'useBuiltInSourceFilePicker': setUseBuiltInSourceFilePicker,
+    };
+    for (final entry in switches.entries) {
+      if (json.containsKey(entry.key)) await entry.value(json[entry.key] as bool);
+    }
+    if (json.containsKey('navigationMode')) {
+      await setNavigationMode(AppNavigationMode.fromCode(json['navigationMode'] as String));
+    }
+    if (json.containsKey('onlinePlaybackQuality')) {
+      await setOnlinePlaybackQuality(OnlinePlaybackQuality.fromCode(json['onlinePlaybackQuality'] as String));
+    }
+    if (json.containsKey('crossfadeMilliseconds')) {
+      await setCrossfadeMilliseconds(json['crossfadeMilliseconds'] as int);
+    }
+    if (json.containsKey('batchDownloadQuality')) {
+      await setBatchDownloadQuality(OnlinePlaybackQuality.fromCode(json['batchDownloadQuality'] as String));
+    }
+    if (json.containsKey('enabledSearchSources')) {
+      final sources = (json['enabledSearchSources'] as List).cast<String>()
+          .map((code) => MusicSource.tryFromCode(code)!).toSet();
+      await _prefs.setStringList(_kEnabledSearchSourcesKey,
+          [for (final source in kManageableSearchSources) if (sources.contains(source)) source.code]);
+      state = state.copyWith(enabledSearchSources: Set<MusicSource>.unmodifiable(sources));
+    }
+    if (json.containsKey('discoverySourceOrder')) {
+      await setDiscoverySourceOrder((json['discoverySourceOrder'] as List)
+          .cast<String>().map((code) => MusicSource.tryFromCode(code)!));
+    }
+    if (const ['lyricFontWeight', 'lyricTranslationFontWeight',
+      'lyricFontSize', 'lyricTranslationFontSize'].any(json.containsKey)) {
+      // Pin omitted translations too: legacy derived values must survive restart.
+      await setLyricFontStyle(
+        weight: (json['lyricFontWeight'] as num?)?.toDouble() ?? state.lyricFontWeight,
+        size: (json['lyricFontSize'] as num?)?.toDouble() ?? state.lyricFontSize,
+        translationWeight: (json['lyricTranslationFontWeight'] as num?)?.toDouble() ?? state.lyricTranslationFontWeight,
+        translationSize: (json['lyricTranslationFontSize'] as num?)?.toDouble() ?? state.lyricTranslationFontSize,
+      );
+    }
+  }
+
   Map<String, dynamic> exportAppearanceForSync() => {
     'themeMode': _encodeThemeMode(state.themeMode),
     'themeSeedArgb': state.themeSeed.toARGB32(),
@@ -816,6 +920,27 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setOnlinePlaybackQuality(OnlinePlaybackQuality quality) async {
     await _prefs.setString(_kOnlinePlaybackQualityKey, quality.code);
     state = state.copyWith(onlinePlaybackQuality: quality);
+  }
+
+  int _readCrossfadeMilliseconds() {
+    final milliseconds = _prefs.get(_kCrossfadeMillisecondsKey);
+    if (milliseconds is int) {
+      return milliseconds.clamp(0, kMaxCrossfadeMilliseconds);
+    }
+    final legacy = _prefs.get(_kLegacyCrossfadeSecondsKey);
+    if (legacy is! int) return 0;
+    final seconds = legacy.clamp(
+      0,
+      kMaxCrossfadeMilliseconds ~/ Duration.millisecondsPerSecond,
+    );
+    return Duration(seconds: seconds).inMilliseconds;
+  }
+
+  Future<void> setCrossfadeMilliseconds(int milliseconds) async {
+    final value = milliseconds.clamp(0, kMaxCrossfadeMilliseconds);
+    if (value == state.crossfadeMilliseconds) return;
+    state = state.copyWith(crossfadeMilliseconds: value);
+    await _prefs.setInt(_kCrossfadeMillisecondsKey, value);
   }
 
   Future<void> setBatchDownloadQuality(OnlinePlaybackQuality quality) async {

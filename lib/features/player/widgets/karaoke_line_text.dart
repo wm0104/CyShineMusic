@@ -24,6 +24,7 @@ class KaraokeLineText extends StatefulWidget {
     required this.playing,
     required this.buffering,
     required this.active,
+    this.translation = false,
   });
 
   final KaraokeLyricLine line;
@@ -31,6 +32,7 @@ class KaraokeLineText extends StatefulWidget {
   final ValueListenable<bool> playing;
   final ValueListenable<bool> buffering;
   final bool active;
+  final bool translation;
 
   @override
   KaraokeLineTextState createState() => KaraokeLineTextState();
@@ -51,6 +53,14 @@ class KaraokeLineTextState extends State<KaraokeLineText>
   /// The playback time consumed by the painter, including clock interpolation.
   @visibleForTesting
   double get debugPlaybackPositionMs => _position.value;
+
+  @visibleForTesting
+  double get debugSweepProgress {
+    final paragraph = _paragraph!;
+    return ((paragraph.frontAt(_position.value) + paragraph.feather) /
+            (paragraph.end + paragraph.feather))
+        .clamp(0.0, 1.0);
+  }
 
   @override
   void initState() {
@@ -178,12 +188,13 @@ class KaraokeLineTextState extends State<KaraokeLineText>
     final direction = Directionality.of(context);
     final locale = Localizations.maybeLocaleOf(context);
     return Semantics(
-      label: widget.line.text,
+      label: widget.translation ? widget.line.translation : widget.line.text,
       child: LayoutBuilder(
         builder: (context, constraints) {
           var paragraph = _paragraph;
           if (paragraph == null ||
               !identical(paragraph.line, widget.line) ||
+              paragraph.translation != widget.translation ||
               paragraph.style != style ||
               paragraph.scaler != scaler ||
               paragraph.pixelRatio != pixelRatio ||
@@ -193,6 +204,7 @@ class KaraokeLineTextState extends State<KaraokeLineText>
             paragraph?.dispose();
             paragraph = _paragraph = _LyricParagraph(
               widget.line,
+              widget.translation,
               style,
               scaler,
               pixelRatio,
@@ -246,6 +258,7 @@ class _TimedSweep {
 class _LyricParagraph {
   _LyricParagraph(
     this.line,
+    this.translation,
     this.style,
     this.scaler,
     this.pixelRatio,
@@ -253,7 +266,10 @@ class _LyricParagraph {
     this.locale,
     this.width,
   ) {
-    final raw = line.words.map((word) => word.text).join();
+    final words = translation ? line.translationWords : line.words;
+    final raw = words.isEmpty
+        ? (translation ? line.translation! : line.text)
+        : words.map((word) => word.text).join();
     final content = raw.trim();
     final trimOffset = raw.length - raw.trimLeft().length;
     final fontSize = scaler.scale(style.fontSize ?? 32);
@@ -278,6 +294,36 @@ class _LyricParagraph {
       start += metrics.width + feather;
     }
     end = math.max(0, start - feather);
+    if (words.isEmpty) {
+      if (translation && line.hasWordTiming) {
+        // Allocate the shaped translation's width over sung intervals only.
+        // During a rest frontAt holds the previous endpoint, even mid-glyph.
+        final duration = line.words.fold(
+          0,
+          (sum, word) => sum + math.max(1, word.endMs - word.startMs),
+        );
+        var elapsed = 0;
+        var from = -feather;
+        for (final word in line.words) {
+          elapsed += math.max(1, word.endMs - word.startMs);
+          final to = -feather + (end + feather) * elapsed / duration;
+          sweeps.add(_TimedSweep(word, from, to));
+          from = to;
+        }
+      } else {
+        sweeps.add(
+          _TimedSweep(
+            KaraokeWordTiming(
+              text: content,
+              startMs: line.startMs,
+              endMs: line.endMs,
+            ),
+            -feather,
+            end,
+          ),
+        );
+      }
+    }
     final boundaries = <int>[0];
     for (final character in content.characters) {
       boundaries.add(boundaries.last + character.length);
@@ -312,7 +358,7 @@ class _LyricParagraph {
       }
     }
     var offset = -trimOffset;
-    for (final word in line.words) {
+    for (final word in words) {
       final next = offset + word.text.length;
       final from = offset.clamp(0, content.length);
       final to = next.clamp(0, content.length);
@@ -355,6 +401,7 @@ class _LyricParagraph {
   }
 
   final KaraokeLyricLine line;
+  final bool translation;
   final TextStyle style;
   final TextScaler scaler;
   final double pixelRatio;

@@ -7,7 +7,6 @@ Future<void> showSongsSortSheet({
   required SongSortMode initialMode,
   required bool initialAscending,
   required void Function(SongSortMode mode, bool ascending) onChanged,
-  VoidCallback? onCustomOrder,
   bool customSelected = false,
 }) {
   final scheme = Theme.of(context).colorScheme;
@@ -22,7 +21,6 @@ Future<void> showSongsSortSheet({
       initialMode: initialMode,
       initialAscending: initialAscending,
       onChanged: onChanged,
-      onCustomOrder: onCustomOrder,
       customSelected: customSelected,
     ),
   );
@@ -33,11 +31,9 @@ class _SongsSortSheet extends StatefulWidget {
     required this.initialMode,
     required this.initialAscending,
     required this.onChanged,
-    this.onCustomOrder,
     this.customSelected = false,
   });
 
-  final VoidCallback? onCustomOrder;
   final bool customSelected;
   final SongSortMode initialMode;
   final bool initialAscending;
@@ -123,22 +119,6 @@ class _SongsSortSheetState extends State<_SongsSortSheet> {
                           )
                         : null,
                     onTap: () => _selectMode(mode),
-                  ),
-                if (widget.onCustomOrder != null)
-                  ListTile(
-                    minTileHeight: 52,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    selected: _customSelected,
-                    selectedTileColor: scheme.secondaryContainer.withValues(alpha: 0.72),
-                    leading: const Icon(Icons.drag_handle_rounded, size: 21),
-                    title: const Text('自定义排序'),
-                    trailing: _customSelected ? const Icon(Icons.check_rounded) : null,
-                    onTap: () {
-                      Navigator.of(context).pop();
-                      widget.onCustomOrder!();
-                    },
                   ),
                 const SizedBox(height: 16),
                 Padding(

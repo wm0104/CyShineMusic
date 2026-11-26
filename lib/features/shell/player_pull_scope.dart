@@ -29,7 +29,7 @@ class PlayerPullGestures {
   final void Function({bool fromPlayer}) onStart;
 
   final VoidCallback onOpen;
-  final VoidCallback onClose;
+  final void Function([String? destination, Object? extra]) onClose;
 
   /// Vertical finger delta in logical pixels, positive downwards.
   final ValueChanged<double> onUpdate;

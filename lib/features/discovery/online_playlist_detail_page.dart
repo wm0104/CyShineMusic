@@ -2,6 +2,20 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../core/models/album_info.dart';
+import '../../core/models/artist_album_group.dart';
+import '../../core/services/download_service.dart';
+import '../../core/ui/expressive_download_button.dart';
+import '../../core/ui/tight_track_actions.dart';
+import '../../theme/app_motion.dart';
+import '../search/track_match_picker.dart';
+import '../search/widgets/album_result_tile.dart';
+import '../search/widgets/source_filter_chips.dart';
+import 'album_track_match_store.dart';
+import 'widgets/discovery_playlist_cover.dart';
 
 import '../../core/api/music_api.dart';
 import '../shell/shell_bottom_area.dart';
@@ -34,6 +48,7 @@ import '../search/widgets/quality_picker_sheet.dart';
 import '../search/widgets/search_result_tile.dart';
 import 'discovery_controller.dart';
 import '../shell/shell_navigation.dart';
+import '../shell/widgets/toolbar_metrics.dart';
 
 class OnlinePlaylistDetailPage extends ConsumerStatefulWidget {
   const OnlinePlaylistDetailPage({
@@ -65,6 +80,11 @@ class _OnlinePlaylistDetailPageState
   int _trackLimit = onlinePlaylistDetailInitialTrackLimit;
   PlaylistInfo? _lastPlaylist;
   PlaylistSummary? _summary;
+  bool _artistAlbums = false;
+  final List<int> _albumOffsets = [0];
+  bool _batchMode = false;
+  bool _batchSubmitting = false;
+  final Set<String> _selectedTracks = {};
   bool _saving = false;
   bool _removingFavorite = false;
   final ScrollController _scrollController = ScrollController();
@@ -83,11 +103,24 @@ class _OnlinePlaylistDetailPageState
     maxTracks: _trackLimit,
   );
 
-  String get _returnLocation =>
+  String get _returnLocation => _album && widget.fromPlayback
+      ? GoRouterState.of(context).uri.toString() :
       '/discover/${widget.kind.path}/${widget.source.code}/${Uri.encodeComponent(widget.playlistId)}';
 
   String get _detailLabel => '${widget.kind.label}详情';
   bool get _artist => widget.kind == OnlineCollectionKind.artist;
+  bool get _album => widget.kind == OnlineCollectionKind.album;
+
+  String _trackKey(MusicInfo music) => '${music.source.code}:${music.id}';
+
+  MusicInfo _effectiveMusic(MusicInfo original) => !_album ? original :
+      ref.read(albumTrackMatchesProvider)[albumTrackMatchKey(
+        source: widget.source, albumId: widget.playlistId, original: original,
+      )] ?? original;
+
+  List<DownloadHistoryEntry> _queueFor(PlaylistInfo playlist, {Iterable<MusicInfo>? tracks}) =>
+      _onlinePlaylistQueue(playlist, widget.kind, tracks: tracks,
+        resolve: _album ? _effectiveMusic : null);
 
   ArtistInfo? get _playerArtist {
     final artist = ref
@@ -112,6 +145,13 @@ class _OnlinePlaylistDetailPageState
   }
 
   void _invalidateDetail({bool retry = false}) {
+    if (_artist && _artistAlbums) {
+      for (final offset in _albumOffsets) {
+        final provider = artistAlbumPageProvider((source: widget.source, id: widget.playlistId, offset: offset));
+        if (!retry || ref.read(provider).hasError) ref.invalidate(provider);
+      }
+      return;
+    }
     if (_artist) {
       for (
         int offset = 0;
@@ -149,6 +189,11 @@ class _OnlinePlaylistDetailPageState
     if (identityChanged) {
       _trackLimit = _savedTrackLimit;
       _lastPlaylist = null;
+      _artistAlbums = false;
+      _albumOffsets..clear()..add(0);
+      _batchMode = false;
+      _batchSubmitting = false;
+      _selectedTracks.clear();
       _summary =
           widget.summary ??
           ref.read(onlinePlaylistSummaryCacheProvider)[_identity];
@@ -193,6 +238,19 @@ class _OnlinePlaylistDetailPageState
       ref.read(onlinePlaylistTrackLimitCacheProvider)[_identity] = _trackLimit;
     }
     final cached = _lastPlaylist;
+    if (_artist) {
+      // Song loading/failure must not remove the independently loaded catalog.
+      final playlist = cached ?? PlaylistInfo(
+        id: widget.playlistId, source: widget.source,
+        name: _summary?.name ?? (widget.fromPlayback ? _playerArtist?.name : null) ?? '歌手详情',
+        coverUrl: coverUrl, tracks: const [],
+      );
+      return _buildPlaylist(context, playlist,
+        carPadModeEnabled: carPadModeEnabled,
+        loadingMore: detail.isLoading,
+        loadMoreError: detail.hasError ? _friendlyError(detail.error!) : null,
+      );
+    }
     if (cached != null && loaded == null) {
       final loadMoreError = detail.whenOrNull(
         error: (error, _) => _friendlyError(error),
@@ -262,10 +320,11 @@ class _OnlinePlaylistDetailPageState
     bool loadingMore = false,
     String? loadMoreError,
   }) {
-    final local = _artist
+    final local = _artist || _album
         ? null
         : _findSavedPlaylist(ref.watch(localPlaylistsProvider), playlist);
-    final queue = _onlinePlaylistQueue(playlist, widget.kind);
+    if (_album) ref.watch(albumTrackMatchesProvider);
+    final queue = _queueFor(playlist);
 
     final artworkProvider = networkPlaylistArtworkProvider(
       playlist.coverUrl,
@@ -275,6 +334,7 @@ class _OnlinePlaylistDetailPageState
       context,
       carPadModeEnabled: carPadModeEnabled,
     );
+    final albumSlivers = _artist && _artistAlbums ? _buildAlbumCatalog() : const <Widget>[];
     final metadata = [
       playlist.source.label,
       if (playlist.creator?.trim().isNotEmpty == true) playlist.creator!.trim(),
@@ -296,16 +356,22 @@ class _OnlinePlaylistDetailPageState
           final scheme = Theme.of(context).colorScheme;
           Future<void> refresh() async {
             _invalidateDetail();
-            await ref.read(onlinePlaylistDetailProvider(_key).future);
+            if (_artist && _artistAlbums) {
+              await Future.wait([for (final offset in _albumOffsets)
+                ref.read(artistAlbumPageProvider((source: widget.source, id: widget.playlistId, offset: offset)).future)]);
+            } else {
+              await ref.read(onlinePlaylistDetailProvider(_key).future);
+            }
           }
 
-          PlaylistDetailActions actionsWith(EdgeInsetsGeometry padding) {
+          Widget actionsWith(EdgeInsetsGeometry padding) {
+            if (_artist && _artistAlbums) return const SizedBox.shrink();
             return PlaylistDetailActions(
-              onPlay: queue.isEmpty
+              onPlay: queue.isEmpty || (_artist && _artistAlbums)
                   ? null
                   : () => _playQueue(playlist, queue.first),
-              showFavorite: !_artist,
-              onFavorite: _artist || _saving
+              showFavorite: !_artist && !_album,
+              onFavorite: _artist || _album || _saving
                   ? null
                   : () => _toggleFavorite(playlist, local),
               saving: _saving,
@@ -321,14 +387,31 @@ class _OnlinePlaylistDetailPageState
           final hasTrackFooter =
               loadingMore || (loadMoreError != null && playlist.hasMoreTracks);
           final trackSlivers = <Widget>[
+            if (_artist) SliverToBoxAdapter(child: _artistSegments()),
+            if (_artist && _artistAlbums) ...albumSlivers
+            else ...[
             SliverToBoxAdapter(
               child: _PlaylistTracksHeading(
                 popular: _artist,
                 count: playlist.tracks.length,
                 total: playlist.totalTracks,
+                trailing: _album ? _albumSelectionControls(playlist) : null,
               ),
             ),
-            if (playlist.tracks.isEmpty)
+            if (_artist && playlist.tracks.isEmpty && loadingMore)
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(12, 0, 12,
+                  ShellBottomArea.contentPadding(context, 150)),
+                sliver: SliverList.separated(
+                  itemCount: wide ? 8 : 5,
+                  separatorBuilder: (_, _) => _trackListDivider(context, scheme),
+                  itemBuilder: (_, _) => const _DetailTrackSkeleton(),
+                ),
+              )
+            else if (_artist && playlist.tracks.isEmpty && loadMoreError != null)
+              SliverToBoxAdapter(child: _LoadMoreTracksError(message: loadMoreError,
+                onRetry: () => _invalidateDetail(retry: true)))
+            else if (playlist.tracks.isEmpty)
               SliverFillRemaining(
                 hasScrollBody: false,
                 child: Center(
@@ -354,7 +437,7 @@ class _OnlinePlaylistDetailPageState
                       _requestMoreTracksIfNeeded(playlist, index);
                     }
                     final music = playlist.tracks[index];
-                    final entry = queue.where((item) {
+                    final entry = _album ? queue[index] : queue.where((item) {
                       final json = item.musicJson;
                       return json != null && json['id'] == music.id;
                     }).firstOrNull;
@@ -364,7 +447,18 @@ class _OnlinePlaylistDetailPageState
                           context,
                           maxWidth: 900,
                         ),
-                        child: _OnlinePlaylistTrackTile(
+                        child: _album ? _AlbumTrackTile(
+                          key: ValueKey('album-track-${_trackKey(music)}'),
+                          original: music, effective: _effectiveMusic(music), index: index,
+                          batchMode: _batchMode, submitting: _batchSubmitting,
+                          selected: _selectedTracks.contains(_trackKey(music)),
+                          onToggleSelected: () => setState(() {
+                            if (!_selectedTracks.add(_trackKey(music))) _selectedTracks.remove(_trackKey(music));
+                          }),
+                          onPlay: entry == null ? null : () => _playQueue(playlist, entry),
+                          onAdd: () => _addAlbumTracks([music]),
+                          onMatch: () => _matchAlbumTrack(music),
+                        ) : _OnlinePlaylistTrackTile(
                           music: music,
                           onAddToPlaylist: _artist
                               ? () => addMusicToChosenPlaylist(
@@ -391,10 +485,12 @@ class _OnlinePlaylistDetailPageState
                   onRetry: () => _invalidateDetail(retry: true),
                 ),
               ),
+            ],
           ];
 
-          return Scaffold(
+          return SlidableAutoCloseBehavior(child: Scaffold(
             backgroundColor: scheme.surface,
+            bottomNavigationBar: _album && _batchMode ? _albumBatchBar(playlist) : null,
             body: wide
                 ? PlaylistWideBody(
                     topBar: ImmersivePlaylistTopBar(
@@ -404,6 +500,7 @@ class _OnlinePlaylistDetailPageState
                     ),
                     infoPane: PlaylistWideInfoPane(
                       artworkProvider: artworkProvider,
+                      artworkLoading: _artist && loadingMore && !_artistAlbums && artworkProvider == null,
                       artworkHeroTag: onlinePlaylistArtworkHeroTag(
                         playlist.source,
                         playlist.id,
@@ -421,7 +518,7 @@ class _OnlinePlaylistDetailPageState
                         child: CustomScrollView(
                           controller: _scrollController,
                           key: PageStorageKey(
-                            'online-playlist-wide-${playlist.source.code}-${playlist.id}',
+                            'online-${widget.kind.name}-wide-${playlist.source.code}-${playlist.id}',
                           ),
                           physics: const AlwaysScrollableScrollPhysics(
                             parent: BouncingScrollPhysics(),
@@ -447,6 +544,7 @@ class _OnlinePlaylistDetailPageState
                           SliverToBoxAdapter(
                             child: ImmersivePlaylistHeader(
                               artworkProvider: artworkProvider,
+                              artworkLoading: _artist && loadingMore && !_artistAlbums && artworkProvider == null,
                               artworkHeroTag: onlinePlaylistArtworkHeroTag(
                                 playlist.source,
                                 playlist.id,
@@ -475,7 +573,7 @@ class _OnlinePlaylistDetailPageState
                       ),
                     ),
                   ),
-          );
+          ));
         },
       ),
     );
@@ -483,23 +581,20 @@ class _OnlinePlaylistDetailPageState
 
   Future<void> _playQueue(
     PlaylistInfo playlist,
-    DownloadHistoryEntry selectedEntry,
-  ) async {
-    final available = await ensureQueueEntryMusicSourceAvailable(
-      context,
-      selectedEntry,
-    );
-    if (!available || !mounted) return;
-
-    final queue = _onlinePlaylistQueue(playlist, widget.kind);
+    DownloadHistoryEntry selectedEntry, {
+    Iterable<MusicInfo>? tracks,
+  }) async {
+    final queue = _queueFor(playlist, tracks: tracks);
     final entry = _matchingQueueEntry(queue, selectedEntry);
     if (entry == null) return;
+    final available = await ensureQueueEntryMusicSourceAvailable(context, entry);
+    if (!available || !mounted) return;
     final player = ref.read(playerControllerProvider.notifier);
     final api = ref.read(musicApiProvider);
 
     openPlayer(context, returnLocation: _returnLocation);
     final playback = player.playFromPlaylistQueue(entry, queue);
-    if (playlist.hasMoreTracks) {
+    if (tracks == null && playlist.hasMoreTracks && !_album) {
       unawaited(
         _expandOnlinePlaylistQueue(
           api: api,
@@ -518,7 +613,7 @@ class _OnlinePlaylistDetailPageState
     PlaylistInfo playlist,
     LocalPlaylist? savedPlaylist,
   ) async {
-    if (_saving) return;
+    if (_saving || _album || _artist) return;
     final removing = savedPlaylist != null;
     setState(() {
       _saving = true;
@@ -565,6 +660,200 @@ class _OnlinePlaylistDetailPageState
     }
   }
 
+  Widget _artistSegments() => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+    child: Center(child: ConstrainedBox(
+      constraints: CarDisplayLayout.contentConstraints(context, maxWidth: 900),
+      child: SearchSegments(
+        prefix: 'artist-content',
+        options: const [(id: 'songs', label: '歌曲'), (id: 'albums', label: '专辑')],
+        selected: _artistAlbums ? 1 : 0,
+        semanticsSuffix: '',
+        onSelect: (index) => setState(() => _artistAlbums = index == 1),
+      ),
+    )),
+  );
+
+  List<Widget> _buildAlbumCatalog() {
+    final albums = <AlbumInfo>[];
+    AlbumPage? last;
+    AsyncValue<AlbumPage>? pending;
+    for (final offset in _albumOffsets) {
+      final page = ref.watch(artistAlbumPageProvider((
+        source: widget.source, id: widget.playlistId, offset: offset,
+      )));
+      final data = page.asData?.value;
+      if (data == null) {pending = page; break;}
+      last = data;
+      albums.addAll(data.albums);
+    }
+    final loadedPage = last;
+    final loadState = pending;
+    final groups = groupArtistAlbums(albums);
+    return [
+      if (albums.isNotEmpty) SliverPadding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        sliver: SliverList.separated(
+          itemCount: groups.length,
+          separatorBuilder: (_, _) => _trackListDivider(context, Theme.of(context).colorScheme),
+          itemBuilder: (context, index) => Center(child: ConstrainedBox(
+            constraints: CarDisplayLayout.contentConstraints(context, maxWidth: 900),
+            child: AlbumResultTile(album: groups[index].representative,
+              variants: groups[index].variants, fromPlayback: widget.fromPlayback),
+          )),
+        ),
+      ),
+      if (loadState?.isLoading == true)
+        const SliverToBoxAdapter(child: _LoadMoreTracksIndicator())
+      else if (loadState?.hasError == true)
+        SliverToBoxAdapter(child: _LoadMoreTracksError(
+          message: _friendlyError(loadState!.error!),
+          onRetry: () => _invalidateDetail(retry: true),
+        ))
+      else if (albums.isEmpty)
+        const SliverFillRemaining(hasScrollBody: false,
+          child: Center(child: Text('暂无可用专辑')))
+      else if (loadedPage?.hasMore == true)
+        SliverToBoxAdapter(child: Center(child: TextButton(
+          onPressed: () => setState(() {
+            final next = loadedPage!.offset + loadedPage.limit;
+            if (!_albumOffsets.contains(next)) _albumOffsets.add(next);
+          }),
+          child: const Text('加载更多专辑'),
+        ))),
+      const SliverToBoxAdapter(child: SizedBox(height: 156)),
+    ];
+  }
+
+  Widget _albumSelectionControls(PlaylistInfo playlist) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      if (_batchMode) IconButton(
+        tooltip: _selectedTracks.containsAll(playlist.tracks.map(_trackKey)) ? '取消全选' : '全选',
+        onPressed: _batchSubmitting ? null : () => setState(() {
+          if (_selectedTracks.containsAll(playlist.tracks.map(_trackKey))) {
+            _selectedTracks.clear();
+          } else {
+            _selectedTracks..clear()..addAll(playlist.tracks.map(_trackKey));
+          }
+        }),
+        icon: const Icon(Icons.select_all_rounded),
+      ),
+      IconButton(
+        tooltip: _batchMode ? '退出批量操作' : '批量操作',
+        onPressed: _batchSubmitting || playlist.tracks.isEmpty ? null : () => setState(() {
+          _batchMode = !_batchMode;
+          if (!_batchMode) _selectedTracks.clear();
+        }),
+        icon: Icon(_batchMode ? Icons.close_rounded : Icons.checklist_rounded),
+      ),
+    ],
+  );
+
+  List<MusicInfo> _selectedAlbumTracks(PlaylistInfo playlist) => [
+    for (final music in playlist.tracks)
+      if (_selectedTracks.contains(_trackKey(music))) music,
+  ];
+
+  Widget _albumBatchBar(PlaylistInfo playlist) {
+    final tracks = _selectedAlbumTracks(playlist);
+    final area = ShellBottomArea.maybeOf(context);
+    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    final reserve = area?.navigationMode == AppNavigationMode.singleCapsule
+        ? toolbarHeightFor(context) + (safeBottom > toolbarMinimumBottomInset
+            ? safeBottom : toolbarMinimumBottomInset)
+        : area?.floatingExtent ?? 0.0;
+    return Padding(
+      padding: EdgeInsets.only(bottom: reserve),
+      child: _AlbumBatchBar(
+      selectedCount: tracks.length, submitting: _batchSubmitting,
+      onAdd: tracks.isEmpty ? null : () => _addAlbumTracks(tracks),
+      onDownload: tracks.isEmpty ? null : () => _downloadAlbumTracks(tracks),
+      onPlay: tracks.isEmpty ? null : () => _playSelectedAlbum(playlist, tracks),
+    ));
+  }
+
+  Future<void> _addAlbumTracks(List<MusicInfo> originals) async {
+    if (_batchSubmitting || originals.isEmpty) return;
+    // Capture the chosen versions once; the target sheet must not rematch them.
+    final musics = originals.map(_effectiveMusic).toList(growable: false);
+    setState(() => _batchSubmitting = true);
+    try {
+      final destination = await showPlaylistBrowserSheet(context, mode: PlaylistBrowserMode.addSongs);
+      if (!mounted || destination == null || !destination.startsWith('/playlists/')) return;
+      final store = ref.read(localPlaylistsProvider.notifier);
+      final id = destination.substring('/playlists/'.length);
+      final target = store.byId(id);
+      if (target == null) {
+        showAppToast(context, '歌单不存在或已被删除', type: AppToastType.warning);
+        return;
+      }
+      final count = await store.addMusics(id, musics);
+      if (!mounted) return;
+      showAppToast(context, count == 0 ? '所选歌曲已在「${target.name}」中' : '已添加 $count 首歌曲到「${target.name}」',
+        type: count == 0 ? AppToastType.info : AppToastType.success);
+      setState(() {_batchMode = false; _selectedTracks.clear();});
+    } catch (error) {
+      if (mounted) showAppToast(context, '添加到歌单失败：$error', type: AppToastType.error);
+    } finally {
+      if (mounted) setState(() => _batchSubmitting = false);
+    }
+  }
+
+  Future<void> _matchAlbumTrack(MusicInfo original) async {
+    final source = widget.source;
+    final albumId = widget.playlistId;
+    final key = albumTrackMatchKey(source: source, albumId: albumId, original: original);
+    final expected = ref.read(albumTrackMatchesProvider)[key];
+    final replacement = await showTrackMatchPicker(context,
+      title: original.name, artist: original.singer,
+      initialSource: expected?.source ?? original.source,
+    );
+    if (!mounted || replacement == null) return;
+    try {
+      final saved = await ref.read(albumTrackMatchesProvider.notifier).setMatch(
+        source: source, albumId: albumId, original: original,
+        replacement: replacement, expected: expected,
+      );
+      if (mounted) showAppToast(context, saved ? '已保存手选匹配' : '匹配已更新，保留较新的选择',
+        type: saved ? AppToastType.success : AppToastType.info);
+    } catch (error) {
+      if (mounted) showAppToast(context, '保存匹配失败：$error', type: AppToastType.error);
+    }
+  }
+
+  Future<void> _playSelectedAlbum(PlaylistInfo playlist, List<MusicInfo> tracks) async {
+    final queue = _queueFor(playlist, tracks: tracks);
+    if (queue.isEmpty) return;
+    await _playQueue(playlist, queue.first, tracks: tracks);
+  }
+
+  Future<void> _downloadAlbumTracks(List<MusicInfo> originals) async {
+    if (_batchSubmitting) return;
+    final progress = ref.read(downloadProgressProvider);
+    final musics = originals.map(_effectiveMusic)
+        .where((music) => !progress.isMusicBusy(music)).toList(growable: false);
+    if (musics.isEmpty) return;
+    setState(() => _batchSubmitting = true);
+    try {
+      final available = await ensureOnlineMusicSourcesAvailable(context, musics.map((music) => music.source));
+      if (!mounted || !available) return;
+      final preference = ref.read(settingsProvider).batchDownloadQuality;
+      final results = await ref.read(downloadServiceProvider).downloadMany(
+        musics: musics, embed: const EmbedRequest.richest(), qualityPreference: preference,
+      );
+      if (!mounted) return;
+      final failed = results.where((result) => !result.success).length;
+      showAppToast(context, failed == 0 ? '批量下载完成' : '$failed 首下载失败',
+        type: failed == 0 ? AppToastType.success : AppToastType.warning);
+      setState(() {_batchMode = false; _selectedTracks.clear();});
+    } catch (error) {
+      if (mounted) showAppToast(context, '批量下载失败：$error', type: AppToastType.error);
+    } finally {
+      if (mounted) setState(() => _batchSubmitting = false);
+    }
+  }
+
   void _requestMoreTracksIfNeeded(PlaylistInfo playlist, int index) {
     if (index < playlist.tracks.length - 6) return;
     _loadMoreTracks(playlist);
@@ -587,6 +876,177 @@ class _OnlinePlaylistDetailPageState
       }
       setState(() => _trackLimit = target);
     });
+  }
+}
+
+class _AlbumTrackTile extends ConsumerWidget {
+  const _AlbumTrackTile({super.key, required this.original, required this.effective,
+    required this.index, required this.batchMode, required this.submitting,
+    required this.selected, required this.onToggleSelected, required this.onPlay,
+    required this.onAdd, required this.onMatch});
+
+  final MusicInfo original;
+  final MusicInfo effective;
+  final int index;
+  final bool batchMode;
+  final bool submitting;
+  final bool selected;
+  final VoidCallback onToggleSelected;
+  final VoidCallback? onPlay;
+  final VoidCallback onAdd;
+  final VoidCallback onMatch;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final task = ref.watch(downloadProgressProvider.select(
+      (state) => state.latestTaskForMusic(effective),
+    ));
+    final selectionEnabled = !submitting && task?.isBusy != true;
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final row = Semantics(
+      selected: batchMode && selected,
+      label: '第 ${index + 1} 首',
+      child: TrackResultRow(
+        name: original.name, singer: original.singer,
+        album: original.albumName, sourceLabel: original.source.label,
+        interval: original.interval,
+        backgroundColor: batchMode && selected
+            ? scheme.primaryContainer.withValues(alpha: 0.56) : Colors.transparent,
+        cover: SizedBox.square(dimension: 44, child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: original.meta.picUrl?.trim().isNotEmpty == true
+              ? DiscoveryPlaylistCover(url: original.meta.picUrl, size: 44)
+              : ColoredBox(color: scheme.secondaryContainer,
+                  child: Center(child: Text('${index + 1}',
+                    style: TextStyle(color: scheme.onSecondaryContainer)))),
+        )),
+        onPlay: batchMode ? (selectionEnabled ? onToggleSelected : null) : onPlay,
+        actions: [
+          AnimatedSize(
+            duration: reduceMotion ? Duration.zero : AppMotion.medium,
+            curve: AppMotion.emphasized,
+            alignment: Alignment.centerRight,
+            child: AnimatedSwitcher(
+              duration: reduceMotion ? Duration.zero : AppMotion.medium,
+              switchInCurve: AppMotion.emphasizedDecelerate,
+              switchOutCurve: AppMotion.emphasizedAccelerate,
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: SlideTransition(
+                  position: Tween<Offset>(begin: const Offset(0.18, 0), end: Offset.zero).animate(animation),
+                  child: child,
+                ),
+              ),
+              child: batchMode ? SizedBox.square(
+                key: const ValueKey('playlist-select-action'), dimension: 44,
+                child: Center(child: Checkbox(
+                  value: selected, visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  onChanged: selectionEnabled ? (_) => onToggleSelected() : null,
+                )),
+              ) : ExpressiveDownloadButton(
+                key: ValueKey('search-result-download-${original.id}'),
+                isLoading: task?.isBusy ?? false,
+                isDone: task?.stage == DownloadStage.done,
+                progress: task?.fraction,
+                onPressed: task?.isBusy == true || task?.stage == DownloadStage.done
+                    ? null : () => showQualityPickerSheet(context, effective),
+                tooltip: task?.stage == DownloadStage.done ? '已下载完成'
+                    : task?.stage == DownloadStage.failed ? '重新选择音质下载' : '选择音质下载',
+                size: 36, tapTargetSize: 40, tonal: true,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (batchMode) return Theme(
+      data: Theme.of(context).copyWith(colorScheme: selected ? scheme.copyWith(
+        onSurface: scheme.onPrimaryContainer,
+        onSurfaceVariant: scheme.onPrimaryContainer.withValues(alpha: 0.8),
+      ) : scheme),
+      child: row,
+    );
+    return LayoutBuilder(builder: (context, constraints) => Slidable(
+      key: ValueKey('album-slide-${original.source.code}-${original.id}'),
+      endActionPane: ActionPane(
+        motion: const BehindMotion(),
+        extentRatio: tightTrackActionExtent(2, constraints.maxWidth,
+          textScale: MediaQuery.textScalerOf(context).scale(12) / 12),
+        children: [
+          SlidableAction(
+            autoClose: false,
+            onPressed: (actionContext) async {
+              await Slidable.of(actionContext)?.close();
+              onAdd();
+            },
+            padding: tightTrackActionPadding,
+            flex: tightTrackActionFlex('添加到歌单'),
+            backgroundColor: scheme.secondaryContainer,
+            foregroundColor: scheme.onSecondaryContainer,
+            icon: Icons.playlist_add_rounded, label: '添加到歌单',
+          ),
+          SlidableAction(
+            onPressed: (_) => onMatch(), padding: tightTrackActionPadding,
+            flex: tightTrackActionFlex('更换匹配'),
+            backgroundColor: scheme.secondaryContainer,
+            foregroundColor: scheme.onSecondaryContainer,
+            icon: Icons.search_rounded, label: '更换匹配',
+          ),
+        ],
+      ),
+      child: row,
+    ));
+  }
+}
+
+/// The saved-playlist batch bar's layout and actions, without album-inapplicable
+/// remove/move operations. The normal shell navigation remains untouched.
+class _AlbumBatchBar extends StatelessWidget {
+  const _AlbumBatchBar({required this.selectedCount, required this.submitting,
+    required this.onAdd, required this.onDownload, required this.onPlay});
+  final int selectedCount;
+  final bool submitting;
+  final VoidCallback? onAdd;
+  final VoidCallback? onDownload;
+  final VoidCallback? onPlay;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    Widget action(IconData icon, String label, VoidCallback? onPressed) {
+      final enabled = !submitting && onPressed != null;
+      final color = enabled ? scheme.onSurfaceVariant : scheme.onSurface.withValues(alpha: 0.34);
+      return Expanded(child: Semantics(button: true, enabled: enabled, label: label,
+        child: Material(color: Colors.transparent, child: InkWell(
+          onTap: enabled ? onPressed : null,
+          child: AnimatedOpacity(duration: AppMotion.short, opacity: enabled ? 1 : 0.72,
+            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Icon(icon, size: 21, color: color), const SizedBox(height: 3),
+              Text(label, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: color, fontSize: 10.5, fontWeight: FontWeight.w500)),
+            ])),
+        )),
+      ));
+    }
+    return Material(
+      key: const ValueKey('playlist-batch-bottom-bar'),
+      color: scheme.surfaceContainer, elevation: 5,
+      shadowColor: scheme.shadow.withValues(alpha: 0.18),
+      child: SafeArea(top: false, bottom: ShellBottomArea.maybeOf(context) == null, child: Container(
+        height: 64,
+        decoration: BoxDecoration(border: Border(top: BorderSide(
+          color: scheme.outlineVariant.withValues(alpha: 0.42)))),
+        child: Row(children: [
+          action(Icons.playlist_add_rounded, '添加到歌单', onAdd),
+          action(submitting ? Icons.downloading_rounded : Icons.download_rounded,
+            selectedCount == 0 ? '下载选中' : '下载 $selectedCount 首', onDownload),
+          action(Icons.playlist_play_rounded,
+            selectedCount == 0 ? '播放选中' : '播放 $selectedCount 首', onPlay),
+        ]),
+      )),
+    );
   }
 }
 
@@ -629,7 +1089,7 @@ class _OnlinePlaylistTrackTileState
   Widget build(BuildContext context) {
     final task = ref.watch(
       downloadProgressProvider.select(
-        (value) => value.latestTaskForMusic(widget.music.id),
+        (value) => value.latestTaskForMusic(widget.music),
       ),
     );
     final fallback = _fallbackRequested
@@ -733,7 +1193,7 @@ class _DetailLoading extends StatelessWidget {
                       description: item?.description,
                       descriptionLoading: descriptionLoading,
                       actions: PlaylistDetailActions(
-                        showFavorite: kind != OnlineCollectionKind.artist,
+                        showFavorite: kind != OnlineCollectionKind.artist && kind != OnlineCollectionKind.album,
                         loading: true,
                         padding: const EdgeInsets.only(top: 4),
                       ),
@@ -784,7 +1244,7 @@ class _DetailLoading extends StatelessWidget {
                       SliverToBoxAdapter(
                         child: PlaylistDetailActions(
                           loading: true,
-                          showFavorite: kind != OnlineCollectionKind.artist,
+                          showFavorite: kind != OnlineCollectionKind.artist && kind != OnlineCollectionKind.album,
                         ),
                       ),
                       SliverToBoxAdapter(
@@ -938,7 +1398,9 @@ class _DetailError extends StatelessWidget {
 }
 
 class _PlaylistTracksHeading extends StatelessWidget {
-  const _PlaylistTracksHeading({this.count, this.total, this.popular = false});
+  const _PlaylistTracksHeading({this.count, this.total, this.popular = false, this.trailing});
+
+  final Widget? trailing;
 
   final bool popular;
 
@@ -965,17 +1427,13 @@ class _PlaylistTracksHeading extends StatelessWidget {
             maxWidth: 900,
           ),
           child: SizedBox(
-            height: 24,
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _label,
+            height: trailing == null ? 24 : 48,
+            child: Row(children: [
+              Expanded(child: Text(_label,
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0,
-                ),
-              ),
-            ),
+                  fontWeight: FontWeight.w700, letterSpacing: 0))),
+              if (trailing != null) trailing!,
+            ]),
           ),
         ),
       ),
@@ -1156,15 +1614,27 @@ List<DownloadHistoryEntry> _onlinePlaylistQueue(
   PlaylistInfo playlist,
   OnlineCollectionKind kind, {
   Iterable<MusicInfo>? tracks,
+  MusicInfo Function(MusicInfo)? resolve,
 }) {
-  final prefix = kind == OnlineCollectionKind.artist ? 'artist' : 'online';
+  final prefix = switch (kind) {
+    OnlineCollectionKind.album => 'album',
+    OnlineCollectionKind.artist => 'artist',
+    _ => 'online',
+  };
   final queueId = '$prefix:${playlist.source.code}:${playlist.id}';
   final queue = <DownloadHistoryEntry>[];
   for (final music in tracks ?? playlist.tracks) {
     final entry = PlaylistTrack.fromMusicInfo(
-      music,
-    ).toQueueEntry(playlistId: queueId);
-    if (entry != null) queue.add(entry);
+      resolve?.call(music) ?? music,
+    ).toQueueEntry(playlistId: kind == OnlineCollectionKind.album
+        ? '$queueId:${music.source.code}:${music.id}' : queueId);
+    if (entry != null) {
+      queue.add(kind == OnlineCollectionKind.album ? DownloadHistoryEntry.fromJson({
+        ...entry.toJson(),
+        'id': 'playlist:$queueId:${queue.length}:${music.source.code}:${music.id}',
+        'preservePlaylistPosition': true,
+      }) : entry);
+    }
   }
   return queue;
 }
@@ -1174,9 +1644,11 @@ DownloadHistoryEntry? _matchingQueueEntry(
   DownloadHistoryEntry selected,
 ) {
   for (final entry in queue) {
-    if (entry.id == selected.id ||
-        (entry.sourceCode == selected.sourceCode &&
-            entry.musicId == selected.musicId)) {
+    if (entry.id == selected.id) return entry;
+  }
+  if (selected.preservePlaylistPosition) return null;
+  for (final entry in queue) {
+    if (entry.sourceCode == selected.sourceCode && entry.musicId == selected.musicId) {
       return entry;
     }
   }
@@ -1227,6 +1699,7 @@ Future<void> _expandOnlinePlaylistQueue({
       }
       return;
     }
+    if (kind == OnlineCollectionKind.album) return;
     final fullPlaylist = kind == OnlineCollectionKind.leaderboard
         ? await api.getLeaderboard(
             source: playlist.source,

@@ -4,13 +4,13 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-const manifestUrl = 'https://github.com/wm0104/CyShineMusic-iOS/releases/latest/download/ios-update.json';
-const releasePage = 'https://github.com/wm0104/CyShineMusic-iOS/releases/tag/ios-v2.0.9';
-const ipaUrl = 'https://github.com/wm0104/CyShineMusic-iOS/releases/download/ios-v2.0.9/CyShineMusic-unsigned.ipa';
+const manifestUrl = 'https://github.com/wm0104/CyShineMusic/releases/latest/download/ios-update.json';
+const releasePage = 'https://github.com/wm0104/CyShineMusic/releases/tag/ios-v2.0.9';
+const ipaUrl = 'https://github.com/wm0104/CyShineMusic/releases/download/ios-v2.0.9/CyShineMusic-unsigned.ipa';
 
 Map<String, Object?> iosManifest() => {
   'schema': 1,
-  'repository': 'wm0104/CyShineMusic-iOS',
+  'repository': 'wm0104/CyShineMusic',
   'version': '2.0.9',
   'build': 209,
   'tag': 'ios-v2.0.9',

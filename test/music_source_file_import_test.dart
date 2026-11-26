@@ -53,6 +53,7 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({
       'use_built_in_source_file_picker': true,
+      'network_adapter_mode': 'io',
     });
     final prefs = await SharedPreferences.getInstance();
     directory = Directory.systemTemp.createTempSync('source-import-test-');
@@ -137,25 +138,27 @@ void main() {
       await tester.tap(find.text('U盘'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('音源.JS'));
-      // Let real filesystem I/O and the widget test's fake event loop both run.
-      for (var attempt = 0; attempt < 100; attempt++) {
+      // The file picker closes on the frame clock; the import reads real files.
+      final button = find.widgetWithText(FilledButton, '本地导入');
+      for (var attempt = 0; attempt < 500; attempt++) {
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 10)),
         );
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 16));
         if (container
             .read(musicSourceControllerProvider)
             .requireValue
             .enabledIds
-            .isNotEmpty) {
+            .isNotEmpty && tester.widget<FilledButton>(button).onPressed != null) {
           break;
         }
       }
-      await tester.pumpAndSettle();
       final state = container.read(musicSourceControllerProvider).requireValue;
       expect(state.records.single.name, '车机导入测试');
       expect(state.records.single.origin, source.path);
+      expect(state.records.single.lastError, isNull);
       expect(state.enabledIds, [state.records.single.id]);
+      expect(tester.widget<FilledButton>(button).onPressed, isNotNull);
       expect(loadedScripts, [_script]);
       expect(systemPickerCalls, 0);
       expect(container.read(shellToolbarVisibleProvider), isTrue);

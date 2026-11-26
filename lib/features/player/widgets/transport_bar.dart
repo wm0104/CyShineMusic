@@ -11,7 +11,9 @@ import 'player_layout.dart';
 import 'player_slider_thumb_shape.dart';
 
 class TransportBar extends ConsumerStatefulWidget {
-  const TransportBar({super.key});
+  const TransportBar({super.key, this.compactControls = false});
+
+  final bool compactControls;
 
   @override
   ConsumerState<TransportBar> createState() => _TransportBarState();
@@ -67,6 +69,10 @@ class _TransportBarState extends ConsumerState<TransportBar> {
             ThemeData.estimateBrightnessForColor(ink) == Brightness.dark
             ? Colors.white
             : Colors.black;
+        final compact = widget.compactControls;
+        final skipStyle = compact
+            ? IconButton.styleFrom(fixedSize: const Size.square(48))
+            : null;
         return Padding(
           padding: const EdgeInsets.fromLTRB(0, 0, 0, 2),
           child: Column(
@@ -151,49 +157,59 @@ class _TransportBarState extends ConsumerState<TransportBar> {
                   ],
                 ),
               ),
-              const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _PlaybackModeButton(
-                    color: ink,
-                    mode: vm.playbackMode,
-                    enabled: vm.hasTrack,
-                    onPressed: controller.cyclePlaybackMode,
-                  ),
-                  IconButton(
-                    tooltip: '上一首',
-                    onPressed: canControl ? controller.playPrevious : null,
-                    icon: Icon(
-                      Icons.skip_previous_rounded,
-                      color: controlColor,
-                      size: 38,
+              SizedBox(height: compact ? 2 : 10),
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: compact ? 312 : double.infinity,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    _PlaybackModeButton(
+                      color: ink,
+                      mode: vm.playbackMode,
+                      compact: compact,
+                      enabled: vm.hasTrack,
+                      onPressed: controller.cyclePlaybackMode,
                     ),
-                  ),
-                  _PlayButton(
-                    color: ink,
-                    playing: vm.playing,
-                    showSpinner: vm.loading || vm.buffering,
-                    ended: vm.ended,
-                    canControl: canControl,
-                    controller: controller,
-                  ),
-                  IconButton(
-                    tooltip: '下一首',
-                    onPressed: canControl ? controller.playNext : null,
-                    icon: Icon(
-                      Icons.skip_next_rounded,
-                      color: controlColor,
-                      size: 38,
+                    IconButton(
+                      tooltip: '上一首',
+                      style: skipStyle,
+                      onPressed: canControl ? controller.playPrevious : null,
+                      icon: Icon(
+                        Icons.skip_previous_rounded,
+                        color: controlColor,
+                        size: compact ? 30 : 38,
+                      ),
                     ),
-                  ),
-                  PlaybackQueueButton(
-                    color: ink,
-                    count: vm.queueCount,
-                    enabled: vm.hasTrack,
-                    onPressed: () => showPlaybackQueueSheet(context),
-                  ),
-                ],
+                    _PlayButton(
+                      color: ink,
+                      compact: compact,
+                      playing: vm.playing,
+                      showSpinner: vm.loading || vm.buffering,
+                      ended: vm.ended,
+                      canControl: canControl,
+                      controller: controller,
+                    ),
+                    IconButton(
+                      tooltip: '下一首',
+                      style: skipStyle,
+                      onPressed: canControl ? controller.playNext : null,
+                      icon: Icon(
+                        Icons.skip_next_rounded,
+                        color: controlColor,
+                        size: compact ? 30 : 38,
+                      ),
+                    ),
+                    PlaybackQueueButton(
+                      color: ink,
+                      count: vm.queueCount,
+                      compact: compact,
+                      enabled: vm.hasTrack,
+                      onPressed: () => showPlaybackQueueSheet(context),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -233,11 +249,13 @@ class _PlaybackModeButton extends StatelessWidget {
   const _PlaybackModeButton({
     required this.color,
     required this.mode,
+    required this.compact,
     required this.enabled,
     required this.onPressed,
   });
 
   final PlayerPlaybackMode mode;
+  final bool compact;
   final Color color;
   final bool enabled;
   final VoidCallback onPressed;
@@ -269,7 +287,7 @@ class _PlaybackModeButton extends StatelessWidget {
           _playbackModeIcon(mode),
           key: ValueKey(mode),
           color: iconColor,
-          size: 25,
+          size: compact ? 20 : 25,
         ),
       ),
     );
@@ -288,6 +306,7 @@ class _PlayButton extends StatelessWidget {
   const _PlayButton({
     required this.color,
     required this.playing,
+    required this.compact,
     required this.showSpinner,
     required this.ended,
     required this.canControl,
@@ -295,6 +314,7 @@ class _PlayButton extends StatelessWidget {
   });
 
   final bool playing;
+  final bool compact;
   final Color color;
   final bool showSpinner;
   final bool ended;
@@ -311,9 +331,8 @@ class _PlayButton extends StatelessWidget {
         onTap: canControl
             ? (ended ? controller.replay : controller.toggle)
             : null,
-        child: SizedBox(
-          width: 72,
-          height: 72,
+        child: SizedBox.square(
+          dimension: compact ? 52 : 72,
           child: Center(
             child: showSpinner
                 ? SizedBox.square(
@@ -329,7 +348,7 @@ class _PlayButton extends StatelessWidget {
                         : playing
                         ? Icons.pause_rounded
                         : Icons.play_arrow_rounded,
-                    size: 56,
+                    size: compact ? 40 : 56,
                     color: canControl ? color : color.withValues(alpha: 0.22),
                   ),
           ),

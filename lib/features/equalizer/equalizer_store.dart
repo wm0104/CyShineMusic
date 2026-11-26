@@ -684,6 +684,17 @@ class EqualizerNotifier extends Notifier<EqualizerSettings> {
     );
   }
 
+  /// Backup restore is durable immediately, unlike interactive slider updates.
+  Future<void> applyBackup(EqualizerSettings value) async {
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    final next = value.sanitized();
+    if (!await _preferences.setString(_equalizerStorageKey, next.toPersistedJson())) {
+      throw StateError('无法保存备份均衡器设置');
+    }
+    state = next;
+  }
+
   void reset() => _update(EqualizerSettings.fallback);
 
   void importSpeq(String value) {

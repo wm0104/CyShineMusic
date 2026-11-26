@@ -100,6 +100,69 @@ void main() {
     },
   );
 
+  test('an activation failure remains retryable when runtime disposal fails', () async {
+    const channel = MethodChannel('test/controller-failing-disposal');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    var failLoad = true;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      switch (call.method) {
+        case 'load':
+          if (failLoad) {
+            throw PlatformException(code: 'load-failed', message: '初始化失败');
+          }
+          return {
+            'sources': {
+              'kw': {
+                'actions': ['musicUrl'],
+                'qualitys': ['128k'],
+              },
+            },
+          };
+        case 'dispose':
+          throw PlatformException(code: 'dispose-failed', message: '清理失败');
+        default:
+          throw MissingPluginException(call.method);
+      }
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final dio = Dio();
+    addTearDown(dio.close);
+    final harness = await _Harness.create(
+      MusicSourceState(records: [_record('source')], enabledIds: const []),
+      runtime: MusicSourceRuntime(dio, channel: channel),
+    );
+    addTearDown(harness.container.dispose);
+    final controller = harness.container.read(
+      musicSourceControllerProvider.notifier,
+    );
+
+    Object? failure;
+    try {
+      await controller.activate('source');
+    } catch (error) {
+      failure = error;
+    }
+    final failed = harness.container
+        .read(musicSourceControllerProvider)
+        .requireValue;
+    expect(failed.activatingId, isNull);
+    expect(failed.enabledIds, isEmpty);
+    expect(failed.records.single.lastError, '初始化失败');
+    expect((await harness.store.load()).records.single.lastError, '初始化失败');
+    expect(failure, isA<MusicSourceRuntimeException>());
+    expect(failure.toString(), '初始化失败');
+
+    failLoad = false;
+    await controller.activate('source');
+    final retried = harness.container
+        .read(musicSourceControllerProvider)
+        .requireValue;
+    expect(retried.activatingId, isNull);
+    expect(retried.enabledIds, ['source']);
+    expect(retried.records.single.lastError, isNull);
+  });
+
   test('deactivating a middle source preserves fallback priority', () async {
     final records = [_record('first'), _record('second'), _record('third')];
     final harness = await _Harness.create(
@@ -155,6 +218,43 @@ void main() {
         firstId: firstScript,
         secondId: secondScript,
       });
+    },
+  );
+
+  test(
+    'manual backups preserve local limits without removing any installed source',
+    () async {
+      const script = '// @name Extra';
+      final id = musicSourceId(parseMusicSourceMetadata(script));
+      final payload = {
+        'records': [_record(id, name: 'Extra', author: '').toJson()],
+        'enabledIds': [id],
+        'scripts': {id: script},
+      };
+      for (final count in [5, 20]) {
+        final local = List.generate(count, (i) => _record('installed-$i'));
+        final enabled = local.take(5).map((r) => r.id).toList();
+        final h = await _Harness.create(
+          MusicSourceState(records: local, enabledIds: enabled),
+          failingIds: {id},
+        );
+        addTearDown(h.container.dispose);
+        final controller = h.container.read(
+          musicSourceControllerProvider.notifier,
+        );
+        if (count == 20) {
+          await expectLater(
+            controller.restoreMissingFromBackup(payload),
+            throwsA(isA<MusicSourceRuntimeException>()),
+          );
+          expect(h.store.current.records, local);
+        } else {
+          expect(await controller.restoreMissingFromBackup(payload), 1);
+          expect(h.store.current.records.last.id, id);
+          expect(h.store.scripts[id], script);
+        }
+        expect(h.store.current.enabledIds, enabled);
+      }
     },
   );
 
@@ -570,6 +670,7 @@ class _Harness {
 
   static Future<_Harness> create(
     MusicSourceState initialState, {
+    MusicSourceRuntime? runtime,
     Set<String> failingIds = const <String>{},
     String downloadedScript = '',
     int httpStatus = 200,
@@ -579,12 +680,13 @@ class _Harness {
   }) async {
     final preferences = await SharedPreferences.getInstance();
     final store = _MemoryStore(preferences, initialState);
-    final runtime = _ValidationRuntime(failingIds);
     final container = ProviderContainer(
       overrides: [
         sharedPreferencesProvider.overrideWithValue(preferences),
         musicSourceStoreProvider.overrideWithValue(store),
-        musicSourceRuntimeProvider.overrideWithValue(runtime),
+        musicSourceRuntimeProvider.overrideWithValue(
+          runtime ?? _ValidationRuntime(failingIds),
+        ),
         musicSourceUpdateRuntimeProvider.overrideWith(
           (ref) => _CheckingRuntime(
             checkFailedIds,

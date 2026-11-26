@@ -558,6 +558,7 @@ final class CyShineSecurityScopedStore {
 final class CyShineAudioIntentChannel: NSObject, UIDocumentPickerDelegate {
 
   private var exportResult: FlutterResult?
+  private var exportCleanupDirectory: URL?
 
   func handle(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
     switch call.method {
@@ -571,7 +572,30 @@ final class CyShineAudioIntentChannel: NSObject, UIDocumentPickerDelegate {
         result(FlutterError(code: "NOT_FOUND", message: "更新 IPA 不存在", details: nil))
         return
       }
-      exportUpdateIpa(path: path, result: result)
+      exportFile(url: URL(fileURLWithPath: path), result: result)
+
+    case "savePlaylistBackup":
+      guard let args = call.arguments as? [String: Any],
+            let name = args["name"] as? String,
+            let text = args["text"] as? String,
+            name.range(of: #"\A栖弦备份-[0-9]{4}-[0-9]{2}-[0-9]{2}\.json\z"#,
+                       options: .regularExpression) != nil else {
+        result(FlutterError(code: "INVALID_ARGS", message: "备份文件名称或内容无效", details: nil))
+        return
+      }
+      // A unique temporary directory keeps the date-only filename without
+      // touching an earlier export in the app's user-visible Documents folder.
+      let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "cyshine-backup-export-\(UUID().uuidString)", isDirectory: true)
+      do {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent(name)
+        try text.write(to: file, atomically: true, encoding: .utf8)
+        exportFile(url: file, cleanupDirectory: directory, result: result)
+      } catch {
+        try? FileManager.default.removeItem(at: directory)
+        result(FlutterError(code: "WRITE_FAILED", message: "无法准备备份文件", details: nil))
+      }
 
     case "openAudio":
       guard let args = call.arguments as? [String: Any],
@@ -590,40 +614,55 @@ final class CyShineAudioIntentChannel: NSObject, UIDocumentPickerDelegate {
     }
   }
 
-  /// 直接导出更新暂存文件；不在 Documents 创建或覆盖同名中间文件。
-  private func exportUpdateIpa(path: String, result: @escaping FlutterResult) {
+  /// 直接导出暂存文件；不在 Documents 创建或覆盖同名中间文件。
+  private func exportFile(url: URL, cleanupDirectory: URL? = nil,
+                          result: @escaping FlutterResult) {
     DispatchQueue.main.async {
+      let fail: (String, String) -> Void = { code, message in
+        if let directory = cleanupDirectory {
+          try? FileManager.default.removeItem(at: directory)
+        }
+        result(FlutterError(code: code, message: message, details: nil))
+      }
       guard self.exportResult == nil else {
-        result(FlutterError(code: "EXPORT_BUSY", message: "正在保存，请稍候", details: nil))
+        fail("EXPORT_BUSY", "正在保存，请稍候")
         return
       }
       guard let root = CyShineIncomingAudio.shared.topViewController() else {
-        result(FlutterError(code: "OPEN_FAILED", message: "找不到可用的界面", details: nil))
+        fail("OPEN_FAILED", "找不到可用的界面")
         return
       }
       if #available(iOS 14.0, *) {
         let picker = UIDocumentPickerViewController(
-          forExporting: [URL(fileURLWithPath: path)], asCopy: true)
+          forExporting: [url], asCopy: true)
         self.exportResult = result
+        self.exportCleanupDirectory = cleanupDirectory
         picker.delegate = self
         root.present(picker, animated: true)
       } else {
-        result(FlutterError(code: "UNSUPPORTED", message: "请使用分享保存 IPA", details: nil))
+        fail("UNSUPPORTED", "当前系统版本不支持保存到文件")
       }
     }
   }
 
   func documentPicker(_ controller: UIDocumentPickerViewController,
                       didPickDocumentsAt urls: [URL]) {
-    let result = exportResult
-    exportResult = nil
-    result?(!urls.isEmpty)
+    finishExport(!urls.isEmpty)
   }
 
   func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    finishExport(false)
+  }
+
+  private func finishExport(_ saved: Bool) {
     let result = exportResult
+    let directory = exportCleanupDirectory
     exportResult = nil
-    result?(false)
+    exportCleanupDirectory = nil
+    if let directory = directory {
+      try? FileManager.default.removeItem(at: directory)
+    }
+    result?(saved)
   }
 
   private func presentShareSheet(path: String, result: @escaping FlutterResult) {
@@ -684,8 +723,8 @@ final class CyShineIncomingAudio {
     queue.async {
       do {
         let imported = try self.importFile(url)
-        self.pendingPath = imported
         DispatchQueue.main.async {
+          self.pendingPath = imported
           self.channel?.invokeMethod("audioAvailable", arguments: nil)
         }
       } catch {

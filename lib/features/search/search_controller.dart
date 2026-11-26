@@ -13,7 +13,8 @@ import '../discovery/discovery_controller.dart';
 
 enum SearchCategory {
   songs('歌曲'),
-  artists('歌手');
+  artists('歌手'),
+  albums('专辑');
 
   const SearchCategory(this.label);
   final String label;
@@ -73,11 +74,11 @@ class SearchState {
   final bool searchActive;
   final SearchCategory category;
 
-  int get resultCount =>
-      (category == SearchCategory.artists
-          ? response?.artists.length
-          : response?.list.length) ??
-      0;
+  int get resultCount => switch (category) {
+    SearchCategory.songs => response?.list.length ?? 0,
+    SearchCategory.artists => response?.artists.length ?? 0,
+    SearchCategory.albums => response?.albums.length ?? 0,
+  };
 
   bool get isSearchActive =>
       searchActive || loading || response != null || keyword.trim().isNotEmpty;
@@ -132,6 +133,8 @@ class SearchController extends Notifier<SearchState> {
         );
         final activeSource = state.category == SearchCategory.artists
             ? _artistSource(state.source, next)
+            : state.category == SearchCategory.albums
+            ? _albumSource(state.source, next)
             : state.isSearchActive
             ? _sourceEnabled(state.source, next)
                   ? state.source
@@ -160,7 +163,7 @@ class SearchController extends Notifier<SearchState> {
       settingsProvider.select((settings) => settings.discoverySourceOrder),
       (previous, next) {
         _invalidateQueries((query) => query.source == MusicSource.all);
-        if (state.category == SearchCategory.songs &&
+        if (state.category != SearchCategory.artists &&
             state.source == MusicSource.all &&
             state.keyword.trim().isNotEmpty) {
           _restartSearchWithNewSettings(state.keyword, MusicSource.all);
@@ -193,7 +196,7 @@ class SearchController extends Notifier<SearchState> {
     if (source == state.source) return;
     state = state.copyWith(
       source: source,
-      response: state.category == SearchCategory.artists
+      response: state.category != SearchCategory.songs
           ? null
           : state.response,
     );
@@ -202,9 +205,22 @@ class SearchController extends Notifier<SearchState> {
     }
   }
 
-  bool _canSearch(MusicSource source) =>
-      state.category != SearchCategory.artists ||
-      MusicApi.artistSources.contains(source);
+  bool _canSearch(MusicSource source) => switch (state.category) {
+    SearchCategory.songs => true,
+    SearchCategory.artists => MusicApi.artistSources.contains(source),
+    SearchCategory.albums =>
+      source == MusicSource.all || MusicApi.albumSources.contains(source),
+  };
+
+  MusicSource _albumSource(MusicSource preferred, Set<MusicSource> enabled) {
+    if (preferred == MusicSource.all ||
+        (enabled.contains(preferred) && MusicApi.albumSources.contains(preferred))) {
+      return preferred;
+    }
+    return ref.read(settingsProvider).discoverySourceOrder.where(
+      (source) => enabled.contains(source) && MusicApi.albumSources.contains(source),
+    ).firstOrNull ?? MusicSource.all;
+  }
 
   MusicSource _artistSource(MusicSource preferred, Set<MusicSource> enabled) {
     if (enabled.contains(preferred) &&
@@ -224,13 +240,14 @@ class SearchController extends Notifier<SearchState> {
   void setCategory(SearchCategory category) {
     if (state.category == category) return;
     final enabled = ref.read(settingsProvider).enabledSearchSources;
-    if (category == SearchCategory.artists) _songSource = state.source;
+    if (state.category == SearchCategory.songs) _songSource = state.source;
     final previousSongSource = _songSource ?? _defaultSearchSource();
-    final source = category == SearchCategory.artists
-        ? _artistSource(state.source, enabled)
-        : _sourceEnabled(previousSongSource, enabled)
-        ? previousSongSource
-        : _defaultSearchSource();
+    final source = switch (category) {
+      SearchCategory.artists => _artistSource(state.source, enabled),
+      SearchCategory.albums => _albumSource(state.source, enabled),
+      SearchCategory.songs => _sourceEnabled(previousSongSource, enabled)
+          ? previousSongSource : _defaultSearchSource(),
+    };
     _activeRequest = Object();
     state = state.copyWith(
       category: category,
@@ -295,17 +312,25 @@ class SearchController extends Notifier<SearchState> {
         existing ??
         Future<SearchResponse>.sync(() {
           final api = ref.read(musicApiProvider);
-          return query.category == SearchCategory.artists
-              ? api.searchArtists(
-                  keyword: cleaned,
-                  source: activeSource,
-                  page: page,
-                )
-              : api.searchMusic(
-                  keyword: cleaned,
-                  source: activeSource,
-                  page: page,
-                );
+          return switch (query.category) {
+            SearchCategory.artists => api.searchArtists(
+              keyword: cleaned, source: activeSource, page: page),
+            SearchCategory.songs => api.searchMusic(
+              keyword: cleaned, source: activeSource, page: page),
+            SearchCategory.albums => api.searchAlbums(
+              keyword: cleaned, source: activeSource, page: page,
+            ).then((result) => SearchResponse(
+              list: const [], albums: result.albums, page: page,
+              limit: result.limit,
+              allPage: activeSource == MusicSource.all || result.total == null
+                  ? 0 : (result.total! / result.limit).ceil(),
+              total: result.total ?? result.albums.length,
+              source: activeSource,
+              hasFailedSources: result.hasFailedSources,
+              hasMore: result.hasMore,
+              totalIsExact: result.total != null,
+            )),
+          };
         });
     if (existing == null) {
       _inFlight[query] = future;

@@ -251,7 +251,19 @@ void main() {
       scrollable: find.byType(Scrollable).last,
     );
     expect(api.offsets, [0, 40]);
-    await tester.tap(find.byTooltip('重试'));
+    // The footer can be built before scrolling and lazy-sliver layout settle.
+    // Locate the actual button in the viewport before exercising its callback.
+    await tester.pumpAndSettle();
+    final retry = find.byTooltip('重试');
+    await Scrollable.ensureVisible(
+      tester.element(retry),
+      alignment: 0.5,
+      duration: const Duration(milliseconds: 200),
+    );
+    await tester.pumpAndSettle();
+    expect(retry.hitTestable(), findsOneWidget);
+    expect(api.offsets, [0, 40]);
+    await tester.tap(retry.hitTestable());
     await tester.pumpAndSettle();
     expect(api.offsets, [0, 40, 40]);
     await tester.scrollUntilVisible(

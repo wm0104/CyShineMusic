@@ -8,6 +8,7 @@ import 'package:cy_shine_music/core/models/enums.dart';
 import 'package:cy_shine_music/core/models/music_info.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
 import 'package:cy_shine_music/features/player/lyric_parser.dart';
+import 'package:cy_shine_music/features/player/widgets/karaoke_line_text.dart';
 import 'package:cy_shine_music/features/player/widgets/lyric_line.dart';
 import 'package:cy_shine_music/features/search/widgets/source_filter_chips.dart';
 import 'package:cy_shine_music/features/settings/settings_page.dart';
@@ -271,8 +272,21 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      TextStyle renderedStyle(String lyric) =>
-          DefaultTextStyle.of(tester.element(find.text(lyric))).style;
+      TextStyle renderedStyle(String lyric) {
+        final track = find.byWidgetPredicate(
+          (widget) =>
+              widget is KaraokeLineText &&
+              (widget.translation
+                      ? widget.line.translation
+                      : widget.line.text) ==
+                  lyric,
+        );
+        final element = tester.element(
+          track.evaluate().isEmpty ? find.text(lyric) : track,
+        );
+        return DefaultTextStyle.of(element).style;
+      }
+
       await container
           .read(settingsProvider.notifier)
           .setLyricFontStyle(
@@ -512,6 +526,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    await _openSettingsRow(tester, '蓝牙歌词');
     final row = find.byKey(const ValueKey('bluetooth-lyric-setting'));
     final toggle = find.descendant(of: row, matching: find.byType(Switch));
     await tester.ensureVisible(toggle);
@@ -629,17 +644,228 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(container.read(settingsProvider).useBuiltInSourceFilePicker, isTrue);
-    expect(find.text('WebDAV 同步'), findsOneWidget);
+    expect(find.text('备份与恢复'), findsOneWidget);
+    expect(find.text('WebDAV 同步'), findsNothing);
     expect(find.text('允许与其他 APP 共同播放'), findsOneWidget);
     expect(find.text('批量下载音质'), findsOneWidget);
     expect(find.text('扫描文件夹'), findsOneWidget);
-    expect(find.text('浏览U盘'), findsNWidgets(2));
+    expect(find.text('浏览U盘'), findsNothing);
     expect(find.text('检查更新'), findsOneWidget);
     expect(find.byIcon(Icons.folder_outlined), findsOneWidget);
     expect(find.text('URL 解析服务器'), findsNothing);
     expect(find.text('解析服务器健康检查'), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('five settings cards keep their row order and live submenus', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final prefs = await SharedPreferences.getInstance();
+    final container = _settingsContainer(prefs);
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(theme: AppTheme.light(), home: const SettingsPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final cards = <String, List<String>>{
+      '音源与搜索': ['音源管理', '音源内置文件选择器', '搜索源管理', '发现页平台顺序', '网络适配器'],
+      '播放': [
+        '在线播放音质',
+        '均衡器',
+        '淡入/淡出',
+        '定时关闭音乐',
+        '启动后自动播放',
+        '允许与其他 APP 共同播放',
+        '蓝牙歌词',
+      ],
+      '下载与本地音乐': ['批量下载音质', '下载位置', '扫描文件夹'],
+      '外观与界面': ['主题与配色', '播放界面设置', '导航模式', '车机与平板', '跳过启动页'],
+      '关于': ['检查更新', '备份与恢复', '调试模式'],
+    };
+    expect(
+      tester
+          .widgetList<SettingsCard>(find.byType(SettingsCard))
+          .map((w) => w.title),
+      cards.keys,
+    );
+    for (final entry in cards.entries) {
+      final card = find.byWidgetPredicate(
+        (w) => w is SettingsCard && w.title == entry.key,
+      );
+      final positions = [
+        for (final title in entry.value)
+          tester
+              .getTopLeft(find.descendant(of: card, matching: find.text(title)))
+              .dy,
+      ];
+      expect(positions, orderedEquals([...positions]..sort()));
+    }
+    expect(find.text('车机界面大小'), findsNothing);
+    expect(find.text('日志控制台'), findsNothing);
+    expect(find.text('动态流光'), findsNothing);
+    await _openSettingsRow(tester, '车机与平板');
+    final carSwitch = find.descendant(
+      of: find.byKey(const ValueKey('car-display-setting')),
+      matching: find.byType(Switch),
+    );
+    await tester.tap(carSwitch);
+    await tester.pumpAndSettle();
+    expect(find.text('车机界面大小'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('car-display-size-menu-anchor')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('car-display-size-menu-option-1.25')),
+    );
+    await tester.pumpAndSettle();
+    expect(container.read(settingsProvider).carDisplaySize, 1.25);
+    await tester.tap(carSwitch);
+    await tester.pumpAndSettle();
+    expect(find.text('车机界面大小'), findsNothing);
+    await _openSettingsRow(tester, '完成');
+
+    await _openSettingsRow(tester, '主题与配色');
+    await _openSettingsRow(tester, '深色');
+    expect(container.read(settingsProvider).themeMode, ThemeMode.dark);
+    expect(find.text('歌单详情动态配色'), findsOneWidget);
+    await _openSettingsRow(tester, '完成');
+    await _openSettingsRow(tester, '播放界面设置');
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('flowing-light-setting')),
+        matching: find.byType(Switch),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(container.read(settingsProvider).flowingLightEnabled, isFalse);
+    await _openSettingsRow(tester, '完成');
+
+    for (final pair in [('下载位置', '恢复默认'), ('扫描文件夹', '恢复为下载位置')]) {
+      await _openSettingsRow(tester, pair.$1);
+      expect(find.text('当前文件夹'), findsOneWidget);
+      expect(find.text(pair.$2), findsOneWidget);
+      expect(find.text('浏览U盘'), findsOneWidget);
+      await _openSettingsRow(tester, '完成');
+    }
+    final debug = find.descendant(
+      of: find.byType(DebugModeRow),
+      matching: find.byType(Switch),
+    );
+    await tester.ensureVisible(debug);
+    await tester.pumpAndSettle();
+    await tester.tap(debug);
+    await tester.pumpAndSettle();
+    expect(find.text('日志控制台'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'crossfade responds to slider, buttons and keyboard and survives restart',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final prefs = await SharedPreferences.getInstance();
+      final container = _settingsContainer(prefs);
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: const SettingsPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('已关闭 · 0 秒'), findsOneWidget);
+      await _openSettingsRow(tester, '淡入/淡出');
+      final slider = find.byType(Slider);
+      final control = tester.widget<Slider>(slider);
+      expect((control.min, control.max, control.divisions), (0, 12, null));
+      expect(control.label, '关闭');
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.remove_rounded),
+            )
+            .onPressed,
+        isNull,
+      );
+      final gesture = await tester.startGesture(tester.getCenter(slider));
+      await gesture.moveBy(const Offset(25, 0));
+      await tester.pump();
+      await gesture.moveBy(const Offset(7, 0));
+      await tester.pump();
+      final dragged = tester.widget<Slider>(slider);
+      expect(dragged.value % 1, isNot(0));
+      expect(
+        dragged.label,
+        '${double.parse(dragged.value.toStringAsFixed(1))} 秒',
+      );
+      expect(
+        SliderTheme.of(tester.element(slider)).showValueIndicator,
+        ShowValueIndicator.onDrag,
+      );
+      expect(container.read(settingsProvider).crossfadeMilliseconds, 0);
+      await gesture.up();
+      await tester.pumpAndSettle();
+      final draggedMs = (dragged.value * 1000).round();
+      expect(container.read(settingsProvider).crossfadeMilliseconds, draggedMs);
+      await tester.tap(find.byTooltip('减小过渡时长（秒）'));
+      await tester.pumpAndSettle();
+      expect(
+        container.read(settingsProvider).crossfadeMilliseconds,
+        draggedMs - 1000,
+      );
+      await tester.tap(find.byTooltip('增大过渡时长（秒）'));
+      await tester.pumpAndSettle();
+      expect(container.read(settingsProvider).crossfadeMilliseconds, draggedMs);
+      final input = find.byType(TextField);
+      await tester.enterText(input, '2.36');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Slider>(slider).label, '2.4 秒');
+      expect(container.read(settingsProvider).crossfadeMilliseconds, 2360);
+      await tester.enterText(input, '20');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(container.read(settingsProvider).crossfadeMilliseconds, 12000);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.widgetWithIcon(IconButton, Icons.add_rounded),
+            )
+            .onPressed,
+        isNull,
+      );
+      await tester.enterText(input, '0.006');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Slider>(slider).label, '小于 0.1 秒');
+      expect(container.read(settingsProvider).crossfadeMilliseconds, 6);
+      final formatLabel = tester.widget<Slider>(slider).semanticFormatterCallback!;
+      expect(formatLabel(0), '关闭');
+      expect(formatLabel(0.0002), '小于 0.1 秒');
+      expect(formatLabel(0.099), '小于 0.1 秒');
+      expect(formatLabel(0.1), '0.1 秒');
+      await _openSettingsRow(tester, '完成');
+      expect(find.text('小于 0.1 秒 · 歌曲切换时交叠播放'), findsOneWidget);
+      final restored = _settingsContainer(prefs);
+      addTearDown(restored.dispose);
+      expect(restored.read(settingsProvider).crossfadeMilliseconds, 6);
+      await _openSettingsRow(tester, '淡入/淡出');
+      await tester.enterText(input, '0');
+      await _openSettingsRow(tester, '完成');
+      expect(find.text('已关闭 · 0 秒'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   test(
     'search sources and playback quality persist and reject an empty set',
@@ -860,7 +1086,12 @@ void main() {
       expect(Icons.high_quality_rounded.fontFamily, 'MaterialIcons');
 
       final anchor = find.byKey(const ValueKey('network-adapter-menu-anchor'));
+      // This fixed-top animation assertion exercises a downward-opening menu.
+      // Keep the anchor in the upper half even when preceding settings grow.
+      await Scrollable.ensureVisible(tester.element(anchor), alignment: 0.25);
+      await tester.pumpAndSettle();
       final anchorRect = tester.getRect(anchor);
+      expect(anchorRect.center.dy, lessThan(450));
       final leftTouch = Offset(anchorRect.left + 12, anchorRect.center.dy);
       await tester.tapAt(leftTouch);
       await tester.pump();
@@ -1034,6 +1265,14 @@ void main() {
     expect(panel, findsNothing);
     expect(tester.takeException(), isNull);
   });
+}
+
+Future<void> _openSettingsRow(WidgetTester tester, String title) async {
+  final target = find.text(title).last;
+  await tester.ensureVisible(target);
+  await tester.pumpAndSettle();
+  await tester.tap(target);
+  await tester.pumpAndSettle();
 }
 
 ProviderContainer _settingsContainer(SharedPreferences prefs) {

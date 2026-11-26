@@ -216,6 +216,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   int _pauseGeneration = 0;
 
   Object? _callbackOwner;
+  void Function()? _onSeek;
   PlayerTransportCallback? _onPrevious;
   PlayerTransportCallback? _onNext;
   PlayerQueueItemCallback? _onQueueItem;
@@ -229,6 +230,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   MediaItem? _mediaItemBeforeTransition;
   int? _queueIndexBeforeTransition;
   bool _trackTransitionActive = false;
+  int? _crossfadeBroadcastToken;
 
   Stream<Duration> get positionStream => _player.positionStream;
   Stream<Duration?> get durationStream => _player.durationStream;
@@ -325,6 +327,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
 
   void bindTransportCallbacks({
     required Object owner,
+    void Function()? onSeek,
     required PlayerTransportCallback onPrevious,
     required PlayerTransportCallback onNext,
     required PlayerQueueItemCallback onQueueItem,
@@ -332,6 +335,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     required PlayerShuffleModeCallback onShuffleMode,
   }) {
     _callbackOwner = owner;
+    _onSeek = onSeek;
     _onPrevious = onPrevious;
     _onNext = onNext;
     _onQueueItem = onQueueItem;
@@ -343,6 +347,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   void unbindTransportCallbacks(Object owner) {
     if (!identical(_callbackOwner, owner)) return;
     _callbackOwner = null;
+    _onSeek = null;
     _onPrevious = null;
     _onNext = null;
     _onQueueItem = null;
@@ -354,6 +359,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     required MediaItem item,
     int? queueIndex,
   }) async {
+    _crossfadeBroadcastToken = null;
     if (!_trackTransitionActive) {
       _mediaItemBeforeTransition = _currentMediaItem;
       _queueIndexBeforeTransition = _queueIndex;
@@ -411,6 +417,31 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     _broadcastState(_player.snapshot);
     return resolvedDuration;
   }
+
+  Future<bool> prepareCrossfade(
+    Uri source, {
+    required int token,
+    String? formatHint,
+  }) => _player.prepareCrossfade(source, token: token, formatHint: formatHint);
+
+  Future<bool> startCrossfade({
+    required int token,
+    required Duration duration,
+  }) {
+    // Native publishes the incoming clock before the controller can replace the
+    // system title and queue index. Publish those three changes together.
+    _crossfadeBroadcastToken = token;
+    return _player.startCrossfade(token: token, duration: duration);
+  }
+
+  void finishCrossfadePublication(int token) {
+    if (_crossfadeBroadcastToken != token) return;
+    _crossfadeBroadcastToken = null;
+    _updateDuration(_player.duration);
+    _broadcastState(_player.snapshot);
+  }
+
+  Future<void> cancelCrossfade(int token) => _player.cancelCrossfade(token);
 
   Future<Duration?> _loadSourceBounded(
     Uri sourceUri, {
@@ -691,6 +722,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> seek(Duration position) {
     if (_trackTransitionActive) return Future<void>.value();
+    _onSeek?.call();
     _logTransport('seek', target: position);
     return _player.seek(position);
   }
@@ -768,7 +800,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   void _updateDuration(Duration? duration) {
-    if (duration == null) return;
+    if (_crossfadeBroadcastToken != null || duration == null) return;
     final item = _currentMediaItem;
     if (item == null || item.duration == duration) return;
     _currentMediaItem = preserveMediaItemArtHeaders(
@@ -802,6 +834,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   void _broadcastState(BassPlaybackSnapshot event) {
+    if (_crossfadeBroadcastToken != null) return;
     _publishPlaybackState(
       _trackTransitionActive ? _transitionState(event) : _transformEvent(event),
     );

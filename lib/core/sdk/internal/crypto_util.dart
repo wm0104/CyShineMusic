@@ -16,9 +16,6 @@ class CryptoUtil {
   static String md5Hex(String input) =>
       crypto.md5.convert(utf8.encode(input)).toString();
 
-  static String md5HexBytes(Uint8List input) =>
-      crypto.md5.convert(input).toString();
-
   static String sha1Hex(String input) =>
       crypto.sha1.convert(utf8.encode(input)).toString();
 
@@ -82,15 +79,6 @@ class CryptoUtil {
   static String bytesToHex(Uint8List bytes, {bool upper = false}) {
     final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
     return upper ? hex.toUpperCase() : hex;
-  }
-
-  static Uint8List hexToBytes(String hex) {
-    final cleaned = hex.length.isOdd ? '0$hex' : hex;
-    final out = Uint8List(cleaned.length ~/ 2);
-    for (var i = 0; i < out.length; i++) {
-      out[i] = int.parse(cleaned.substring(i * 2, i * 2 + 2), radix: 16);
-    }
-    return out;
   }
 
   static BigInt _bytesToBigInt(Uint8List bytes) {

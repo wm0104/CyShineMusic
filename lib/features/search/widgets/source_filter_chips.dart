@@ -16,17 +16,19 @@ class SourceFilterChips extends ConsumerWidget {
     final state = ref.watch(searchControllerProvider);
     final settings = ref.watch(settingsProvider);
     final artists = state.category == SearchCategory.artists;
+    final albums = state.category == SearchCategory.albums;
     final sources = [
       if (!artists) MusicSource.all,
       for (final source in settings.discoverySourceOrder)
         if (settings.enabledSearchSources.contains(source) &&
-            (!artists || MusicApi.artistSources.contains(source)))
+            (!artists || MusicApi.artistSources.contains(source)) &&
+            (!albums || MusicApi.albumSources.contains(source)))
           source,
     ];
     if (sources.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: _SearchSegments(
+      child: SearchSegments(
         prefix: 'search-source',
         options: [for (final s in sources) (id: s.code, label: s.label)],
         selected: sources.indexOf(state.source),
@@ -46,7 +48,7 @@ class SearchCategoryChips extends ConsumerWidget {
     final category = ref.watch(
       searchControllerProvider.select((s) => s.category),
     );
-    return _SearchSegments(
+    return SearchSegments(
       prefix: 'search-category',
       options: [
         for (final c in SearchCategory.values) (id: c.name, label: c.label),
@@ -60,8 +62,8 @@ class SearchCategoryChips extends ConsumerWidget {
   }
 }
 
-class _SearchSegments extends StatelessWidget {
-  const _SearchSegments({
+class SearchSegments extends StatelessWidget {
+  const SearchSegments({
     required this.prefix,
     required this.options,
     required this.selected,
