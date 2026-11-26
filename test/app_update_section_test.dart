@@ -68,6 +68,42 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('a pending update can be collapsed and reopened', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final service = _Service(_release());
+    final controller = AppUpdateController(
+      service: service,
+      preferences: prefs,
+      installedVersion: () async => '2.0.8',
+    );
+    await controller.check();
+    final router = GoRouter(initialLocation: '/settings', routes: [
+      GoRoute(path: '/settings', builder: (_, _) => const Scaffold(
+        body: SingleChildScrollView(child: AppUpdateSection()),
+      )),
+    ]);
+    addTearDown(router.dispose);
+    await tester.pumpWidget(ProviderScope(overrides: [
+      sharedPreferencesProvider.overrideWithValue(prefs),
+      appUpdateControllerProvider.overrideWith((ref) => controller),
+    ], child: MaterialApp.router(routerConfig: router)));
+    await tester.pumpAndSettle();
+
+    final header = find.byKey(const ValueKey('check-update-setting'));
+    final download = find.text('下载 IPA');
+    expect(download, findsOneWidget);
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(download, findsNothing);
+
+    service.release = _release(build: 10);
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(download, findsOneWidget);
+    expect(controller.release!.buildNumber, 9);
+  });
+
   for (final saved in [true, false]) {
     testWidgets('IPA export result $saved reflects the system picker result', (tester) async {
       SharedPreferences.setMockInitialValues({});

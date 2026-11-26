@@ -85,6 +85,34 @@ void main() {
     },
   );
 
+  test('a running batch does not block the same ID from another source', () async {
+    final blocker = Completer<void>();
+    final serviceProvider = Provider<_RecordingDownloadService>(
+      (ref) => _RecordingDownloadService(ref, blocker: blocker),
+    );
+    final container = open();
+    addTearDown(container.dispose);
+    final service = container.read(serviceProvider);
+
+    final firstMusic = _music('123');
+    final secondMusic = _music('123', source: MusicSource.tx);
+    final first = service.downloadMany(musics: [firstMusic]);
+    await service.firstStarted.future;
+    final running = container.read(downloadProgressProvider);
+    final second = service.downloadMany(musics: [secondMusic]);
+    blocker.complete();
+
+    expect(running.isMusicBusy(firstMusic), isTrue);
+    expect(running.isMusicBusy(secondMusic), isFalse);
+    expect(running.latestTaskForMusic(secondMusic), isNull);
+    expect((await first).single.success, isTrue);
+    expect((await second).single.success, isTrue);
+    final completed = container.read(downloadProgressProvider);
+    expect(completed.tasks, hasLength(2));
+    expect(completed.latestTaskForMusic(firstMusic), same(completed.tasks.first));
+    expect(completed.latestTaskForMusic(secondMusic), same(completed.tasks.last));
+  });
+
   test('batch downloads apply the selected quality preference', () async {
     late _RecordingDownloadService service;
     final serviceProvider = Provider<_RecordingDownloadService>(
@@ -159,16 +187,20 @@ class _RecordingDownloadService extends DownloadService {
   }
 }
 
-MusicInfo _music(String id) {
-  return _musicWithQualities(id, [Quality.k320]);
+MusicInfo _music(String id, {MusicSource source = MusicSource.wy}) {
+  return _musicWithQualities(id, [Quality.k320], source: source);
 }
 
-MusicInfo _musicWithQualities(String id, List<Quality> qualities) {
+MusicInfo _musicWithQualities(
+  String id,
+  List<Quality> qualities, {
+  MusicSource source = MusicSource.wy,
+}) {
   return MusicInfo.fromJson({
     'id': id,
     'name': '歌曲 $id',
     'singer': '歌手',
-    'source': MusicSource.wy.code,
+    'source': source.code,
     'interval': '03:30',
     'meta': {
       'songId': id,

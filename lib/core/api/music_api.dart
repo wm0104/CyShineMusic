@@ -32,7 +32,6 @@ class MusicApi {
   final List<MusicSource> _searchSourceOrder;
 
   static Set<MusicSource> get albumSources => AlbumSdk.sources;
-  static Set<MusicSource> get artistAlbumSources => AlbumSdk.sources;
 
   Future<AlbumPage> searchAlbums({
     required String keyword,

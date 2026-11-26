@@ -22,7 +22,7 @@ class AppUpdateSection extends ConsumerStatefulWidget {
 }
 
 class _AppUpdateSectionState extends ConsumerState<AppUpdateSection> {
-  bool _expanded = false;
+  bool? _expanded;
   bool _opening = false;
   bool _exporting = false;
   GoRouter? _router;
@@ -152,7 +152,7 @@ class _AppUpdateSectionState extends ConsumerState<AppUpdateSection> {
     final version = ref.watch(packageInfoProvider).maybeWhen(
       data: (value) => '$appDisplayName ${value.version}', orElse: () => '读取中…');
     final scheme = Theme.of(context).colorScheme;
-    final expanded = _expanded || release != null;
+    final expanded = _expanded ?? (release != null);
     final busy = update.checking || download.downloading || _opening || _exporting;
     final hasFile = download.file != null && download.releaseTag == release?.tagName &&
         download.releaseBuildNumber == release?.buildNumber && download.releaseSha256 == release?.ipaSha256;
@@ -163,8 +163,11 @@ class _AppUpdateSectionState extends ConsumerState<AppUpdateSection> {
         borderRadius: BorderRadius.circular(20),
         key: const ValueKey('check-update-setting'),
         onTap: busy ? null : () {
-          if (!expanded) { unawaited(_check()); }
-          else { setState(() => _expanded = !_expanded); }
+          if (!expanded && release == null) {
+            unawaited(_check());
+          } else {
+            setState(() => _expanded = !expanded);
+          }
         },
         child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 14), child: Row(children: [
           const SettingsSymbolBubble(icon: Icons.system_update_alt_rounded),

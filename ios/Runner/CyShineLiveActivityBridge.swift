@@ -90,17 +90,11 @@ final class CyShineLiveActivityBridge: NSObject {
     guard url.scheme?.lowercased() == Self.urlScheme else { return false }
     let host = url.host?.lowercased() ?? ""
     guard host == "player" else { return false }
-    let action: String?
-    switch (host, url.lastPathComponent.lowercased()) {
-    case (_, "toggle"), ("player", "toggle"): action = "toggle"
-    case (_, "previous"), ("player", "previous"): action = "previous"
-    case (_, "next"), ("player", "next"): action = "next"
-    default: action = nil
-    }
-    if let action {
-      // 只在真的带动作时才派发；单纯打开播放器交给路由处理。
+    let action = url.lastPathComponent.lowercased()
+    switch action {
+    case "toggle", "previous", "next":
       channel?.invokeMethod("control", arguments: action)
-    } else {
+    default:
       channel?.invokeMethod("openPlayer", arguments: nil)
     }
     return true

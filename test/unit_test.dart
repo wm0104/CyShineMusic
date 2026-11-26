@@ -504,8 +504,14 @@ void main() {
           version: 'invalidate',
         );
         EmbeddedArtworkCache.evictPath(file.path);
+        final fresh = EmbeddedArtworkCache.subscribe(
+          file.path,
+          version: 'invalidate',
+        );
         expect(await invalidated.future, isNull);
+        expect(await fresh.future, [9, 8, 7, 6]);
         invalidated.cancel();
+        fresh.cancel();
 
         final rewritten = await file.readAsBytes();
         expect(

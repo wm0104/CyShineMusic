@@ -1111,7 +1111,7 @@ class _ResultTile extends ConsumerWidget {
     // Watching the per-music task (instances are reused for untouched tasks)
     // keeps progress updates from rebuilding every tile in the list.
     final task = ref.watch(
-      downloadProgressProvider.select((p) => p.latestTaskForMusic(music.id)),
+      downloadProgressProvider.select((p) => p.latestTaskForMusic(music)),
     );
     return SearchResultTile(
       music: music,

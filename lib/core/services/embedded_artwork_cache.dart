@@ -34,7 +34,7 @@ class EmbeddedArtworkCache {
     }
 
     final existing = _loads[key];
-    if (existing != null) {
+    if (existing != null && !existing.invalidated) {
       existing.consumers++;
       return EmbeddedArtworkRequest._(existing);
     }

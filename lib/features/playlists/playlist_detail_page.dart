@@ -168,7 +168,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 queueEntry: track.spotify != null
                     ? track.toQueueEntry(
                         playlistId: playlist.id,
-                        downloadedPath: localEntry?.savedPath,
+                        downloaded: localEntry,
                       )
                     : localEntry ?? track.toQueueEntry(playlistId: playlist.id),
               );
@@ -1038,7 +1038,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       final music = item.track.musicInfo;
       if (item.localEntry != null ||
           music == null ||
-          progress.isMusicBusy(music.id)) {
+          progress.isMusicBusy(music)) {
         continue;
       }
       selected.add(item);

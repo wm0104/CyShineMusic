@@ -216,6 +216,43 @@ void main() {
     expect(calls.last.arguments, containsPair('playing', true));
   });
 
+  test('iOS player deep link remains pending until the app is ready', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('cy_shine_music/live_activity');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (_) async => false);
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(channel, null);
+      channel.setMethodCallHandler(null);
+    });
+    final harness = await _Harness.create(loadFailures: 0);
+    addTearDown(harness.dispose);
+    final service = harness.container.read(liveActivityProvider);
+    await service.initialize();
+
+    Future<void> openPlayer() async {
+      await messenger.handlePlatformMessage(
+        channel.name,
+        channel.codec.encodeMethodCall(const MethodCall('openPlayer')),
+        null,
+      );
+    }
+
+    await openPlayer();
+    var openCount = 0;
+    service.onOpenPlayer = () async {
+      if (service.takeOpenPlayerRequest()) openCount++;
+    };
+    await service.onOpenPlayer!();
+    await service.onOpenPlayer!();
+    expect(openCount, 1);
+
+    await openPlayer();
+    expect(openCount, 2);
+  });
+
   test('iOS Widget sync publishes changed cover for the same track', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);

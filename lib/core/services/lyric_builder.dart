@@ -26,12 +26,6 @@ class LyricEmbedOptions {
 class LyricBuilder {
   const LyricBuilder._();
 
-  static const richestOptions = LyricEmbedOptions(
-    embedLyric: true,
-    embedTranslatedLyric: true,
-    embedRomanLyric: true,
-  );
-
   // One-or-more leading `[time]` segments — e.g. `[00:01.00]` or
   // `[00:01.00][00:30.50]`.
   static final _timeFieldExp = RegExp(r'^(?:\[[\d:.]+\])+');

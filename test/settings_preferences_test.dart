@@ -629,7 +629,8 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(container.read(settingsProvider).useBuiltInSourceFilePicker, isTrue);
-    expect(find.text('WebDAV 同步'), findsOneWidget);
+    expect(find.text('备份与恢复'), findsOneWidget);
+    expect(find.text('WebDAV 同步'), findsNothing);
     expect(find.text('允许与其他 APP 共同播放'), findsOneWidget);
     expect(find.text('批量下载音质'), findsOneWidget);
     expect(find.text('扫描文件夹'), findsOneWidget);

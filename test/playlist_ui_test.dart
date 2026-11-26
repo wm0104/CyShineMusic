@@ -750,6 +750,51 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   });
 
+  testWidgets('Spotify queue entries use the existing download quality', (
+    tester,
+  ) async {
+    await _useCompactViewport(tester);
+    final music = _playlistMusic('downloaded-spotify-match', '匹配歌曲');
+    final track = PlaylistTrack.fromSpotify(
+      const SpotifyTrackMetadata(
+        uri: 'spotify:track:downloaded',
+        title: 'Spotify 歌曲',
+        artist: 'Spotify 歌手',
+        occurrence: 0,
+      ),
+      music,
+    );
+    final directory = Directory.systemTemp.createTempSync('spotify-quality-');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final file = File('${directory.path}/track.mp3')..createSync();
+    final prefs = await _prefsWith([
+      _playlist(id: 'spotify', name: 'Spotify 歌单', tracks: [track]),
+    ]);
+    final container = ProviderContainer(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+    );
+    addTearDown(container.dispose);
+    await container.read(downloadHistoryProvider.notifier).addCompleted(
+      music: music,
+      quality: Quality.k128,
+      savedPath: file.path,
+    );
+    await tester.pumpWidget(_testAppWithContainer(
+      container,
+      const PlaylistDetailPage(playlistId: 'spotify'),
+    ));
+    await tester.pumpAndSettle();
+
+    final row = tester.widget<PlaylistTrackTile>(find.byType(PlaylistTrackTile));
+    final entry = row.item.queueEntry!;
+    expect(track.qualityCode, Quality.k320.code);
+    expect(entry.savedPath, file.path);
+    expect(entry.qualityCode, Quality.k128.code);
+    expect(entry.id, 'playlist:spotify:${track.id}');
+    expect(entry.name, 'Spotify 歌曲');
+    expect(entry.preservePlaylistPosition, isTrue);
+  });
+
   testWidgets(
     'manually match a saved Spotify row and replace another occurrence',
     (tester) async {

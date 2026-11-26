@@ -113,6 +113,7 @@ class DownloadService {
   final Ref _ref;
   static const _mediaScanChannel = MethodChannel('cy_shine_music/media_scan');
   static const int batchConcurrency = 3;
+  static Future<void> _pendingFileMove = Future<void>.value();
 
   final Set<String> _batchDownloadKeys = {};
   final Map<String, String> _preparedTasks = {};
@@ -204,17 +205,17 @@ class DownloadService {
   }) async {
     if (musics.isEmpty) return const [];
 
-    final busyMusicIds = {
-      for (final task in _ref.read(downloadProgressProvider).tasks)
-        if (task.isBusy && task.musicId.trim().isNotEmpty) task.musicId.trim(),
-    };
+    final busyMusicKeys = _ref.read(downloadProgressProvider).tasks
+        .where((task) => task.isBusy)
+        .map((task) => task.musicKey)
+        .whereType<String>()
+        .toSet();
     final seen = <String>{};
     final pending = <({String key, MusicInfo music, String taskId})>[];
     for (final music in musics) {
-      final key = _batchDownloadKey(music);
-      final musicId = music.id.trim();
+      final key = downloadMusicKey(music);
       if (!seen.add(key) ||
-          (musicId.isNotEmpty && busyMusicIds.contains(musicId)) ||
+          busyMusicKeys.contains(key) ||
           !_batchDownloadKeys.add(key)) {
         continue;
       }
@@ -287,26 +288,9 @@ class DownloadService {
     return music.playbackQualityFor(preference);
   }
 
-  String _batchDownloadKey(MusicInfo music) {
-    final source = music.source.code;
-    final id = music.id.trim();
-    if (id.isNotEmpty) return '$source\u0000$id';
-    return '$source\u0000${music.name.trim().toLowerCase()}'
-        '\u0000${music.singer.trim().toLowerCase()}';
-  }
-
-  bool _taskMatchesMusic(DownloadTask task, String key) {
-    try {
-      return task.musicJson != null &&
-          _batchDownloadKey(MusicInfo.fromJson(task.musicJson!)) == key;
-    } catch (_) {
-      return false;
-    }
-  }
-
   bool _canReuseCompleted(DownloadTask task, String key, Quality? quality,
       EmbedRequest embed, String destinationDir) =>
-      task.stage == DownloadStage.done && _taskMatchesMusic(task, key) &&
+      task.stage == DownloadStage.done && task.musicKey == key &&
       task.qualityCode == quality?.code && task.destinationDir == destinationDir &&
       mapEquals(task.embedOptions, _embedJson(embed)) &&
       task.savedPath != null && File(task.savedPath!).existsSync();
@@ -316,12 +300,12 @@ class DownloadService {
     Quality? quality,
     required EmbedRequest embed,
   }) async {
-    final key = _batchDownloadKey(music);
+    final key = downloadMusicKey(music);
     final prepared = _preparedTasks.remove(key);
     if (prepared != null) return _schedule(prepared);
     final destinationDir = _ref.read(settingsProvider).downloadDir;
     for (final task in _ref.read(downloadProgressProvider).tasks.reversed) {
-      if (!_taskMatchesMusic(task, key)) continue;
+      if (task.musicKey != key) continue;
       if (_canReuseCompleted(task, key, quality, embed, destinationDir)) {
         return DownloadResult(path: task.savedPath!);
       }
@@ -738,15 +722,25 @@ class DownloadService {
     Directory destDir,
     String fileName,
   ) async {
-    final destPath = p.join(destDir.path, _dedupedName(destDir, fileName));
-    final tmp = File(tmpPath);
+    // Keep filename selection and the move in one queue so concurrent jobs
+    // cannot claim the same destination before either has written it.
+    final previous = _pendingFileMove;
+    final completed = Completer<void>();
+    _pendingFileMove = completed.future;
+    await previous;
     try {
-      return (await tmp.rename(destPath)).path;
-    } on FileSystemException {
-      // rename fails across fs boundaries (sdcard → emulated); copy instead.
-      await tmp.copy(destPath);
-      await tmp.delete();
-      return destPath;
+      final destPath = p.join(destDir.path, _dedupedName(destDir, fileName));
+      final tmp = File(tmpPath);
+      try {
+        return (await tmp.rename(destPath)).path;
+      } on FileSystemException {
+        // Renaming across filesystems fails, so copy the file instead.
+        await tmp.copy(destPath);
+        await tmp.delete();
+        return destPath;
+      }
+    } finally {
+      completed.complete();
     }
   }
 

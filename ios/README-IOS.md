@@ -23,8 +23,8 @@
 | `tool/fetch_bass_ios.sh` | 构建前下载 BASS iOS 二进制到 `packages/bass_player/ios/Frameworks/` | 是 |
 | `tool/fetch_app_icons.sh` + `tool/fetch_app_icons.py` | 从 `assets/app_icons/classic.png` 生成主图标（15 个尺寸）+ 5 套备用图标集 + 散装兜底副本；只用标准库 | 是 |
 | `tool/ios_version.txt` | **iOS 版本号的唯一来源**（与上游 Android 的版本解耦）。发版就是改这个文件 | 是 |
-| `ios/CyShineMusicWidget/` | Widget Extension 源码：灵动岛 + 锁屏卡片 + 桌面小组件；`CyShineActivityAttributes.swift` 会被主 App 与扩展**同时**编译 | 是 |
-| `ios/Runner/CyShineLiveActivityBridge.swift` | 实时活动的主 App 侧桥接（ActivityKit + App Group 写入 + 深链回调） | 是 |
+| `ios/CyShineMusicWidget/` | 桌面小组件扩展源码。主 App 编译同目录下的 `CyShineActivityAttributes.swift`，用于清理旧版自定义播放活动 | 是 |
+| `ios/Runner/CyShineLiveActivityBridge.swift` | 桌面小组件同步、旧活动清理及播放器深链 | 是 |
 | `tool/build_widget_extension.sh` | 用 `xcrun swiftc` 独立编译扩展并塞进 `Runner.app/PlugIns/`（不进 `Runner.xcodeproj`） | 是 |
 | `tool/patch_xcodeproj.py` | 把新增的 Swift 文件接进 `project.pbxproj`、对齐部署目标、写入备用图标的资产目录构建设置（幂等，按文件名去重） | 初次需要 |
 | `tool/verify_preload_protocol.mjs` | 用 `node:vm` 验证 `preload.js` 的协议与**执行顺序**（CI 已接入） | 建议每次改 preload 后跑 |

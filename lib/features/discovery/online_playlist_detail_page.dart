@@ -676,7 +676,6 @@ class _OnlinePlaylistDetailPageState
 
   List<Widget> _buildAlbumCatalog() {
     final albums = <AlbumInfo>[];
-    final seen = <String>{};
     AlbumPage? last;
     AsyncValue<AlbumPage>? pending;
     for (final offset in _albumOffsets) {
@@ -686,9 +685,7 @@ class _OnlinePlaylistDetailPageState
       final data = page.asData?.value;
       if (data == null) {pending = page; break;}
       last = data;
-      for (final album in data.albums) {
-        if (seen.add('${album.source.code}:${album.id}')) albums.add(album);
-      }
+      albums.addAll(data.albums);
     }
     final loadedPage = last;
     final loadState = pending;
@@ -835,13 +832,13 @@ class _OnlinePlaylistDetailPageState
     if (_batchSubmitting) return;
     final progress = ref.read(downloadProgressProvider);
     final musics = originals.map(_effectiveMusic)
-        .where((music) => !progress.isMusicBusy(music.id)).toList(growable: false);
+        .where((music) => !progress.isMusicBusy(music)).toList(growable: false);
     if (musics.isEmpty) return;
-    final available = await ensureOnlineMusicSourcesAvailable(context, musics.map((music) => music.source));
-    if (!mounted || !available) return;
-    final preference = ref.read(settingsProvider).batchDownloadQuality;
     setState(() => _batchSubmitting = true);
     try {
+      final available = await ensureOnlineMusicSourcesAvailable(context, musics.map((music) => music.source));
+      if (!mounted || !available) return;
+      final preference = ref.read(settingsProvider).batchDownloadQuality;
       final results = await ref.read(downloadServiceProvider).downloadMany(
         musics: musics, embed: const EmbedRequest.richest(), qualityPreference: preference,
       );
@@ -903,7 +900,7 @@ class _AlbumTrackTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
     final task = ref.watch(downloadProgressProvider.select(
-      (state) => state.latestTaskForMusic(effective.id),
+      (state) => state.latestTaskForMusic(effective),
     ));
     final selectionEnabled = !submitting && task?.isBusy != true;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
@@ -1092,7 +1089,7 @@ class _OnlinePlaylistTrackTileState
   Widget build(BuildContext context) {
     final task = ref.watch(
       downloadProgressProvider.select(
-        (value) => value.latestTaskForMusic(widget.music.id),
+        (value) => value.latestTaskForMusic(widget.music),
       ),
     );
     final fallback = _fallbackRequested

@@ -21,7 +21,6 @@ enum MusicSource {
   }
 }
 
-const List<MusicSource> kSearchSources = MusicSource.values;
 const List<MusicSource> kManageableSearchSources = [
   MusicSource.kw,
   MusicSource.kg,

@@ -18,14 +18,6 @@ class Tagger {
   static final platform.TaggerPlatformBackend _platform = platform
       .createTaggerPlatformBackend();
 
-  /// Reads back the LYRICS tag written by [write], without touching audio
-  /// frames. Used to show local-history lyrics without a network round trip.
-  static Future<String?> readLyrics(String path) async {
-    final tags = await readEmbeddedTags(path, includeArtwork: false);
-    final lyrics = tags?.lyrics;
-    return (lyrics != null && lyrics.isNotEmpty) ? lyrics : null;
-  }
-
   /// Reads the small embedded tag payload needed by the local player. The
   /// FLAC path stays pure Dart so it can also be exercised by `dart test`.
   static Future<EmbeddedAudioTags?> readEmbeddedTags(

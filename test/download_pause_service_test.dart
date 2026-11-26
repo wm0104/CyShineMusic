@@ -9,6 +9,7 @@ import 'package:cy_shine_music/core/models/music_info.dart';
 import 'package:cy_shine_music/core/models/music_url.dart';
 import 'package:cy_shine_music/core/music_sources/music_source_models.dart';
 import 'package:cy_shine_music/core/music_sources/music_url_resolver.dart';
+import 'package:cy_shine_music/core/services/app_logger.dart';
 import 'package:cy_shine_music/core/services/download_service.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
 import 'package:cy_shine_music/features/downloads/download_progress.dart';
@@ -16,6 +17,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -37,6 +39,8 @@ void main() {
         return call.method == 'getTemporaryDirectory' ? cacheDir.path : null;
       },
     );
+    await AppLogger.flush();
+    pathCalls.clear();
     SharedPreferences.setMockInitialValues({'download_dir': musicDir.path});
     final prefs = await SharedPreferences.getInstance();
     adapter = _Adapter();
@@ -154,10 +158,39 @@ void main() {
     expect(pathCalls, isNot(contains('getApplicationDocumentsDirectory')));
     expect(container.read(downloadProgressProvider).tasks.map((task) => task.stage),
       everyElement(DownloadStage.done));
-    expect(results.map((result) => result.result!.path),
-      everyElement(startsWith('${root.path}/music/')));
+    expect(results.every((result) =>
+      p.equals(p.dirname(result.result!.path), p.join(root.path, 'music'))), isTrue);
     final directoryEntries = await Directory('${root.path}/music').list().toList();
     expect(directoryEntries.whereType<Directory>(), isEmpty);
+  });
+
+  test('concurrent downloads using the same filename publish to distinct paths', () async {
+    adapter.hold = false;
+    final releaseRename = Completer<void>();
+    final io = _HoldFirstDownloadRename(
+      p.join(root.path, 'music'), releaseRename.future,
+    );
+    final subscription = container.listen(downloadProgressProvider, (_, next) {
+      final finishing = next.tasks.where((task) => task.stage == DownloadStage.finishing).length;
+      if (finishing == 1) io.armed = true;
+      if (finishing >= 2 && !releaseRename.isCompleted) releaseRename.complete();
+    });
+    addTearDown(subscription.close);
+
+    final results = await IOOverrides.runWithIOOverrides(
+      () => service.downloadMany(musics: [
+        for (var index = 0; index < 2; index++) MusicInfo.fromJson({
+          ..._music.toJson(), 'id': 'same-name-$index',
+        }),
+      ], embed: _embed),
+      io,
+    );
+    expect(io.intercepted, isTrue);
+    expect(results, hasLength(2));
+    expect(results.every((result) => result.success), isTrue);
+    final paths = results.map((result) => result.result!.path).toSet();
+    expect(paths.map(p.basename), unorderedEquals(['file.mp3', 'file (1).mp3']));
+    expect(paths.every((path) => File(path).existsSync()), isTrue);
   });
 
   test('explicit quality, embed or destination changes download again; identical requests reuse', () async {
@@ -175,7 +208,7 @@ void main() {
     await container.read(settingsProvider.notifier).setDownloadDir(otherDir.path);
     final relocated = await service.downloadOne(music: _music, quality: Quality.flac, embed: changedEmbed);
     expect(adapter.calls, 4);
-    expect(relocated.path, startsWith('${otherDir.path}/'));
+    expect(p.equals(p.dirname(relocated.path), otherDir.path), isTrue);
     expect(relocated.path, isNot(embedded.path));
     final reused = await service.downloadOne(music: _music, quality: Quality.flac, embed: changedEmbed);
     expect(reused.path, relocated.path);
@@ -206,7 +239,7 @@ void main() {
     await container.read(settingsProvider.notifier).setDownloadDir(otherDir.path);
     final relocated = await service.downloadMany(musics: [_music], embed: _embed,
       qualityPreference: OnlinePlaybackQuality.standard);
-    expect(relocated.single.result!.path, startsWith('${otherDir.path}/'));
+    expect(p.equals(p.dirname(relocated.single.result!.path), otherDir.path), isTrue);
     expect(adapter.calls, 3);
   });
 
@@ -265,6 +298,48 @@ void main() {
 
 const _embed = EmbedRequest(embedCover: false, embedLyric: false, embedTranslatedLyric: false, embedRomanLyric: false);
 final _music = MusicInfo.fromJson({'id': 'pause-song', 'name': 'song', 'singer': 'artist', 'source': 'wy', 'meta': {'songId': 'pause-song', 'albumName': '', 'qualitys': []}});
+
+final class _HoldFirstDownloadRename extends IOOverrides {
+  _HoldFirstDownloadRename(this.destinationDir, this.release);
+
+  final String destinationDir;
+  final Future<void> release;
+  bool armed = false;
+  bool intercepted = false;
+  bool _checkingDestination = false;
+
+  @override
+  File createFile(String path) {
+    final file = super.createFile(path);
+    if (!armed || intercepted) return file;
+    if (p.equals(p.dirname(path), destinationDir)) _checkingDestination = true;
+    if (_checkingDestination &&
+        p.basename(p.dirname(path)).startsWith('cyshine-download-')) {
+      intercepted = true;
+      return _DeferredRenameFile(file, release);
+    }
+    return file;
+  }
+}
+
+class _DeferredRenameFile implements File {
+  _DeferredRenameFile(this.file, this.release);
+
+  final File file;
+  final Future<void> release;
+
+  @override
+  Future<File> rename(String path) async {
+    await release;
+    return file.rename(path);
+  }
+
+  @override
+  Future<File> copy(String path) => file.copy(path);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 class _Adapter implements HttpClientAdapter {
   final started = Completer<void>();

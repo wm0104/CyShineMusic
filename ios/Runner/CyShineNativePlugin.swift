@@ -723,8 +723,8 @@ final class CyShineIncomingAudio {
     queue.async {
       do {
         let imported = try self.importFile(url)
-        self.pendingPath = imported
         DispatchQueue.main.async {
+          self.pendingPath = imported
           self.channel?.invokeMethod("audioAvailable", arguments: nil)
         }
       } catch {

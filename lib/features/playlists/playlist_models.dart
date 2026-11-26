@@ -325,13 +325,17 @@ class PlaylistTrack {
 
   DownloadHistoryEntry? toQueueEntry({
     required String playlistId,
-    String? downloadedPath,
+    DownloadHistoryEntry? downloaded,
   }) {
-    final path = (downloadedPath ?? localPath)?.trim();
+    final downloadedPath = downloaded?.savedPath?.trim();
+    final path = downloadedPath ?? localPath?.trim();
     final savedPath = path != null && path.isNotEmpty && File(path).existsSync()
         ? path
         : null;
     if (savedPath == null && musicInfo == null) return null;
+    final savedQuality = savedPath != null && downloadedPath != null
+        ? downloaded?.qualityCode
+        : null;
     return DownloadHistoryEntry(
       id: 'playlist:$playlistId:$identityKey',
       musicId: musicId,
@@ -339,7 +343,7 @@ class PlaylistTrack {
       singer: singer,
       albumName: albumName,
       sourceCode: sourceCode,
-      qualityCode: qualityCode,
+      qualityCode: savedQuality ?? qualityCode,
       status: DownloadHistoryStatus.completed,
       createdAt: DateTime.fromMillisecondsSinceEpoch(0),
       savedPath: savedPath,

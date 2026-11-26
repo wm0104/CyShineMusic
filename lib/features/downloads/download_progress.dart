@@ -56,6 +56,12 @@ class DownloadTask {
   final Map<String, dynamic> embedOptions;
   final int generation;
 
+  String? get musicKey {
+    final source = musicJson?['source'];
+    if (source is! String) return null;
+    return _musicKey(source, musicId, name, singer);
+  }
+
   bool get isBusy =>
       stage != DownloadStage.idle &&
       stage != DownloadStage.paused &&
@@ -117,21 +123,33 @@ class DownloadProgress {
   bool get hasTasks => tasks.isNotEmpty;
   bool get isBusy => tasks.any((task) => task.isBusy);
 
-  DownloadTask? taskForMusic(String id) {
+  DownloadTask? taskForMusic(MusicInfo music) {
+    final key = downloadMusicKey(music);
     for (final task in tasks.reversed) {
-      if (task.musicId == id && task.isBusy) return task;
+      if (task.isBusy && task.musicKey == key) return task;
     }
     return null;
   }
 
-  DownloadTask? latestTaskForMusic(String id) {
+  DownloadTask? latestTaskForMusic(MusicInfo music) {
+    final key = downloadMusicKey(music);
     for (final task in tasks.reversed) {
-      if (task.musicId == id) return task;
+      if (task.musicKey == key) return task;
     }
     return null;
   }
 
-  bool isMusicBusy(String id) => taskForMusic(id) != null;
+  bool isMusicBusy(MusicInfo music) => taskForMusic(music) != null;
+}
+
+String downloadMusicKey(MusicInfo music) =>
+    _musicKey(music.source.code, music.id, music.name, music.singer);
+
+String _musicKey(String source, String id, String name, String singer) {
+  final normalizedId = id.trim();
+  if (normalizedId.isNotEmpty) return '$source\u0000$normalizedId';
+  return '$source\u0000${name.trim().toLowerCase()}'
+      '\u0000${singer.trim().toLowerCase()}';
 }
 
 class DownloadProgressNotifier extends Notifier<DownloadProgress> {

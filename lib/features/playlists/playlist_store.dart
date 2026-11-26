@@ -27,12 +27,15 @@ class PlaylistStoreException implements Exception {
 
 class LocalPlaylistNotifier extends Notifier<List<LocalPlaylist>> {
   late SharedPreferences _prefs;
+  bool _disposed = false;
   int _idSequence = 0;
   Future<void> _pendingWrites = Future<void>.value();
 
   @override
   List<LocalPlaylist> build() {
     _prefs = ref.read(sharedPreferencesProvider);
+    _disposed = false;
+    ref.onDispose(() => _disposed = true);
     return _decodeStoredPlaylists(_prefs.get(localPlaylistsStorageKey));
   }
 
@@ -489,9 +492,7 @@ class LocalPlaylistNotifier extends Notifier<List<LocalPlaylist>> {
       final rows = [for (final playlist in next) jsonEncode(playlist.toJson())];
       final currentRows = [for (final playlist in snapshot) jsonEncode(playlist.toJson())];
       if (!mustWrite && listEquals(rows, currentRows)) return 0;
-      if (!await _writeRows(rows)) {
-        throw const PlaylistStoreException('无法保存导入的备份');
-      }
+      await _writeRows(rows, failureMessage: '无法保存导入的备份');
       if (!identical(state, snapshot)) {
         // Even a no-op merge must repair the stale candidate written above.
         // Queue the retry behind any local edits already awaiting persistence.
@@ -913,19 +914,51 @@ class LocalPlaylistNotifier extends Notifier<List<LocalPlaylist>> {
     return id;
   }
 
-  Future<bool> _writeRows(List<String> rows) {
-    final write = _pendingWrites.then(
-      (_) => _prefs.setStringList(localPlaylistsStorageKey, rows),
+  Future<void> _writeRows(
+    List<String> rows, {
+    required String failureMessage,
+    List<LocalPlaylist>? optimisticState,
+  }) {
+    final prefs = _prefs;
+    final write = _pendingWrites.then((_) async {
+      try {
+        if (!await prefs.setStringList(localPlaylistsStorageKey, rows)) {
+          throw PlaylistStoreException(failureMessage);
+        }
+      } catch (_, stackTrace) {
+        // SharedPreferences updates its cache even when the platform save fails.
+        // Reload before the next queued write, and only roll back our own state.
+        try {
+          await prefs.reload();
+          if (!_disposed &&
+              optimisticState != null &&
+              identical(state, optimisticState)) {
+            state = _decodeStoredPlaylists(prefs.get(localPlaylistsStorageKey));
+          }
+        } catch (_) {
+          // A failed reload leaves no confirmed snapshot to publish.
+        }
+        Error.throwWithStackTrace(
+          PlaylistStoreException(failureMessage),
+          stackTrace,
+        );
+      }
+    });
+    // Report the failure to its caller while keeping the write queue usable.
+    _pendingWrites = write.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
     );
-    // A failed save must not poison later writes; the original caller still
-    // receives its failure through `write`.
-    _pendingWrites = write.then<void>((_) {}, onError: (Object _, StackTrace __) {});
     return write;
   }
 
   Future<void> _persist() {
-    final rows = [for (final playlist in state) jsonEncode(playlist.toJson())];
-    return _writeRows(rows);
+    final snapshot = state;
+    return _writeRows(
+      [for (final playlist in snapshot) jsonEncode(playlist.toJson())],
+      failureMessage: '无法保存歌单',
+      optimisticState: snapshot,
+    );
   }
 }
 

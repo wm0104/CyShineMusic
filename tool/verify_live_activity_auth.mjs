@@ -11,6 +11,7 @@ const service = read('lib/features/player/live_activity_service.dart');
 const bundle = read('ios/CyShineMusicWidget/CyShineWidgetBundle.swift');
 const plugin = read('ios/Runner/CyShineNativePlugin.swift');
 const main = read('lib/main.dart');
+const scene = read('ios/Runner/SceneDelegate.swift');
 const failures = [];
 const check = (ok, message) => { if (!ok) failures.push(message); };
 
@@ -34,6 +35,9 @@ check(/CyShineHomeWidget\(\)/.test(bundle) && !/CyShineLiveActivityWidget\(\)/.t
 check(/liveActivityProvider\)\.initialize\(\)/.test(main) && /ref\.listen<PlayerState>/.test(service), '不得禁用桌面同步 provider');
 check(/payload\['title'\]/.test(service) && /payload\['artist'\]/.test(service) && /payload\['cover'\]/.test(service), '去重必须包含标题、歌手与封面');
 check(/case 'control':/.test(service) && /case 'openPlayer':/.test(service) && /handleIncomingURL/.test(bridge), '保留旧播放器深链与控制回调');
+check(/super\.scene\(scene, willConnectTo: session, options: connectionOptions\)\s+handleURLs\(connectionOptions\.urlContexts\)/.test(scene), '冷启动应在 Flutter 建立场景后处理连接选项中的 URL');
+check(/super\.scene\(scene, openURLContexts: urlContexts\)/.test(scene) && /CyShineIncomingAudio\.shared\.accept\(url: url\)/.test(scene) && /CyShineIncomingAudio\.handleAppURL\(url\)/.test(scene), '运行中仍需处理原生 URL 并转发 Flutter 场景回调');
+check(/<key>FlutterDeepLinkingEnabled<\/key>\s*<false\/>/.test(read('ios/Runner/Info.plist')), '原生处理过的 URL 不应再进入 Flutter 路由');
 check(!/extensionLoaded/.test(plugin), '配置列表不能用作扩展是否加载的判据');
 check(!/MPNowPlayingInfoCenter|MPRemoteCommandCenter/.test(bridge + service), '系统媒体继续由 audio_service 单写');
 check(/UIDeviceFamily/.test(read('ios/CyShineMusicWidget/Info.plist')), '保留 Widget 设备声明');

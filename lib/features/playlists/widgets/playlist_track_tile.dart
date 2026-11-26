@@ -55,7 +55,7 @@ class PlaylistTrackTile extends ConsumerWidget {
         ? null
         : ref.watch(
             downloadProgressProvider.select(
-              (value) => value.latestTaskForMusic(music.id),
+              (value) => value.latestTaskForMusic(music),
             ),
           );
     final isLocal = item.localEntry != null;

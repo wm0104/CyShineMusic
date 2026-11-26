@@ -18,6 +18,7 @@ import 'package:cy_shine_music/features/search/search_page.dart';
 import 'package:cy_shine_music/features/search/search_controller.dart' show SearchCategory, searchControllerProvider;
 import 'package:cy_shine_music/core/models/download_capabilities.dart';
 import 'package:cy_shine_music/core/music_sources/music_source_controller.dart';
+import 'package:cy_shine_music/core/music_sources/music_source_models.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
 import 'package:cy_shine_music/features/discovery/album_track_match_store.dart';
 import 'package:cy_shine_music/features/discovery/discovery_controller.dart';
@@ -301,6 +302,26 @@ void main() {
     await _finishToast(tester);
   });
 
+  testWidgets('album batch download locks while sources are loading', (
+    tester,
+  ) async {
+    final sources = Completer<MusicSourceState>();
+    await _pump(tester, '/discover/albums/wy/record', loadingSources: sources.future);
+    await _selectAll(tester);
+    final download = find.widgetWithText(InkWell, '下载 65 首');
+    expect(tester.widget<InkWell>(download).onTap, isNotNull);
+
+    await tester.tap(download);
+    await _frames(tester);
+    expect(tester.widget<InkWell>(download).onTap, isNull);
+
+    sources.complete(const MusicSourceState(records: [], enabledIds: []));
+    await _frames(tester);
+    expect(tester.widget<InkWell>(download).onTap, isNotNull);
+    expect(find.text('请先在设置中导入并启用音源'), findsOneWidget);
+    await _finishToast(tester);
+  });
+
   testWidgets('explicit play all uses all album tracks in order with album queue identity', (tester) async {
     final h = await _pump(tester, '/discover/albums/wy/record');
     final button = find.byKey(const ValueKey('playlist-play-all'));
@@ -479,6 +500,15 @@ class _Player extends PlayerController {
   }
 }
 
+class _LoadingMusicSourceController extends MusicSourceController {
+  _LoadingMusicSourceController(this.result);
+
+  final Future<MusicSourceState> result;
+
+  @override
+  Future<MusicSourceState> build() => result;
+}
+
 class _Harness {
   _Harness(this.router, this.container, this.api, this.player);
   final GoRouter router;
@@ -489,7 +519,7 @@ class _Harness {
 }
 
 Future<_Harness> _pump(WidgetTester tester, String location, {bool songsFail = false,
-  String catalog = 'data'}) async {
+  String catalog = 'data', Future<MusicSourceState>? loadingSources}) async {
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = const Size(390, 844);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -504,9 +534,14 @@ Future<_Harness> _pump(WidgetTester tester, String location, {bool songsFail = f
     musicApiProvider.overrideWithValue(api),
     playerAudioHandlerProvider.overrideWithValue(handler),
     playerControllerProvider.overrideWith((ref) => player = _Player(ref)),
-    downloadCapabilitiesProvider.overrideWithValue(const AsyncData(DownloadCapabilities(
-      sources: {MusicSource.wy: [Quality.k320]}, availableSources: [MusicSource.wy],
-    ))),
+    if (loadingSources != null)
+      musicSourceControllerProvider.overrideWith(
+        () => _LoadingMusicSourceController(loadingSources),
+      )
+    else
+      downloadCapabilitiesProvider.overrideWithValue(const AsyncData(DownloadCapabilities(
+        sources: {MusicSource.wy: [Quality.k320]}, availableSources: [MusicSource.wy],
+      ))),
   ]);
   final router = createAppRouter(initialLocation: location);
   addTearDown(() {router.dispose(); container.dispose(); unawaited(handler.disposeHandler());});

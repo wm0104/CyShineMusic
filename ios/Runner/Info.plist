@@ -56,6 +56,10 @@
 	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
 	<true/>
 
+	<!-- SceneDelegate 和 AppDelegate 处理外部音频与播放器深链。 -->
+	<key>FlutterDeepLinkingEnabled</key>
+	<false/>
+
 	<!-- 深链：灵动岛 / 锁屏卡片 / 桌面小组件点一下回到 App，并带上控制动作。
 	     与 ios/CyShineMusicWidget/Info.plist 的 scheme 保持一致。 -->
 	<key>CFBundleURLTypes</key>

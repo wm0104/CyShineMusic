@@ -143,6 +143,7 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
       _externalAudioReady = true;
       await _openPendingExternalAudio();
       await _openWidgetPlayer();
+      await _openLiveActivityPlayer();
       if (Platform.isIOS && mounted) {
         unawaited(ref.read(appUpdateControllerProvider).check(automatic: true));
       }
@@ -165,7 +166,8 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
 
   /// 点 iOS 桌面 Widget 时把播放器推到前台（保留既有回调名称）。
   Future<void> _openLiveActivityPlayer() async {
-    if (!mounted) return;
+    if (!mounted || !_externalAudioReady) return;
+    if (!(_liveActivityService?.takeOpenPlayerRequest() ?? false)) return;
     openPlayerRoute(appRouter);
   }
 
