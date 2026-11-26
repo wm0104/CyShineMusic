@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cy_shine_music/core/app_info.dart';
@@ -67,6 +68,56 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('调试模式').hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('collapsing a running update check leaves it in progress', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final service = _DelayedService();
+    final controller = AppUpdateController(
+      service: service, preferences: prefs, installedVersion: () async => '2.0.8',
+    );
+    final router = GoRouter(initialLocation: '/settings', routes: [
+      GoRoute(path: '/settings', builder: (_, _) => const Scaffold(
+        body: SingleChildScrollView(child: Column(children: [
+          AppUpdateSection(), Text('备份与恢复'),
+        ])),
+      )),
+    ]);
+    addTearDown(router.dispose);
+    await tester.pumpWidget(ProviderScope(overrides: [
+      sharedPreferencesProvider.overrideWithValue(prefs),
+      appUpdateControllerProvider.overrideWith((ref) => controller),
+      _idleDownloadOverride(),
+    ], child: MaterialApp.router(routerConfig: router)));
+    await tester.pumpAndSettle();
+    final header = find.byKey(const ValueKey('check-update-setting'));
+    final backup = find.text('备份与恢复');
+    final collapsedY = tester.getTopLeft(backup).dy;
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(controller.checking, isTrue);
+    expect(find.text('正在检查更新…'), findsOneWidget);
+    expect(tester.getTopLeft(backup).dy, greaterThan(collapsedY));
+
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(controller.checking, isTrue);
+    expect(find.text('正在检查更新…'), findsNothing);
+    expect(tester.getTopLeft(backup).dy, closeTo(collapsedY, 0.01));
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(find.text('正在检查更新…'), findsOneWidget);
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    service.pending.complete(_release());
+    await tester.pumpAndSettle();
+    expect(controller.release?.tagName, 'ios-v2.0.9');
+    expect(find.text('下载 IPA'), findsNothing);
+    await tester.tap(header);
+    await tester.pumpAndSettle();
+    expect(find.text('下载 IPA'), findsOneWidget);
+    expect(service.requests, 1);
   });
 
   testWidgets('a pending update can be collapsed and reopened', (tester) async {
@@ -204,4 +255,14 @@ class _Service implements AppUpdateService {
   AppRelease release;
   @override
   Future<AppRelease?> fetchLatestRelease() async => release;
+}
+
+class _DelayedService implements AppUpdateService {
+  final pending = Completer<AppRelease?>();
+  int requests = 0;
+  @override
+  Future<AppRelease?> fetchLatestRelease() {
+    requests++;
+    return pending.future;
+  }
 }

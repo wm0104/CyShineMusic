@@ -29,7 +29,7 @@ class AlbumPage extends ConsumerWidget {
       playerControllerProvider.select(
         (state) => (
           track: state.track,
-          miniLyricsReady: !state.lyricLoading && !state.lyrics.isEmpty,
+          miniLyricsReady: !state.lyricLoading && state.lyrics.hasLineTiming,
         ),
       ),
     );

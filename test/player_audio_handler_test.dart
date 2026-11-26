@@ -388,6 +388,57 @@ void main() {
     },
   );
 
+  test(
+    'crossfade holds incoming duration and position until metadata changes',
+    () async {
+      const oldDuration = Duration(minutes: 5);
+      const newDuration = Duration(minutes: 2);
+      const lastPosition = Duration(minutes: 4, seconds: 57);
+      const old = MediaItem(id: 'old', title: '旧曲', duration: oldDuration);
+      const next = MediaItem(id: 'next', title: '新曲', duration: newDuration);
+      final player = _CrossfadeBassPlayer();
+      final handler = PlayerAudioHandler(player: player);
+      addTearDown(handler.disposeHandler);
+      handler.updateMediaMetadata(old);
+      handler.publishQueue([old, next], currentIndex: 0);
+      player.report(lastPosition);
+
+      final media = <MediaItem?>[];
+      final positions = <(int?, Duration)>[];
+      final items = handler.mediaItem.listen(media.add);
+      final states = handler.playbackState.listen((state) {
+        positions.add((state.queueIndex, state.updatePosition));
+      });
+      addTearDown(items.cancel);
+      addTearDown(states.cancel);
+      expect(
+        await handler.startCrossfade(
+          token: 7,
+          duration: const Duration(seconds: 3),
+        ),
+        isTrue,
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(handler.currentMediaItem?.duration, oldDuration);
+      expect(handler.playbackState.value.updatePosition, lastPosition);
+
+      handler.updateMediaMetadata(next);
+      handler.publishQueue([old, next], currentIndex: 1);
+      handler.finishCrossfadePublication(7);
+      await Future<void>.delayed(Duration.zero);
+      expect(handler.currentMediaItem?.duration, newDuration);
+      expect(handler.playbackState.value.updatePosition, Duration.zero);
+      expect(handler.playbackState.value.queueIndex, 1);
+      expect(
+        media
+            .where((item) => item?.id == 'old')
+            .every((item) => item?.duration == oldDuration),
+        isTrue,
+      );
+      expect(positions, isNot(contains((0, Duration.zero))));
+    },
+  );
+
   test('pause cancels a play waiting for audio session setup', () async {
     final player = _FakeBassPlayer();
     final handler = _DelayedSessionAudioHandler(player);
@@ -521,6 +572,7 @@ class _ClockBassPlayer extends _FakeBassPlayer {
   void report(
     Duration position, {
     BassProcessingState state = BassProcessingState.ready,
+    Duration duration = const Duration(minutes: 5),
     bool playing = true,
     bool notify = true,
   }) {
@@ -530,7 +582,7 @@ class _ClockBassPlayer extends _FakeBassPlayer {
       playing: playing,
       processingState: state,
       bufferedPosition: position,
-      duration: const Duration(minutes: 5),
+      duration: duration,
     );
     if (notify) _events.add(_snapshot);
   }
@@ -551,4 +603,32 @@ class _ClockBassPlayer extends _FakeBassPlayer {
 
   @override
   Future<void> dispose() => _events.close();
+}
+
+class _CrossfadeBassPlayer extends _ClockBassPlayer {
+  final _durations = StreamController<Duration?>.broadcast(sync: true);
+
+  @override
+  Stream<Duration?> get durationStream => _durations.stream;
+
+  @override
+  Duration? get duration => snapshot.duration;
+
+  @override
+  Future<bool> startCrossfade({
+    required int token,
+    required Duration duration,
+  }) async {
+    const incomingDuration = Duration(minutes: 2);
+    report(Duration.zero, duration: incomingDuration, notify: false);
+    _durations.add(incomingDuration);
+    _events.add(snapshot);
+    return true;
+  }
+
+  @override
+  Future<void> dispose() async {
+    await _durations.close();
+    await super.dispose();
+  }
 }

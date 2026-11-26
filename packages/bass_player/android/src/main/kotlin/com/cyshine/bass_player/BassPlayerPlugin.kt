@@ -18,10 +18,15 @@ import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.IOException
 import java.util.LinkedHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.pow
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 class BassPlayerPlugin :
@@ -40,9 +45,14 @@ class BassPlayerPlugin :
     private val loadGeneration = AtomicInteger()
 
     private var initialized = false
-    private var stream = 0
-    private var sourceDescriptor: ParcelFileDescriptor? = null
-    private var remoteSource = false
+    private var active: Output? = null
+    private val stream: Int get() = active?.handle ?: 0
+    private val remoteSource: Boolean get() = active?.remote == true
+    private val preloadWorker = Executors.newSingleThreadExecutor()
+    private var preparation: Preparation? = null
+    private var outgoing: Output? = null
+    private var fadeToken: Long? = null
+    private var fadeDurationMs = 0L
     private var playing = false
     private var completed = false
     private var processingState = STATE_IDLE
@@ -56,18 +66,52 @@ class BassPlayerPlugin :
     private var bassFxVersion = "unknown"
 
     private var equalizer = EqualizerConfiguration.disabled()
-    private var inputGainFx = 0
-    private var outputGainFx = 0
-    private val bandFx = LinkedHashMap<String, Int>()
+    // Each decoder retains its descriptor, BASS callbacks, and equalizer handles.
+    private class Output(val handle: Int, val remote: Boolean, val descriptor: ParcelFileDescriptor?) {
+        val callbacks = mutableListOf<BASS.SYNCPROC>()
+        var inputGainFx = 0
+        var outputGainFx = 0
+        val bandFx = LinkedHashMap<String, Int>()
 
-    private var endSync = 0
-    private var stallSync = 0
-    private var downloadSync = 0
-    private var deviceFailureSync = 0
-    private var endSyncCallback: BASS.SYNCPROC? = null
-    private var stallSyncCallback: BASS.SYNCPROC? = null
-    private var downloadSyncCallback: BASS.SYNCPROC? = null
-    private var deviceFailureSyncCallback: BASS.SYNCPROC? = null
+        fun close() {
+            BASS.BASS_StreamFree(handle) // Also removes all synchronizers and FX.
+            try {
+                descriptor?.close()
+            } catch (error: IOException) {
+                Log.w(TAG, "Unable to close audio descriptor", error)
+            }
+        }
+    }
+
+    private class Preparation(val token: Long) {
+        @Volatile var cancelled = false
+            private set
+        private var output: Output? = null
+
+        @Synchronized fun store(opened: Output): Boolean {
+            if (cancelled) {
+                opened.close()
+                return false
+            }
+            output = opened
+            return true
+        }
+
+        @Synchronized fun take(): Output? = output.also { output = null }
+
+        @Synchronized fun cancel() {
+            cancelled = true
+            BASS.BASS_StreamCancel(this)
+            take()?.close()
+        }
+    }
+
+    private val fadeTick = object : Runnable {
+        override fun run() {
+            updateFade()
+            if (outgoing != null && playing) engineHandler.postDelayed(this, 20L)
+        }
+    }
 
     private val positionTicker = object : Runnable {
         override fun run() {
@@ -110,6 +154,7 @@ class BassPlayerPlugin :
         cancelPendingNetworkLoad()
         engineHandler.post {
             disposeEngine()
+            preloadWorker.shutdown()
             engineThread.quitSafely()
         }
     }
@@ -128,19 +173,41 @@ class BassPlayerPlugin :
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "initialize" -> postResult(result) { initializeEngine() }
-            "load" -> {
+            "load", "prepareCrossfade" -> {
                 val uri = call.argument<String>("uri")
                 if (uri.isNullOrBlank()) {
                     result.error("BASS_ARGUMENT", "uri is required", null)
                     return
                 }
-                val generation = loadGeneration.incrementAndGet()
-                cancelPendingNetworkLoad()
                 val headers = (call.argument<Map<*, *>>("headers") ?: emptyMap<Any, Any>())
                     .entries
                     .associate { it.key.toString() to it.value.toString() }
                 val formatHint = call.argument<String>("formatHint")
-                postResult(result) { load(uri, headers, formatHint, generation) }
+                if (call.method == "prepareCrossfade") {
+                    val token = call.argument<Number>("token")?.toLong()
+                    if (token == null) {
+                        result.success(mapOf("prepared" to false))
+                    } else {
+                        engineHandler.post { prepareCrossfade(uri, headers, formatHint, token, result) }
+                    }
+                } else {
+                    val generation = loadGeneration.incrementAndGet()
+                    cancelPendingNetworkLoad()
+                    postResult(result) { load(uri, headers, formatHint, generation) }
+                }
+            }
+            "startCrossfade" -> {
+                val token = call.argument<Number>("token")?.toLong()
+                val duration = call.argument<Number>("durationMs")?.toLong() ?: 0L
+                postResult(result) { startCrossfade(token, duration) }
+            }
+            "cancelCrossfade" -> {
+                val token = call.argument<Number>("token")?.toLong()
+                postResult(result) {
+                    if (token != null && preparation?.token == token) cancelPreparation()
+                    if (token != null && fadeToken == token) finishFade()
+                    emptyMap()
+                }
             }
             "play" -> postResult(result) { play() }
             "pause" -> postResult(result) { pause() }
@@ -300,73 +367,31 @@ class BassPlayerPlugin :
         processingState = STATE_LOADING
         emitSnapshot()
 
-        val parsed = Uri.parse(source)
-        val flags = BASS.BASS_SAMPLE_FLOAT
-        val format = normalizedFormat(formatHint, parsed)
-        val isRemote = parsed.scheme?.lowercase() in setOf("http", "https", "ftp")
-        var openedDescriptor: ParcelFileDescriptor? = null
-        var requestToken: Any? = null
-        val handle = try {
-            when (parsed.scheme?.lowercase()) {
-                "http", "https", "ftp" -> {
-                    requestToken = Any()
-                    pendingNetworkRequest = requestToken
-                    createNetworkStream(
-                        format,
-                        urlWithHeaders(source, headers),
-                        flags,
-                        requestToken,
-                    )
-                }
-                "content" -> {
-                    openedDescriptor = applicationContext.contentResolver
-                        .openFileDescriptor(parsed, "r")
-                        ?: throw BassFailure(
-                            BASS.BASS_ERROR_FILEOPEN,
-                            "load content",
-                            "unable to open content URI",
-                        )
-                    createDescriptorStream(format, openedDescriptor, flags)
-                }
-                "file" -> createFileStream(format, parsed.path ?: source, flags)
-                null, "" -> createFileStream(format, source, flags)
-                else -> throw BassFailure(
-                    BASS.BASS_ERROR_FILEOPEN,
-                    "load",
-                    "unsupported URI scheme: ${parsed.scheme}",
-                )
-            }
+        val request = Any()
+        pendingNetworkRequest = request
+        val opened = try {
+            openOutput(source, headers, formatHint, request) { generation != loadGeneration.get() }
         } catch (error: Throwable) {
-            openedDescriptor?.close()
+            if (generation != loadGeneration.get()) {
+                throw BassFailure(CANCELLED, "load", "load cancelled")
+            }
             processingState = STATE_ERROR
             emitSnapshot()
             throw error
         } finally {
-            if (pendingNetworkRequest === requestToken) pendingNetworkRequest = null
+            pendingNetworkRequest = null
         }
-
         if (generation != loadGeneration.get()) {
-            if (handle != 0) BASS.BASS_StreamFree(handle)
-            openedDescriptor?.close()
+            opened.close()
             throw BassFailure(CANCELLED, "load", "load cancelled")
         }
-        if (handle == 0) {
-            val code = BASS.BASS_ErrorGetCode()
-            openedDescriptor?.close()
-            processingState = STATE_ERROR
-            emitSnapshot()
-            throw BassFailure(code, "load stream", errorMessage(code))
-        }
-
-        stream = handle
-        sourceDescriptor = openedDescriptor
-        remoteSource = isRemote
+        active = opened
         try {
             if (!BASS.BASS_ChannelSetAttribute(stream, BASS.BASS_ATTRIB_VOL, channelVolume)) {
                 fail("set volume")
             }
-            installSynchronizers()
-            applyEqualizerChain(equalizer, null)
+            installSynchronizers(opened)
+            opened.applyEqualizerChain(equalizer, null)
             logOutputState("load")
             durationMs = readDurationMs()
             processingState = STATE_READY
@@ -380,6 +405,127 @@ class BassPlayerPlugin :
         return snapshot()
     }
 
+    private fun openOutput(
+        source: String, headers: Map<String, String>, formatHint: String?,
+        request: Any, cancelled: () -> Boolean,
+    ): Output {
+        val parsed = Uri.parse(source)
+        val flags = BASS.BASS_SAMPLE_FLOAT
+        val format = normalizedFormat(formatHint, parsed)
+        val scheme = parsed.scheme?.lowercase()
+        var descriptor: ParcelFileDescriptor? = null
+        try {
+            if (cancelled()) throw BassFailure(CANCELLED, "load", "load cancelled")
+            val handle = when (scheme) {
+                "http", "https", "ftp" -> createNetworkStream(
+                    format, urlWithHeaders(source, headers), flags, request, cancelled,
+                )
+                "content" -> {
+                    descriptor = applicationContext.contentResolver.openFileDescriptor(parsed, "r")
+                        ?: throw BassFailure(BASS.BASS_ERROR_FILEOPEN, "load content", "unable to open content URI")
+                    createDescriptorStream(format, descriptor, flags)
+                }
+                "file" -> createFileStream(format, parsed.path ?: source, flags)
+                null, "" -> createFileStream(format, source, flags)
+                else -> throw BassFailure(BASS.BASS_ERROR_FILEOPEN, "load", "unsupported URI scheme: $scheme")
+            }
+            if (handle == 0) fail("load stream")
+            return Output(handle, scheme in setOf("http", "https", "ftp"), descriptor)
+        } catch (error: Throwable) {
+            descriptor?.close()
+            throw error
+        }
+    }
+
+    private fun prepareCrossfade(
+        source: String, headers: Map<String, String>, formatHint: String?,
+        token: Long, result: MethodChannel.Result,
+    ) {
+        cancelPreparation()
+        if (!initialized || stream == 0) {
+            mainHandler.post { result.success(mapOf("prepared" to false)) }
+            return
+        }
+        val request = Preparation(token)
+        preparation = request
+        val device = BASS.BASS_ChannelGetDevice(stream)
+        preloadWorker.execute {
+            val opened = try {
+                !request.cancelled && BASS.BASS_SetDevice(device) && request.store(
+                    openOutput(source, headers, formatHint, request) { request.cancelled },
+                )
+            } catch (error: Exception) {
+                if (!request.cancelled) Log.w(TAG, "Unable to prepare next track", error)
+                false
+            }
+            engineHandler.post {
+                val valid = opened && preparation === request
+                mainHandler.post { result.success(mapOf("prepared" to valid)) }
+            }
+        }
+    }
+
+    private fun cancelPreparation() {
+        preparation?.cancel()
+        preparation = null
+    }
+
+    private fun startCrossfade(token: Long?, duration: Long): Map<String, Any?> {
+        val refused = mapOf("started" to false)
+        val previous = active ?: return refused
+        val request = preparation ?: return refused
+        if (token != request.token || duration <= 0 || completed ||
+            BASS.BASS_ChannelIsActive(previous.handle) != BASS.BASS_ACTIVE_PLAYING
+        ) return refused
+        val next = request.take() ?: return refused
+        preparation = null
+        try {
+            installSynchronizers(next)
+            next.applyEqualizerChain(equalizer, null)
+            if (!BASS.BASS_ChannelSetAttribute(next.handle, BASS.BASS_ATTRIB_VOL, 0f) ||
+                !BASS.BASS_ChannelPlay(next.handle, false)
+            ) fail("start crossfade")
+        } catch (error: Exception) {
+            next.close()
+            Log.w(TAG, "Unable to start next track", error)
+            return refused
+        }
+
+        finishFade()
+        outgoing = previous
+        active = next
+        fadeToken = token
+        fadeDurationMs = duration
+        durationMs = readDurationMs()
+        processingState = STATE_READY
+        refreshPlaybackState()
+        startTicker()
+        engineHandler.post(fadeTick)
+        return snapshot() + ("started" to true)
+    }
+
+    private fun updateFade() {
+        val old = outgoing ?: return
+        // The incoming playback clock also stops while paused or stalled.
+        val progress = (readPositionMs().toDouble() / fadeDurationMs).coerceIn(0.0, 1.0)
+        if (progress >= 1 || BASS.BASS_ChannelIsActive(old.handle) == BASS.BASS_ACTIVE_STOPPED) {
+            finishFade()
+            return
+        }
+        val angle = progress * PI / 2
+        BASS.BASS_ChannelSetAttribute(stream, BASS.BASS_ATTRIB_VOL, channelVolume * sin(angle).toFloat())
+        BASS.BASS_ChannelSetAttribute(old.handle, BASS.BASS_ATTRIB_VOL, channelVolume * cos(angle).toFloat())
+    }
+
+    private fun finishFade() {
+        engineHandler.removeCallbacks(fadeTick)
+        val old = outgoing ?: return
+        outgoing = null
+        fadeToken = null
+        old.close()
+        BASS.BASS_ChannelSetAttribute(stream, BASS.BASS_ATTRIB_VOL, channelVolume)
+    }
+
     private fun play(): Map<String, Any?> {
         initializeEngine()
         if (stream == 0) failWith(BASS.BASS_ERROR_HANDLE, "play")
@@ -391,6 +537,13 @@ class BassPlayerPlugin :
             completed = false
         }
         if (!BASS.BASS_ChannelPlay(stream, false)) fail("play")
+        outgoing?.let { old ->
+            if (BASS.BASS_ChannelIsActive(old.handle) == BASS.BASS_ACTIVE_PAUSED) {
+                BASS.BASS_ChannelPlay(old.handle, false)
+            }
+            engineHandler.removeCallbacks(fadeTick)
+            engineHandler.post(fadeTick)
+        }
         playing = true
         acquireWakeLock()
         refreshPlaybackState()
@@ -402,6 +555,8 @@ class BassPlayerPlugin :
     private fun pause(): Map<String, Any?> {
         if (stream == 0) return snapshot()
         if (!BASS.BASS_ChannelPause(stream)) fail("pause")
+        outgoing?.let { BASS.BASS_ChannelPause(it.handle) }
+        engineHandler.removeCallbacks(fadeTick)
         playing = false
         releaseWakeLock()
         refreshPlaybackState()
@@ -421,6 +576,8 @@ class BassPlayerPlugin :
     }
 
     private fun seek(requestedMs: Long): Map<String, Any?> {
+        cancelPreparation()
+        finishFade()
         if (stream == 0) failWith(BASS.BASS_ERROR_HANDLE, "seek")
         val end = durationMs
         val targetMs = if (end == null) requestedMs.coerceAtLeast(0) else {
@@ -464,7 +621,9 @@ class BassPlayerPlugin :
 
     private fun setVolume(requested: Float): Map<String, Any?> {
         channelVolume = requested.coerceIn(0f, 1f)
-        if (stream != 0 &&
+        if (outgoing != null) {
+            updateFade()
+        } else if (stream != 0 &&
             !BASS.BASS_ChannelSetAttribute(stream, BASS.BASS_ATTRIB_VOL, channelVolume)
         ) {
             fail("set volume")
@@ -480,14 +639,17 @@ class BassPlayerPlugin :
         }
 
         val previous = equalizer
+        val outputs = listOfNotNull(active, outgoing)
         try {
-            applyEqualizerChain(configuration, previous)
+            outputs.forEach { it.applyEqualizerChain(configuration, previous) }
             equalizer = configuration
             if (configuration.enabled != previous.enabled) logOutputState("equalizer")
         } catch (failure: BassFailure) {
-            detachEqualizer()
             try {
-                applyEqualizerChain(previous, null)
+                outputs.forEach {
+                    it.detachEqualizer()
+                    it.applyEqualizerChain(previous, null)
+                }
             } catch (rollbackFailure: BassFailure) {
                 Log.e(TAG, "Failed to restore equalizer after update failure", rollbackFailure)
                 throw BassFailure(
@@ -519,15 +681,16 @@ class BassPlayerPlugin :
                 "mixChannels=${info.speakers}, initFlags=0x${info.initflags.toString(16)}, " +
                 "globalStreamVolume=${BASS.BASS_GetConfig(BASS.BASS_CONFIG_GVOL_STREAM)}, " +
                 "channelVolume=$actualVolume, eq=${equalizer.enabled}, " +
-                "inputGainFx=$inputGainFx, bandFxCount=${bandFx.size}, outputGainFx=$outputGainFx",
+                "inputGainFx=${active?.inputGainFx}, bandFxCount=${active?.bandFx?.size}, outputGainFx=${active?.outputGainFx}",
         )
     }
 
-    private fun installSynchronizers() {
-        val channel = stream
-        endSyncCallback = BASS.SYNCPROC { _, callbackChannel, _, _ ->
+    private fun installSynchronizers(output: Output) {
+        val channel = output.handle
+        val endSyncCallback = BASS.SYNCPROC { _, callbackChannel, _, _ ->
             engineHandler.post {
-                if (stream != channel || callbackChannel != channel) return@post
+                if (active !== output || callbackChannel != channel) return@post
+                finishFade()
                 completed = true
                 playing = false
                 processingState = STATE_COMPLETED
@@ -536,24 +699,25 @@ class BassPlayerPlugin :
                 emitSnapshot()
             }
         }
-        stallSyncCallback = BASS.SYNCPROC { _, callbackChannel, _, _ ->
+        val stallSyncCallback = BASS.SYNCPROC { _, callbackChannel, _, _ ->
             engineHandler.post {
-                if (stream != channel || callbackChannel != channel) return@post
+                if (active !== output || callbackChannel != channel) return@post
                 refreshPlaybackState()
                 emitSnapshot()
             }
         }
-        downloadSyncCallback = BASS.SYNCPROC { _, callbackChannel, _, _ ->
+        val downloadSyncCallback = BASS.SYNCPROC { _, callbackChannel, _, _ ->
             engineHandler.post {
-                if (stream != channel || callbackChannel != channel) return@post
+                if (active !== output || callbackChannel != channel) return@post
                 durationMs = readDurationMs() ?: durationMs
                 emitSnapshot()
             }
         }
-        deviceFailureSyncCallback = BASS.SYNCPROC { _, callbackChannel, _, _ ->
+        val deviceFailureSyncCallback = BASS.SYNCPROC { _, callbackChannel, _, _ ->
             engineHandler.post {
-                if (stream != channel || callbackChannel != channel) return@post
+                if (active !== output || callbackChannel != channel) return@post
                 playing = false
+                finishFade()
                 processingState = STATE_ERROR
                 releaseWakeLock()
                 stopTicker()
@@ -561,29 +725,32 @@ class BassPlayerPlugin :
             }
         }
 
-        endSync = BASS.BASS_ChannelSetSync(
-            stream,
+        output.callbacks.addAll(
+            listOf(endSyncCallback, stallSyncCallback, downloadSyncCallback, deviceFailureSyncCallback),
+        )
+        val endSync = BASS.BASS_ChannelSetSync(
+            channel,
             BASS.BASS_SYNC_END or BASS.BASS_SYNC_ONETIME,
             0,
             endSyncCallback,
             null,
         )
-        stallSync = BASS.BASS_ChannelSetSync(
-            stream,
+        val stallSync = BASS.BASS_ChannelSetSync(
+            channel,
             BASS.BASS_SYNC_STALL,
             0,
             stallSyncCallback,
             null,
         )
-        downloadSync = BASS.BASS_ChannelSetSync(
-            stream,
+        val downloadSync = BASS.BASS_ChannelSetSync(
+            channel,
             BASS.BASS_SYNC_DOWNLOAD or BASS.BASS_SYNC_ONETIME,
             0,
             downloadSyncCallback,
             null,
         )
-        deviceFailureSync = BASS.BASS_ChannelSetSync(
-            stream,
+        val deviceFailureSync = BASS.BASS_ChannelSetSync(
+            channel,
             BASS.BASS_SYNC_DEV_FAIL,
             0,
             deviceFailureSyncCallback,
@@ -593,7 +760,7 @@ class BassPlayerPlugin :
             fail("install playback synchronizers")
         }
         // Local streams do not expose a download synchronizer.
-        if (remoteSource && downloadSync == 0) fail("install download synchronizer")
+        if (output.remote && downloadSync == 0) fail("install download synchronizer")
     }
 
     private fun refreshPlaybackState() {
@@ -688,11 +855,11 @@ class BassPlayerPlugin :
         return positionMs
     }
 
-    private fun applyEqualizerChain(
+    private fun Output.applyEqualizerChain(
         configuration: EqualizerConfiguration,
         previous: EqualizerConfiguration?,
     ) {
-        if (stream == 0) return
+        val stream = this.handle
         if (!configuration.enabled) {
             val wasAttached = inputGainFx != 0 || outputGainFx != 0 || bandFx.isNotEmpty()
             detachEqualizer(strict = true)
@@ -830,57 +997,39 @@ class BassPlayerPlugin :
         if (!BASS.BASS_FXSetParameters(handle, parameters)) fail("configure $label")
     }
 
-    private fun detachEqualizer(strict: Boolean = false) {
-        if (stream == 0) {
-            clearEqualizerHandles()
-            return
-        }
+    private fun Output.detachEqualizer(strict: Boolean = false) {
         if (inputGainFx != 0) removeFx(inputGainFx, "input gain", strict)
         for ((id, handle) in bandFx) {
             removeFx(handle, "EQ band $id", strict)
         }
         if (outputGainFx != 0) removeFx(outputGainFx, "output gain", strict)
-        clearEqualizerHandles()
-    }
-
-    private fun removeFx(handle: Int, label: String, strict: Boolean) {
-        if (BASS.BASS_ChannelRemoveFX(stream, handle)) return
-        val code = BASS.BASS_ErrorGetCode()
-        if (strict) throw BassFailure(code, "remove $label", errorMessage(code))
-        Log.w(TAG, "Unable to detach $label, bassCode=$code")
-    }
-
-    private fun clearEqualizerHandles() {
         inputGainFx = 0
         outputGainFx = 0
         bandFx.clear()
     }
 
+    private fun Output.removeFx(fx: Int, label: String, strict: Boolean) {
+        if (BASS.BASS_ChannelRemoveFX(handle, fx)) return
+        val code = BASS.BASS_ErrorGetCode()
+        if (strict) throw BassFailure(code, "remove $label", errorMessage(code))
+        Log.w(TAG, "Unable to detach $label, bassCode=$code")
+    }
+
     private fun releaseStream() {
         stopTicker()
         releaseWakeLock()
-        if (stream != 0) {
-            detachEqualizer()
-            BASS.BASS_StreamFree(stream)
-        }
-        stream = 0
-        sourceDescriptor?.close()
-        sourceDescriptor = null
-        remoteSource = false
-        endSync = 0
-        stallSync = 0
-        downloadSync = 0
-        deviceFailureSync = 0
-        endSyncCallback = null
-        stallSyncCallback = null
-        downloadSyncCallback = null
-        deviceFailureSyncCallback = null
+        cancelPreparation()
+        finishFade()
+        active?.close()
+        active = null
     }
 
     private fun disposeEngine() {
         engineHandler.removeCallbacks(positionTicker)
         tickerStarted = false
         releaseStream()
+        // A cancelled URL decoder can still return from native IO on the worker.
+        preloadWorker.submit {}.get()
         pluginVersions.clear()
         if (initialized) BASS.BASS_Free()
         initialized = false
@@ -953,52 +1102,23 @@ class BassPlayerPlugin :
     }
 
     private fun createNetworkStream(
-        format: String,
-        request: String,
-        flags: Int,
-        requestToken: Any,
-    ): Int = when (format) {
-        "flac" -> networkWithFallback(request, flags, requestToken) {
-            BASSFLAC.BASS_FLAC_StreamCreateURL(request, 0, flags, null, requestToken)
-        }
-        "ape" -> networkWithFallback(request, flags, requestToken) {
-            BASSAPE.BASS_APE_StreamCreateURL(request, 0, flags, null, requestToken)
-        }
-        "alac" -> networkWithFallback(request, flags, requestToken) {
-            BASSALAC.BASS_ALAC_StreamCreateURL(request, 0, flags, null, requestToken)
-        }
-        "m4a" -> {
-            val generic = BASS.BASS_StreamCreateURL(request, 0, flags, null, requestToken)
-            if (generic != 0) generic else BASSALAC.BASS_ALAC_StreamCreateURL(
-                request,
-                0,
-                flags,
-                null,
-                requestToken,
-            )
-        }
-        "lossless" -> {
-            val generic = BASS.BASS_StreamCreateURL(request, 0, flags, null, requestToken)
-            if (generic != 0) generic else BASSFLAC.BASS_FLAC_StreamCreateURL(
-                request,
-                0,
-                flags,
-                null,
-                requestToken,
-            )
-        }
-        else -> BASS.BASS_StreamCreateURL(request, 0, flags, null, requestToken)
-    }
-
-    private inline fun networkWithFallback(
-        request: String,
-        flags: Int,
-        requestToken: Any,
-        specialized: () -> Int,
+        format: String, request: String, flags: Int, requestToken: Any, cancelled: () -> Boolean,
     ): Int {
-        val specializedHandle = specialized()
-        return if (specializedHandle != 0) specializedHandle else {
+        fun core() = if (cancelled()) 0 else
             BASS.BASS_StreamCreateURL(request, 0, flags, null, requestToken)
+        fun flac() = if (cancelled()) 0 else
+            BASSFLAC.BASS_FLAC_StreamCreateURL(request, 0, flags, null, requestToken)
+        fun alac() = if (cancelled()) 0 else
+            BASSALAC.BASS_ALAC_StreamCreateURL(request, 0, flags, null, requestToken)
+        if (cancelled()) return 0
+        return when (format) {
+            "flac" -> flac().takeIf { it != 0 } ?: core()
+            "ape" -> BASSAPE.BASS_APE_StreamCreateURL(request, 0, flags, null, requestToken)
+                .takeIf { it != 0 } ?: core()
+            "alac" -> alac().takeIf { it != 0 } ?: core()
+            "m4a" -> core().takeIf { it != 0 } ?: alac()
+            "lossless" -> core().takeIf { it != 0 } ?: flac()
+            else -> core()
         }
     }
 

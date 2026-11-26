@@ -59,6 +59,7 @@ class PlayerController extends StateNotifier<PlayerState>
     _audioHandler.bindTransportCallbacks(
       owner: this,
       onPrevious: playPrevious,
+      onSeek: _cancelCrossfade,
       onNext: playNext,
       onQueueItem: playQueueItem,
       onRepeatMode: _handleSystemRepeatMode,
@@ -69,6 +70,7 @@ class PlayerController extends StateNotifier<PlayerState>
         if (!mounted || _transportSuppressionToken != null) return;
         state = state.copyWith(position: position);
         _recordPlaybackProgress(position);
+        _checkCrossfade();
         _syncBluetoothMetadata();
         _schedulePositionCheckpoint();
       }),
@@ -91,6 +93,9 @@ class PlayerController extends StateNotifier<PlayerState>
           processingState: _mapProcessingState(playerState.processingState),
         );
         _syncBluetoothMetadata();
+        if (wasPlaying && !playerState.playing && _crossfade != null) {
+          _cancelPreparedCrossfade();
+        }
         if ((wasPlaying && !playerState.playing) ||
             playerState.processingState == BassProcessingState.completed) {
           _persistPositionCheckpoint();
@@ -99,11 +104,15 @@ class PlayerController extends StateNotifier<PlayerState>
           _autoAdvanceAfterCompletion();
         }
         _logPlaybackState(playerState);
-        _updateStallRecovery(playerState);
+        _updateStallRecovery(playerState.playing, playerState.processingState);
       }),
       _audioHandler.errorStream.listen(_handlePlaybackError),
     ];
     _ref.listen<AppSettings>(settingsProvider, (previous, next) {
+      if (previous?.crossfadeSeconds != next.crossfadeSeconds &&
+          next.crossfadeSeconds == 0) {
+        _cancelCrossfade();
+      }
       if (previous?.allowMixWithOthers != next.allowMixWithOthers) {
         unawaited(_applyAudioMixingPreference(next.allowMixWithOthers));
       }
@@ -159,6 +168,10 @@ class PlayerController extends StateNotifier<PlayerState>
   Quality? _currentQuality;
   List<DownloadHistoryEntry> _queue = const [];
   int _queueIndex = -1;
+  static int _nextCrossfadeToken = 0;
+  _QueueCrossfade? _crossfade;
+  int? _activeFadeToken;
+
   List<int> _playOrder = const [];
   int _playOrderCursor = -1;
   final math.Random _random = math.Random();
@@ -408,9 +421,12 @@ class PlayerController extends StateNotifier<PlayerState>
 
   void _handlePlaybackError(Object error) {
     if (!mounted || _pausedBySleepTimer) return;
-    if (_transportSuppressionToken != null ||
-        _lateSourceFallbackActive ||
-        state.loading) {
+    final transition = _transportSuppressionToken;
+    if (transition is _QueueCrossfade) {
+      transition.playbackError = error;
+      return;
+    }
+    if (transition != null || _lateSourceFallbackActive || state.loading) {
       // The active load pipeline owns this failure and reports it through its
       // own catch. Log it anyway so a stall that never reaches that catch is
       // not completely invisible.
@@ -451,14 +467,14 @@ class PlayerController extends StateNotifier<PlayerState>
     }());
   }
 
-  void _updateStallRecovery(BassPlaybackSnapshot playerState) {
+  void _updateStallRecovery(bool playing, BassProcessingState processingState) {
     final track = state.track;
     final stalled =
         !state.loading &&
         track != null &&
         !track.isLocal &&
-        playerState.playing &&
-        playerState.processingState == BassProcessingState.buffering;
+        playing &&
+        processingState == BassProcessingState.buffering;
     if (!stalled) {
       _cancelStallRecoveryTimer();
       return;
@@ -659,6 +675,7 @@ class PlayerController extends StateNotifier<PlayerState>
         : expanded.indexWhere((entry) => _sameEntry(entry, current));
     if (current != null && nextIndex < 0) return false;
 
+    _cancelPreparedCrossfade();
     _queue = expanded;
     _queueIndex = nextIndex;
     _rebuildPlayOrder(anchorIndex: _queueIndex);
@@ -672,6 +689,7 @@ class PlayerController extends StateNotifier<PlayerState>
     List<DownloadHistoryEntry> queue,
   ) async {
     _pendingRestoredSession = null;
+    _cancelCrossfade();
     _queue = _playableQueue(queue);
     _queueIndex = _queue.indexWhere((item) => _sameEntry(item, entry));
     if (_queueIndex < 0 && _isPlayableEntry(entry)) {
@@ -706,6 +724,7 @@ class PlayerController extends StateNotifier<PlayerState>
         ? (currentIndex + 1).clamp(0, next.length)
         : 0;
     next.insert(insertAt, entry);
+    _cancelPreparedCrossfade();
     _queue = next;
     _queueIndex = current == null
         ? -1
@@ -837,54 +856,12 @@ class PlayerController extends StateNotifier<PlayerState>
         if (!identical(_requestToken, token)) return false;
       }
 
-      final embedded = await tagsFuture;
-      if (!identical(_requestToken, token)) return false;
-      var resolvedTrack = track;
-      if (embedded != null) {
-        resolvedTrack = track.withEmbeddedTags(embedded);
-        state = state.copyWith(track: resolvedTrack);
-        // Refreshes the system media session and Bluetooth metadata with the
-        // tags that were still being read while playback started.
-        _publishMediaMetadata(
-          _buildMediaItem(
-            resolvedTrack,
-            duration: _audioHandler.duration,
-            artUri: _networkArtworkUri(resolvedTrack.coverUrl),
-          ),
-        );
-        _persistFullSession();
-      }
-      unawaited(_publishEmbeddedArtworkAfterEntrance(resolvedTrack, token));
-
-      final rawLyrics = embedded?.lyrics;
-      final embeddedLyrics = rawLyrics != null && rawLyrics.trim().isNotEmpty
-          ? rawLyrics
-          : null;
-      if (embeddedLyrics != null) {
-        state = state
-            .withLoadedLyrics(
-              info: LyricInfo(lyric: embeddedLyrics),
-              parsed: KaraokeLyricsParser.parseEmbedded(embeddedLyrics),
-            )
-            .copyWith(
-              position: _audioHandler.position,
-              duration: _audioHandler.duration ?? state.duration,
-              playing: _audioHandler.playing,
-            );
-        _syncBluetoothMetadata(force: true);
-        return true;
-      }
-
-      if (fallbackMusic == null) {
-        state = state.copyWith(lyricLoading: false);
-        return true;
-      }
-      await _loadLyricsForMusic(
+      return await _finishLocalMetadata(
+        track,
         fallbackMusic,
         token,
-        logPrefix: 'local lyric load',
+        tagsFuture,
       );
-      return identical(_requestToken, token);
     } catch (e) {
       await AppLogger.write('player', 'play local failed: $e');
       if (!identical(_requestToken, token)) return false;
@@ -899,6 +876,62 @@ class PlayerController extends StateNotifier<PlayerState>
       );
       return false;
     }
+  }
+
+  Future<bool> _finishLocalMetadata(
+    PlayerTrack track,
+    MusicInfo? fallbackMusic,
+    Object token,
+    Future<EmbeddedAudioTags?> tagsFuture,
+  ) async {
+    final embedded = await tagsFuture;
+    if (!identical(_requestToken, token)) return false;
+    var resolvedTrack = track;
+    if (embedded != null) {
+      resolvedTrack = track.withEmbeddedTags(embedded);
+      state = state.copyWith(track: resolvedTrack);
+      // Refreshes the system media session and Bluetooth metadata with the
+      // tags that were still being read while playback started.
+      _publishMediaMetadata(
+        _buildMediaItem(
+          resolvedTrack,
+          duration: _audioHandler.duration,
+          artUri: _networkArtworkUri(resolvedTrack.coverUrl),
+        ),
+      );
+      _persistFullSession();
+    }
+    unawaited(_publishEmbeddedArtworkAfterEntrance(resolvedTrack, token));
+
+    final rawLyrics = embedded?.lyrics;
+    final embeddedLyrics = rawLyrics != null && rawLyrics.trim().isNotEmpty
+        ? rawLyrics
+        : null;
+    if (embeddedLyrics != null) {
+      state = state
+          .withLoadedLyrics(
+            info: LyricInfo(lyric: embeddedLyrics),
+            parsed: KaraokeLyricsParser.parseEmbedded(embeddedLyrics),
+          )
+          .copyWith(
+            position: _audioHandler.position,
+            duration: _audioHandler.duration ?? state.duration,
+            playing: _audioHandler.playing,
+          );
+      _syncBluetoothMetadata(force: true);
+      return true;
+    }
+
+    if (fallbackMusic == null) {
+      state = state.copyWith(lyricLoading: false);
+      return true;
+    }
+    await _loadLyricsForMusic(
+      fallbackMusic,
+      token,
+      logPrefix: 'local lyric load',
+    );
+    return identical(_requestToken, token);
   }
 
   Future<void> pauseForSleepTimer() async {
@@ -951,6 +984,7 @@ class PlayerController extends StateNotifier<PlayerState>
       return;
     }
     final trackId = state.track!.id;
+    _cancelCrossfade();
     await _audioHandler.seek(position);
     if (!mounted || state.track?.id != trackId) return;
     state = state.copyWith(position: _audioHandler.position);
@@ -969,6 +1003,7 @@ class PlayerController extends StateNotifier<PlayerState>
 
   void setPlaybackMode(PlayerPlaybackMode mode) {
     if (mode == state.playbackMode) return;
+    _cancelPreparedCrossfade();
     state = state.copyWith(playbackMode: mode);
     _rebuildPlayOrder(anchorIndex: _queueIndex);
     _publishPlaybackMode();
@@ -1032,12 +1067,254 @@ class PlayerController extends StateNotifier<PlayerState>
   }
 
   Future<void> _restartCurrentTrack() async {
+    _cancelCrossfade();
     final pauseGeneration = _sleepTimerPauseGeneration;
     _completionHandledForTrackId = null;
     await _audioHandler.seek(Duration.zero);
     if (!mounted || pauseGeneration != _sleepTimerPauseGeneration) return;
     await _audioHandler.play();
     _persistPositionCheckpoint();
+  }
+
+  void _checkCrossfade() {
+    if (!mounted ||
+        _transportSuppressionToken != null ||
+        _pausedBySleepTimer ||
+        !state.playing ||
+        state.loading ||
+        state.processingState != PlayerProcessingState.ready ||
+        _queue.isEmpty ||
+        state.playbackMode == PlayerPlaybackMode.repeatOne) {
+      return;
+    }
+    final seconds = _ref.read(settingsProvider).crossfadeSeconds;
+    if (seconds == 0) return;
+    final remaining = state.duration - state.position;
+    final window = Duration(seconds: seconds);
+    if (remaining <= Duration.zero ||
+        remaining > window + const Duration(seconds: 8)) {
+      return;
+    }
+    final pending = _crossfade;
+    if (pending == null) {
+      final next = _nextQueueIndex(automatic: true);
+      if (next == null || next == _queueIndex) return;
+      final candidate = _QueueCrossfade(++_nextCrossfadeToken, _queue[next]);
+      _crossfade = candidate;
+      unawaited(_prepareCrossfade(candidate));
+    } else if (remaining <= window && pending.track != null) {
+      unawaited(_startCrossfade(pending, remaining));
+    }
+  }
+
+  Future<void> _prepareCrossfade(_QueueCrossfade pending) async {
+    final entry = pending.entry;
+    final path = entry.savedPath?.trim();
+    try {
+      if (path != null && path.isNotEmpty && await File(path).exists()) {
+        if (_crossfade != pending) return;
+        final prepared = await _audioHandler.prepareCrossfade(
+          File(path).uri,
+          token: pending.token,
+          formatHint: entry.qualityCode,
+        );
+        if (!prepared || _crossfade != pending) return;
+        pending.track = PlayerTrack.fromHistory(entry);
+      } else {
+        final music = entry.musicInfo;
+        if (music == null || _crossfade != pending) return;
+        final quality = music.playbackQualityFor(
+          _ref.read(settingsProvider).onlinePlaybackQuality,
+        );
+        final result = await _ref
+            .read(musicUrlResolverProvider)
+            .useFirstAvailable(
+              music: music,
+              quality: quality,
+              isCancelled: () => _crossfade != pending,
+              use: (_, resolved) async {
+                if (_crossfade != pending) {
+                  throw const MusicSourceFallbackCancelledException();
+                }
+                final prepared =
+                    resolved.url.trim().isNotEmpty &&
+                    await _audioHandler.prepareCrossfade(
+                      Uri.parse(resolved.url),
+                      token: pending.token,
+                      formatHint: (resolved.type ?? quality).code,
+                    );
+                if (!prepared) throw StateError('下一首尚未就绪');
+                return resolved;
+              },
+            );
+        if (_crossfade != pending) return;
+        final qualities = result.source.qualitiesFor(music.source);
+        pending.track = PlayerTrack.fromMusic(
+          music: music,
+          quality: result.value.type ?? quality,
+          url: result.value.url,
+          coverUrl: entry.picUrl ?? music.meta.picUrl,
+          availableQualities: qualities.isEmpty ? null : qualities,
+        );
+        pending.attemptedSources = result.attemptedSourceIds.toSet();
+      }
+      _checkCrossfade();
+    } catch (error) {
+      // Leave the outgoing stream alone. Normal completion can retry the source.
+      if (_crossfade == pending) {
+        _logPlayback('crossfade_prepare_failed: $error');
+      }
+    }
+  }
+
+  Future<void> _startCrossfade(
+    _QueueCrossfade pending,
+    Duration remaining,
+  ) async {
+    final previousRequest = _requestToken;
+    final track = pending.track!;
+    pending.track = null;
+    _transportSuppressionToken = pending;
+    try {
+      final started = await _audioHandler.startCrossfade(
+        token: pending.token,
+        duration: remaining,
+      );
+      if (!started || !mounted || _requestToken != previousRequest) return;
+      final index = _queue.indexWhere(
+        (entry) => _sameEntry(entry, pending.entry),
+      );
+      if (index < 0) return;
+      _crossfade = null;
+      _activeFadeToken = pending.token;
+      _requestToken = pending;
+      _queueIndex = index;
+      _alignPlayOrderCursor(index);
+      _currentMusic = pending.entry.musicInfo;
+      _currentQuality = Quality.tryFromCode(track.qualityLabel);
+      _attemptedRemoteSourceIds = pending.attemptedSources;
+      _completionHandledForTrackId = null;
+      _resetStallRecovery();
+      state = state
+          .beginTrackLoading(
+            nextTrack: track,
+            canPlayPrevious: _canPlayPrevious,
+            canPlayNext: _canPlayNext,
+            queue: state.queue,
+            queueIndex: index,
+          )
+          .copyWith(
+            loading: false,
+            playing: _audioHandler.playing,
+            position: _audioHandler.position,
+            duration: _audioHandler.duration ?? Duration.zero,
+            processingState: _mapProcessingState(_audioHandler.processingState),
+          );
+      _publishMediaMetadata(
+        _buildMediaItem(
+          track,
+          duration: _audioHandler.duration,
+          artUri: _networkArtworkUri(track.coverUrl),
+        ),
+      );
+      _syncQueueAvailability();
+      _persistFullSession();
+      if (track.isLocal) {
+        unawaited(
+          _finishLocalMetadata(
+            track,
+            _currentMusic,
+            pending,
+            _readEmbeddedTagsForLocal(track.localPath!),
+          ),
+        );
+      } else if (_currentMusic != null) {
+        unawaited(
+          _loadLyricsForMusic(_currentMusic!, pending, logPrefix: 'lyric load'),
+        );
+        unawaited(_refreshCrossfadeArtwork(track, _currentMusic!, pending));
+      }
+    } catch (error) {
+      _logPlayback('crossfade_start_failed: $error');
+    } finally {
+      _audioHandler.finishCrossfadePublication(pending.token);
+      _endTransportSuppression(pending);
+      if (mounted &&
+          _requestToken == previousRequest &&
+          _transportSuppressionToken == null) {
+        state = state.copyWith(
+          playing: _audioHandler.playing,
+          position: _audioHandler.position,
+          duration: _audioHandler.duration ?? state.duration,
+          processingState: _mapProcessingState(_audioHandler.processingState),
+        );
+        if (!_audioHandler.playing) _cancelPreparedCrossfade();
+      }
+      if (mounted &&
+          _transportSuppressionToken == null &&
+          (_requestToken == pending || _requestToken == previousRequest)) {
+        _updateStallRecovery(
+          _audioHandler.playing,
+          _audioHandler.processingState,
+        );
+        if (_audioHandler.processingState == BassProcessingState.completed) {
+          _autoAdvanceAfterCompletion();
+        } else if (pending.playbackError != null) {
+          _handlePlaybackError(pending.playbackError!);
+        }
+      }
+    }
+  }
+
+  Future<void> _refreshCrossfadeArtwork(
+    PlayerTrack track,
+    MusicInfo music,
+    Object token,
+  ) async {
+    try {
+      final cover = await _ref
+          .read(musicApiProvider)
+          .getPicUrl(musicInfo: music);
+      if (_requestToken != token) return;
+      final updated = PlayerTrack.fromMusic(
+        music: music,
+        quality: _currentQuality!,
+        url: track.remoteUrl!,
+        coverUrl: cover ?? track.coverUrl,
+        availableQualities: track.availableQualities,
+      );
+      final item = await _mediaItemForTrack(
+        updated,
+        duration: _audioHandler.duration,
+      );
+      if (_requestToken != token) return;
+      state = state.copyWith(track: updated);
+      _publishMediaMetadata(item);
+    } catch (error) {
+      _logPlayback('crossfade_artwork_failed: $error');
+    }
+  }
+
+  void _cancelPreparedCrossfade() {
+    final pending = _crossfade;
+    if (pending == null) return;
+    _crossfade = null;
+    _discardFade(pending.token);
+  }
+
+  void _cancelCrossfade() {
+    _cancelPreparedCrossfade();
+    final active = _activeFadeToken;
+    _activeFadeToken = null;
+    if (active != null) _discardFade(active);
+  }
+
+  void _discardFade(int token) {
+    unawaited(
+      _audioHandler.cancelCrossfade(token).catchError((Object error) {
+        _logPlayback('crossfade_cancel_failed: $error');
+      }),
+    );
   }
 
   void _autoAdvanceAfterCompletion() {
@@ -1677,6 +1954,7 @@ class PlayerController extends StateNotifier<PlayerState>
   }
 
   Future<void> _beginAudioTransition(Object token, MediaItem item) async {
+    _cancelCrossfade();
     _resetStallRecovery();
     _bufferingStopwatch?.stop();
     _bufferingStopwatch = null;
@@ -1756,6 +2034,8 @@ class PlayerController extends StateNotifier<PlayerState>
 
   @override
   void dispose() {
+    _cancelCrossfade();
+    _requestToken = null;
     WidgetsBinding.instance.removeObserver(this);
     _persistPositionCheckpoint();
     _positionCheckpointTimer?.cancel();
@@ -1766,6 +2046,15 @@ class PlayerController extends StateNotifier<PlayerState>
     }
     super.dispose();
   }
+}
+
+class _QueueCrossfade {
+  _QueueCrossfade(this.token, this.entry);
+  final int token;
+  final DownloadHistoryEntry entry;
+  PlayerTrack? track;
+  Set<String> attemptedSources = {};
+  Object? playbackError;
 }
 
 final playerControllerProvider =

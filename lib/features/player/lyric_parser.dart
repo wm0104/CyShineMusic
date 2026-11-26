@@ -9,9 +9,10 @@ class KaraokeLyrics {
   final List<KaraokeLyricLine> lines;
 
   bool get isEmpty => lines.isEmpty;
+  bool get hasLineTiming => lines.isNotEmpty && lines.first.hasLineTiming;
 
   int activeIndex(Duration position) {
-    if (lines.isEmpty) return -1;
+    if (!hasLineTiming) return -1;
     final ms = position.inMilliseconds;
     for (var i = 0; i < lines.length; i++) {
       final line = lines[i];
@@ -30,6 +31,7 @@ class KaraokeLyricLine {
     this.translation,
     this.roman,
     this.words = const [],
+    this.translationWords = const [],
   });
 
   final int startMs;
@@ -38,7 +40,9 @@ class KaraokeLyricLine {
   final String? translation;
   final String? roman;
   final List<KaraokeWordTiming> words;
+  final List<KaraokeWordTiming> translationWords;
 
+  bool get hasLineTiming => endMs > startMs;
   bool get hasWordTiming => words.isNotEmpty;
 }
 
@@ -61,6 +65,12 @@ class KaraokeWordTiming {
   }
 }
 
+typedef _TrackLine = ({
+  int startMs,
+  String text,
+  List<KaraokeWordTiming> words,
+});
+
 class KaraokeLyricsParser {
   const KaraokeLyricsParser._();
 
@@ -82,62 +92,36 @@ class KaraokeLyricsParser {
   /// first occurrence is the main lyric (with its word tags converted into
   /// karaoke word timings), the second/third become translation/roman.
   static KaraokeLyrics parseEmbedded(String raw) {
-    final bodiesByMs = <int, List<String>>{};
-    for (final line in const LineSplitter().convert(raw.replaceAll('\r', ''))) {
-      final trimmed = line.trim();
-      if (trimmed.isEmpty) continue;
-      final field = _leadingTimeFieldExp.firstMatch(trimmed);
-      if (field == null) continue;
-      final body = trimmed.substring(field.end);
-      if (body.replaceAll(_absWordTagExp, '').trim().isEmpty) continue;
-      for (final time in _lineTimeExp.allMatches(field.group(0)!)) {
-        final ms = _parseTimeMs(time.group(1)!);
-        if (ms == null) continue;
-        bodiesByMs.putIfAbsent(ms, () => []).add(body);
-      }
+    final groups = <int, List<_TrackLine>>{};
+    for (final line in _parseTrack(raw)) {
+      (groups[line.startMs] ??= []).add(line);
     }
-    final lines = <KaraokeLyricLine>[];
-    final sortedMs = bodiesByMs.keys.toList()..sort();
-    for (final ms in sortedMs) {
-      final bodies = bodiesByMs[ms]!;
-      final words = _parseAbsoluteWords(bodies.first);
-      final text = bodies.first.replaceAll(_absWordTagExp, '').trim();
-      if (text.isEmpty) continue;
-      String? extraAt(int index) {
-        if (index >= bodies.length) return null;
-        final value = bodies[index].replaceAll(_absWordTagExp, '').trim();
-        return value.isEmpty ? null : value;
-      }
-
-      lines.add(
-        KaraokeLyricLine(
-          startMs: ms,
-          endMs: words.isEmpty
-              ? ms + 4000
-              : math.max(ms + 1, words.map((w) => w.endMs).reduce(math.max)),
-          text: text,
-          translation: extraAt(1),
-          roman: extraAt(2),
-          words: words,
-        ),
-      );
-    }
-    return KaraokeLyrics(_finalizeLineEnds(lines));
+    if (groups.isEmpty) return _untimedLyrics(raw);
+    return KaraokeLyrics(
+      _finalizeLineEnds([
+        for (final group in groups.values)
+          _combine(
+            group.first,
+            group.elementAtOrNull(1),
+            group.elementAtOrNull(2),
+          ),
+      ]),
+    );
   }
 
   /// Absolute word tags carry absolute timestamps and bracket each word:
   /// `<start>word<end><start>word<end>…`, where a shared boundary collapses
   /// the `<end><start>` pair into one tag. Every text chunk between two
   /// adjacent tags is therefore one word.
-  static List<KaraokeWordTiming> _parseAbsoluteWords(String body) {
+  static List<KaraokeWordTiming> _parseAbsoluteWords(String body, int lineEnd) {
     final tags = _absWordTagExp.allMatches(body).toList(growable: false);
-    if (tags.length < 2) return const [];
     final words = <KaraokeWordTiming>[];
-    for (var i = 0; i + 1 < tags.length; i++) {
-      final text = body.substring(tags[i].end, tags[i + 1].start);
+    for (var i = 0; i < tags.length; i++) {
+      final next = tags.elementAtOrNull(i + 1);
+      final text = body.substring(tags[i].end, next?.start);
       if (text.isEmpty) continue;
       final start = _parseTimeMs(tags[i].group(1)!);
-      final end = _parseTimeMs(tags[i + 1].group(1)!);
+      final end = next == null ? lineEnd : _parseTimeMs(next.group(1)!);
       if (start == null || end == null || end < start) continue;
       words.add(
         KaraokeWordTiming(
@@ -151,63 +135,120 @@ class KaraokeLyricsParser {
   }
 
   static KaraokeLyrics parse(LyricInfo info) {
-    final mainLines = _parseTextByTime(info.lyric);
-    final translations = _parseTextByTime(info.tlyric);
-    final romans = _parseTextByTime(info.rlyric);
-    final wordLyric = info.lxlyric?.trim();
-    var lines = wordLyric != null && wordLyric.isNotEmpty
-        ? _parseWordLyric(wordLyric, mainLines, translations, romans)
-        : const <KaraokeLyricLine>[];
-    if (lines.isEmpty) {
-      // lxlyric present but unparseable (or absent) — the plain lyric is
-      // still worth showing per-line rather than reporting "no lyrics".
-      lines = _parsePlainLyric(info.lyric, translations, romans);
+    final main = _parseTrack(info.lyric);
+    final wordTrack = _parseTrack(info.lxlyric);
+    if (main.isEmpty && wordTrack.isEmpty) {
+      return _untimedLyrics(
+        info.lyric,
+        translation: info.tlyric,
+        roman: info.rlyric,
+      );
+    }
+    final translations = {
+      for (final line in _parseTrack(info.tlyric)) line.startMs: line,
+    };
+    final romans = {
+      for (final line in _parseTrack(info.rlyric)) line.startMs: line,
+    };
+    final lines = <KaraokeLyricLine>[];
+    final source = wordTrack.isEmpty ? main : wordTrack;
+    final plainTranslations = translations.isEmpty
+        ? _plainTextLines(info.tlyric)
+        : const <String>[];
+    for (var i = 0; i < source.length; i++) {
+      final line = source[i];
+      final anchor = wordTrack.isEmpty
+          ? line.startMs
+          : _matchingMainLineStart(main, line.text, line.startMs);
+      _TrackLine? match(Map<int, _TrackLine> track) =>
+          _nearestLine(track, anchor) ??
+          (anchor != line.startMs ? _nearestLine(track, line.startMs) : null);
+      final translation = plainTranslations.length == source.length
+          ? (
+              startMs: line.startMs,
+              text: plainTranslations[i],
+              words: const <KaraokeWordTiming>[],
+            )
+          : match(translations);
+      lines.add(_combine(line, translation, match(romans)));
     }
     return KaraokeLyrics(_finalizeLineEnds(lines));
   }
 
-  static List<KaraokeLyricLine> _parseWordLyric(
-    String lrc,
-    Map<int, String> mainLines,
-    Map<int, String> translations,
-    Map<int, String> romans,
-  ) {
-    final lines = <KaraokeLyricLine>[];
-    for (final raw in const LineSplitter().convert(lrc.replaceAll('\r', ''))) {
-      final line = raw.trim();
-      if (line.isEmpty) continue;
-      final field = _leadingTimeFieldExp.firstMatch(line);
-      if (field == null) continue;
-      final time = _lineTimeExp.firstMatch(field.group(0)!);
-      if (time == null) continue;
-      final startMs = _parseTimeMs(time.group(1)!);
-      if (startMs == null) continue;
-      final body = line.substring(field.end).trim();
-      if (body.isEmpty) continue;
-      final words = _parseWords(body, startMs);
-      final text = body.replaceAll(_wordTimingExp, '').trim();
-      if (text.isEmpty) continue;
-      final extendedTrackAnchor = _matchingMainLineStart(
-        mainLines,
-        text,
-        startMs,
-      );
-      final endMs = words.isEmpty
-          ? startMs + 4000
-          : math.max(startMs + 1, words.map((w) => w.endMs).reduce(math.max));
-      lines.add(
-        KaraokeLyricLine(
-          startMs: startMs,
-          endMs: endMs,
-          text: text,
-          translation: _nearestLine(translations, extendedTrackAnchor),
-          roman: _nearestLine(romans, extendedTrackAnchor),
-          words: words,
-        ),
-      );
+  static final _metadata = RegExp(
+    r'^\[(?:ar|al|ti|au|by|re|tool|ve|ver|length|offset|id|kuwo):[^\]]*\]$',
+    caseSensitive: false,
+  );
+
+  static List<String> _plainTextLines(String? raw) {
+    if (raw == null) return const [];
+    final lines = <String>[];
+    for (final rawLine in const LineSplitter().convert(raw)) {
+      final line = rawLine.trim();
+      if (_metadata.hasMatch(line)) continue;
+      final text = line
+          .replaceFirst(_leadingTimeFieldExp, '')
+          .replaceAll(_wordTimingExp, '')
+          .replaceAll(_absWordTagExp, '')
+          .trim();
+      if (text.isNotEmpty) lines.add(text);
     }
-    lines.sort((a, b) => a.startMs.compareTo(b.startMs));
     return lines;
+  }
+
+  static KaraokeLyrics _untimedLyrics(
+    String raw, {
+    String? translation,
+    String? roman,
+  }) {
+    final main = _plainTextLines(raw);
+    final translated = _plainTextLines(translation);
+    final romanized = _plainTextLines(roman);
+    if (main.isEmpty) return const KaraokeLyrics([]);
+    // When line counts differ, keep whole blocks instead of guessing which
+    // translated sentence belongs alongside a particular original line.
+    if ((translated.isNotEmpty && translated.length != main.length) ||
+        (romanized.isNotEmpty && romanized.length != main.length)) {
+      return KaraokeLyrics([
+        KaraokeLyricLine(
+          startMs: 0,
+          endMs: 0,
+          text: main.join('\n'),
+          translation: translated.isEmpty ? null : translated.join('\n'),
+          roman: romanized.isEmpty ? null : romanized.join('\n'),
+        ),
+      ]);
+    }
+    return KaraokeLyrics([
+      for (var i = 0; i < main.length; i++)
+        KaraokeLyricLine(
+          startMs: 0,
+          endMs: 0,
+          text: main[i],
+          translation: translated.elementAtOrNull(i),
+          roman: romanized.elementAtOrNull(i),
+        ),
+    ]);
+  }
+
+  static KaraokeLyricLine _combine(
+    _TrackLine main,
+    _TrackLine? translation,
+    _TrackLine? roman,
+  ) {
+    final endMs = [
+      ...main.words,
+      ...?translation?.words,
+    ].fold(main.startMs + 4000, (end, word) => math.max(end, word.endMs));
+    return KaraokeLyricLine(
+      startMs: main.startMs,
+      endMs: endMs,
+      text: main.text,
+      words: main.words,
+      translation: translation?.text,
+      translationWords: translation?.words ?? const [],
+      roman: roman?.text,
+    );
   }
 
   static List<KaraokeWordTiming> _parseWords(String body, int lineStartMs) {
@@ -237,34 +278,58 @@ class KaraokeLyricsParser {
     return words;
   }
 
-  static List<KaraokeLyricLine> _parsePlainLyric(
-    String lrc,
-    Map<int, String> translations,
-    Map<int, String> romans,
-  ) {
-    final lines = <KaraokeLyricLine>[];
-    for (final raw in const LineSplitter().convert(lrc.replaceAll('\r', ''))) {
+  static List<_TrackLine> _parseTrack(String? lrc) {
+    if (lrc == null || lrc.isEmpty) return const [];
+    final bodies = <int, List<String>>{};
+    for (final raw in const LineSplitter().convert(lrc)) {
       final line = raw.trim();
       if (line.isEmpty) continue;
       final field = _leadingTimeFieldExp.firstMatch(line);
       if (field == null) continue;
-      final text = line.substring(field.end).trim();
-      if (text.isEmpty) continue;
+      final body = line.substring(field.end).trim();
+      if (body.isEmpty) continue;
       for (final match in _lineTimeExp.allMatches(field.group(0)!)) {
         final startMs = _parseTimeMs(match.group(1)!);
         if (startMs == null) continue;
-        lines.add(
-          KaraokeLyricLine(
-            startMs: startMs,
-            endMs: startMs + 4000,
-            text: text,
-            translation: _nearestLine(translations, startMs),
-            roman: _nearestLine(romans, startMs),
-          ),
-        );
+        (bodies[startMs] ??= []).add(body);
       }
     }
-    lines.sort((a, b) => a.startMs.compareTo(b.startMs));
+    final starts = bodies.keys.toList()..sort();
+    final lines = <_TrackLine>[];
+    for (var i = 0; i < starts.length; i++) {
+      final startMs = starts[i];
+      final endMs = starts.elementAtOrNull(i + 1) ?? startMs + 4000;
+      for (final body in bodies[startMs]!) {
+        final relative = _wordTimingExp.hasMatch(body);
+        final tag = relative ? _wordTimingExp : _absWordTagExp;
+        final text = body.replaceAll(tag, '').trim();
+        if (text.isEmpty) continue;
+        final words = relative
+            ? _parseWords(body, startMs)
+            : _parseAbsoluteWords(body, endMs);
+        final first = tag.firstMatch(body);
+        if (first != null && first.start > 0 && words.isNotEmpty) {
+          final nextMs = words.first.startMs;
+          words.insert(
+            0,
+            KaraokeWordTiming(
+              text: body.substring(0, first.start),
+              startMs: math.min(startMs, nextMs),
+              endMs: nextMs,
+            ),
+          );
+        }
+        // Partial/malformed tags must never truncate the displayed lyric.
+        final complete =
+            words.isNotEmpty &&
+            words.map((word) => word.text).join().trim() == text;
+        lines.add((
+          startMs: startMs,
+          text: text,
+          words: complete ? words : const [],
+        ));
+      }
+    }
     return lines;
   }
 
@@ -287,43 +352,27 @@ class KaraokeLyricsParser {
           translation: line.translation,
           roman: line.roman,
           words: line.words,
+          translationWords: line.translationWords,
         ),
       );
     }
     return out;
   }
 
-  static Map<int, String> _parseTextByTime(String? lrc) {
-    if (lrc == null || lrc.trim().isEmpty) return const {};
-    final out = <int, String>{};
-    for (final raw in const LineSplitter().convert(lrc.replaceAll('\r', ''))) {
-      final line = raw.trim();
-      final field = _leadingTimeFieldExp.firstMatch(line);
-      if (field == null) continue;
-      final text = line.substring(field.end).trim();
-      if (text.isEmpty) continue;
-      for (final match in _lineTimeExp.allMatches(field.group(0)!)) {
-        final ms = _parseTimeMs(match.group(1)!);
-        if (ms != null) out[ms] = text;
-      }
-    }
-    return out;
-  }
-
   static int _matchingMainLineStart(
-    Map<int, String> mainLines,
+    List<_TrackLine> mainLines,
     String text,
     int fallbackStartMs,
   ) {
     final normalizedText = _normalizeLineText(text);
     int? bestStartMs;
     var bestDelta = 1 << 31;
-    for (final entry in mainLines.entries) {
-      if (_normalizeLineText(entry.value) != normalizedText) continue;
-      final delta = (entry.key - fallbackStartMs).abs();
+    for (final line in mainLines) {
+      if (_normalizeLineText(line.text) != normalizedText) continue;
+      final delta = (line.startMs - fallbackStartMs).abs();
       if (delta < bestDelta) {
         bestDelta = delta;
-        bestStartMs = entry.key;
+        bestStartMs = line.startMs;
       }
     }
     return bestStartMs ?? fallbackStartMs;
@@ -333,7 +382,7 @@ class KaraokeLyricsParser {
     return value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
   }
 
-  static String? _nearestLine(Map<int, String> lines, int startMs) {
+  static _TrackLine? _nearestLine(Map<int, _TrackLine> lines, int startMs) {
     if (lines.isEmpty) return null;
     final exact = lines[startMs];
     if (exact != null) return exact;

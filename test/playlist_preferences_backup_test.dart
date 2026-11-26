@@ -55,6 +55,7 @@ void main() {
       await settings.setThemeMode(ThemeMode.dark);
       await settings.setNavigationMode(AppNavigationMode.dualCapsule);
       await settings.setAutoPlayOnStartup(true);
+      await settings.setCrossfadeSeconds(5);
       container.read(equalizerProvider.notifier).setEnabled(true);
       await container.read(localPlaylistsProvider.notifier).create('portable');
       final service = container.read(playlistBackupServiceProvider);
@@ -67,7 +68,8 @@ void main() {
       final document = jsonDecode(saved!) as Map<String, dynamic>;
       expect(document['version'], 1);
       final preferences = document['preferences'] as Map;
-      expect(preferences.length, 27);
+      expect(preferences.length, 28);
+      expect(preferences['crossfadeSeconds'], 5);
       expect(preferences['themeMode'], 'dark');
       expect((preferences['equalizer'] as Map)['enabled'], isTrue);
       expect(saved, isNot(contains('test-only-secret')));
@@ -79,6 +81,7 @@ void main() {
       await settings.setThemeMode(ThemeMode.light);
       await settings.setNavigationMode(AppNavigationMode.native);
       await settings.setAutoPlayOnStartup(false);
+      await settings.setCrossfadeSeconds(0);
       container.read(equalizerProvider.notifier).setEnabled(false);
       if (remote) {
         await service.restoreCloud(cloud.keys.single);
@@ -93,6 +96,7 @@ void main() {
       expect(restored.themeMode, ThemeMode.dark);
       expect(restored.navigationMode, AppNavigationMode.dualCapsule);
       expect(restored.autoPlayOnStartup, isTrue);
+      expect(restored.crossfadeSeconds, 5);
       expect(container.read(equalizerProvider).enabled, isTrue);
       expect(prefs.getString('sentinel_credential'), 'test-only-secret');
       expect(restored.downloadDir, '/device/downloads');
@@ -114,6 +118,7 @@ void main() {
   test('partial restore preserves dynamic artwork and translation after restart', () async {
     final settings = container.read(settingsProvider.notifier);
     await settings.setPlaylistArtworkColorsEnabled(true);
+    await settings.setCrossfadeSeconds(7);
     // No stored translation style: preserve the current derived values too.
     final original = container.read(settingsProvider);
     picked = jsonEncode({
@@ -133,6 +138,7 @@ void main() {
     final restored = container.read(settingsProvider);
     expect(restored.customTheme.enabled, isTrue);
     expect(restored.playlistArtworkColorsEnabled, isTrue);
+    expect(restored.crossfadeSeconds, 7);
     expect(restored.lyricFontSize, 48);
     expect(restored.lyricFontWeight, 800);
     expect(restored.lyricTranslationFontSize, original.lyricTranslationFontSize);
@@ -154,6 +160,7 @@ void main() {
       {'autoPlayOnStartup': 1},
       {'themeSeedArgb': -1},
       {'lyricFontSize': 57},
+      {'crossfadeSeconds': -1}, {'crossfadeSeconds': 13}, {'crossfadeSeconds': 1.5},
       {'onlinePlaybackQuality': 'master'},
       {'enabledSearchSources': ['wy', 'wy']},
       {'enabledSearchSources': []},
@@ -182,7 +189,7 @@ void main() {
       'lyricFontSize': 45.0, 'lyricTranslationFontSize': 22.0,
       'navigationMode': 'dual_capsule', 'carPadModeEnabled': true,
       'skipStartupScreen': true, 'autoPlayOnStartup': true,
-      'showMiniLyrics': false, 'allowMixWithOthers': true,
+      'showMiniLyrics': false, 'allowMixWithOthers': true, 'crossfadeSeconds': 12,
       'bluetoothLyricEnabled': true, 'bluetoothFullLyricEnabled': true,
       'onlinePlaybackQuality': 'flac', 'batchDownloadQuality': '320k',
       'enabledSearchSources': ['kw', 'mg'],

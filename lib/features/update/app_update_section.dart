@@ -162,8 +162,8 @@ class _AppUpdateSectionState extends ConsumerState<AppUpdateSection> {
       Material(color: Colors.transparent, child: InkWell(
         borderRadius: BorderRadius.circular(20),
         key: const ValueKey('check-update-setting'),
-        onTap: busy ? null : () {
-          if (!expanded && release == null) {
+        onTap: () {
+          if (!expanded && release == null && !busy) {
             unawaited(_check());
           } else {
             setState(() => _expanded = !expanded);

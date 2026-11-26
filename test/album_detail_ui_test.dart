@@ -190,6 +190,37 @@ void main() {
     expect(find.text('发行专辑'), findsOneWidget);
   });
 
+  testWidgets('playing an album track returns to the same album and scroll offset', (tester) async {
+    final h = await _pump(tester, '/songs');
+    unawaited(h.router.push<void>('/player', extra: '/songs'));
+    await _frames(tester);
+    unawaited(h.router.push<void>('/player/artists/wy/person'));
+    await _frames(tester);
+    await _albums(tester);
+    await tester.tap(find.byKey(const ValueKey('album-wy-record')));
+    await _frames(tester);
+    final album = h.location;
+    final row = await _revealAlbumTrack(tester, 20, delta: 300);
+    final oldY = tester.getCenter(row).dy;
+    await tester.tap(row);
+    await _frames(tester);
+    expect(h.location, '/player');
+    expect(h.player.played.single.musicId, 'wy_20');
+    await tester.dragFrom(const Offset(4, 360), const Offset(280, 0));
+    await _frames(tester);
+    expect(h.location, album);
+    expect(tester.getCenter(row).dy, closeTo(oldY, 1));
+    expect(h.api.albumRequests, ['wy:record']);
+    await tester.tap(find.byKey(const ValueKey('album-track-wy:wy_21')));
+    await _frames(tester);
+    expect(h.player.played.last.musicId, 'wy_21');
+    for (final expected in [album, '/player/artists/wy/person', '/player', '/songs']) {
+      await tester.binding.handlePopRoute();
+      await _frames(tester);
+      expect(h.location, expected);
+    }
+  });
+
   testWidgets('complete album select all chooses one destination and adds all 65 in order', (tester) async {
     final h = await _pump(tester, '/discover/albums/wy/record');
     final target = await h.container.read(localPlaylistsProvider.notifier).create('目标歌单');

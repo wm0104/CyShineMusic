@@ -644,6 +644,224 @@ void main() {
     ]);
   });
 
+  group('automatic crossfade', () {
+    test(
+      'zero seconds keeps natural completion as the only transition',
+      () async {
+        final harness = await _startCrossfadeQueue(seconds: 0);
+        harness.audio.emitPosition(const Duration(seconds: 179));
+        await Future<void>.delayed(Duration.zero);
+
+        expect(harness.audio.preparedUris, isEmpty);
+        expect(harness.audio.startedFades, isEmpty);
+        expect(harness.audio.currentMediaItem?.title, 'first');
+        harness.audio.emitPlaybackState(bass.BassProcessingState.completed);
+        await _waitUntil(
+          () => harness.audio.currentMediaItem?.title == 'second',
+        );
+        expect(harness.audio.loadedUris, hasLength(2));
+      },
+    );
+
+    test(
+      'overlaps two tracks and publishes the incoming queue position',
+      () async {
+        final harness = await _startCrossfadeQueue(seconds: 4);
+        final gate = harness.audio.prepareGate = Completer<bool>();
+        harness.audio.emitPosition(const Duration(seconds: 174));
+        await _waitUntil(() => harness.audio.preparedUris.isNotEmpty);
+
+        expect(
+          harness.audio.preparedUris.single.pathSegments.last,
+          'second.mp3',
+        );
+        expect(harness.audio.currentMediaItem?.title, 'first');
+        expect(harness.container.read(playerControllerProvider).queueIndex, 0);
+        gate.complete(true);
+        await Future<void>.delayed(Duration.zero);
+        expect(harness.audio.startedFades, isEmpty);
+        harness.audio.emitPosition(const Duration(seconds: 176));
+        await _waitUntil(
+          () => harness.audio.currentMediaItem?.title == 'second',
+        );
+
+        final state = harness.container.read(playerControllerProvider);
+        expect(harness.audio.startedFades, [const Duration(seconds: 4)]);
+        expect(harness.audio.loadedUris, hasLength(1));
+        expect(state.track?.title, 'second');
+        expect(state.queue[state.queueIndex].id, 'second');
+        expect(state.position, Duration.zero);
+        expect(state.playing, isTrue);
+        expect(harness.audio.playbackState.value.queueIndex, 1);
+      },
+    );
+
+    test(
+      'remote crossfade tries the next source and recovers an immediate stall',
+      () async {
+        SharedPreferences.setMockInitialValues({'crossfade_seconds': 4});
+        final harness = await _Harness.create(
+          loadFailures: 0,
+          stallRecoveryDelay: const Duration(milliseconds: 20),
+        );
+        addTearDown(harness.dispose);
+        final entries = [
+          for (final id in ['A', 'B'])
+            DownloadHistoryEntry.fromJson({
+              'id': id,
+              'musicId': id,
+              'name': 'Song $id',
+              'source': 'kw',
+              'quality': '128k',
+              'musicInfo': {
+                'id': id,
+                'name': 'Song $id',
+                'singer': 'Singer $id',
+                'source': 'kw',
+                'interval': '03:00',
+                'meta': {
+                  'songId': id,
+                  'albumName': 'Album $id',
+                  'qualitys': [{'type': '128k'}],
+                },
+              },
+            }),
+        ];
+        await harness.controller.playFromPlaylistQueue(entries.first, entries);
+        harness.audio.emitPlaybackState(bass.BassProcessingState.ready);
+        final firstSource = Uri.parse('https://audio.test/first.mp3');
+        final secondSource = Uri.parse('https://audio.test/second.mp3');
+        harness.audio.failedPreparations.add(firstSource);
+        harness.audio.startState = bass.BassProcessingState.buffering;
+        final playCount = harness.audio.playCount;
+        final pauseCount = harness.audio.pauseCount;
+        harness.audio.emitPosition(const Duration(seconds: 176));
+
+        await _waitUntil(() {
+          final incoming = harness.container.read(playerControllerProvider);
+          return incoming.track?.title == 'Song B' &&
+              !incoming.lyricLoading && incoming.lyricInfo != null;
+        });
+        final state = harness.container.read(playerControllerProvider);
+        expect(harness.audio.preparedUris, [firstSource, secondSource]);
+        expect(harness.audio.startedFades, [const Duration(seconds: 4)]);
+        expect(harness.audio.loadedUris, [firstSource]);
+        expect(state.track?.remoteUrl, secondSource.toString());
+        expect(state.queue[state.queueIndex].id, 'B');
+        expect(harness.audio.playbackState.value.queueIndex, 1);
+        expect(harness.audio.currentMediaItem?.artist, 'Singer B');
+        expect(harness.audio.currentMediaItem?.album, 'Album B');
+        expect(state.lyrics.lines.single.text, 'Song B lyric');
+        expect(state.error, isNull);
+
+        // The native handoff emits buffering once. No later state tick arms
+        // the watchdog on its behalf.
+        await _waitUntil(() => harness.audio.playCount == playCount + 1);
+        expect(harness.audio.pauseCount, pauseCount + 1);
+        expect(harness.audio.loadedUris, [firstSource]);
+      },
+    );
+
+    test('standalone playback overlaps its sole enqueued successor', () async {
+      final harness = await _startCrossfadeQueue(seconds: 4);
+      final next = harness.container.read(playerControllerProvider).queue.last;
+      await harness.controller.playFromMusic(_music());
+      await harness.controller.enqueueNext(next);
+      harness.audio.emitPlaybackState(bass.BassProcessingState.ready);
+      final before = harness.container.read(playerControllerProvider);
+      expect(before.queue, hasLength(1));
+      expect(before.queueIndex, -1);
+      final loads = harness.audio.loadedUris.length;
+
+      harness.audio.emitPosition(const Duration(seconds: 176));
+      await _waitUntil(
+        () => harness.audio.currentMediaItem?.title == next.name,
+      );
+      expect(harness.audio.startedFades, [const Duration(seconds: 4)]);
+      expect(harness.audio.loadedUris, hasLength(loads));
+      expect(harness.container.read(playerControllerProvider).queueIndex, 0);
+    });
+
+    test(
+      'a declined start reflects system pause and can retry on resume',
+      () async {
+        final harness = await _startCrossfadeQueue(seconds: 4);
+        final gate = harness.audio.startGate = Completer<bool>();
+        harness.audio.emitPosition(const Duration(seconds: 176));
+        await _waitUntil(() => harness.audio.startedFades.isNotEmpty);
+        await harness.audio.pause();
+        harness.audio.emitPlaybackState(bass.BassProcessingState.ready);
+        gate.complete(false);
+        await Future<void>.delayed(Duration.zero);
+
+        final paused = harness.container.read(playerControllerProvider);
+        expect(paused.playing, isFalse);
+        expect(paused.track?.title, 'first');
+        expect(paused.queueIndex, 0);
+        harness.audio.startGate = null;
+        await harness.audio.play();
+        harness.audio.emitPlaybackState(bass.BassProcessingState.ready);
+        harness.audio.emitPosition(const Duration(seconds: 177));
+        await _waitUntil(
+          () => harness.audio.currentMediaItem?.title == 'second',
+        );
+        expect(harness.audio.startedFades.last, const Duration(seconds: 3));
+      },
+    );
+
+    test(
+      'failed preparation leaves the current track until completion',
+      () async {
+        final harness = await _startCrossfadeQueue(seconds: 4);
+        harness.audio.prepareGate = Completer<bool>()..complete(false);
+        harness.audio.emitPosition(const Duration(seconds: 176));
+        await _waitUntil(() => harness.audio.preparedUris.isNotEmpty);
+        await Future<void>.delayed(Duration.zero);
+        expect(harness.audio.startedFades, isEmpty);
+        expect(harness.audio.currentMediaItem?.title, 'first');
+        expect(harness.container.read(playerControllerProvider).error, isNull);
+
+        harness.audio.emitPlaybackState(bass.BassProcessingState.completed);
+        await _waitUntil(
+          () => harness.audio.currentMediaItem?.title == 'second',
+        );
+        expect(harness.audio.loadedUris, hasLength(2));
+        expect(harness.container.read(playerControllerProvider).queueIndex, 1);
+      },
+    );
+
+    for (final changeTrack in [false, true]) {
+      final action = changeTrack ? 'manual track change' : 'seek';
+      test('a $action cancels a pending decoder', () async {
+        final harness = await _startCrossfadeQueue(seconds: 4);
+        final gate = harness.audio.prepareGate = Completer<bool>();
+        harness.audio.emitPosition(const Duration(seconds: 176));
+        await _waitUntil(() => harness.audio.preparedUris.isNotEmpty);
+        if (changeTrack) {
+          await harness.controller.playQueueItem(2);
+        } else {
+          await harness.controller.seek(const Duration(seconds: 10));
+        }
+        gate.complete(true);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          harness.audio.cancelledFades,
+          contains(harness.audio.preparedTokens.single),
+        );
+        expect(harness.audio.startedFades, isEmpty);
+        expect(
+          harness.audio.currentMediaItem?.title,
+          changeTrack ? 'third' : 'first',
+        );
+        expect(
+          harness.container.read(playerControllerProvider).queueIndex,
+          changeTrack ? 2 : 0,
+        );
+      });
+    }
+  });
+
   test('enqueue next stays next when shuffle mode is active', () async {
     final harness = await _Harness.create(loadFailures: 0);
     addTearDown(harness.dispose);
@@ -757,6 +975,25 @@ void main() {
     expect(after.track?.id, before.track?.id);
     expect(harness.audio.loadedUris, hasLength(loadedBefore));
   });
+}
+
+Future<_Harness> _startCrossfadeQueue({required int seconds}) async {
+  SharedPreferences.setMockInitialValues({'crossfade_seconds': seconds});
+  final directory = await Directory.systemTemp.createTemp(
+    'cyshine-player-crossfade-',
+  );
+  addTearDown(() => directory.delete(recursive: true));
+  final entries = <DownloadHistoryEntry>[];
+  for (final id in ['first', 'second', 'third']) {
+    final file = await File.fromUri(directory.uri.resolve('$id.mp3'))
+        .writeAsBytes([0]);
+    entries.add(_localEntry(id, file.path));
+  }
+  final harness = await _Harness.create(loadFailures: 0);
+  addTearDown(harness.dispose);
+  await harness.controller.playFromPlaylistQueue(entries.first, entries);
+  harness.audio.emitPlaybackState(bass.BassProcessingState.ready);
+  return harness;
 }
 
 class _Harness {
@@ -884,6 +1121,15 @@ class _FakeAudioHandler extends PlayerAudioHandler {
 
   final int loadFailures;
   final List<Uri> loadedUris = [];
+  final List<Uri> preparedUris = [];
+  final Set<Uri> failedPreparations = {};
+  var startState = bass.BassProcessingState.ready;
+  final List<int> preparedTokens = [];
+  final List<int> cancelledFades = [];
+  final List<Duration> startedFades = [];
+  Completer<bool>? prepareGate;
+  Completer<bool>? startGate;
+  final _positions = StreamController<Duration>.broadcast(sync: true);
   final StreamController<bass.BassPlayerException> _errors =
       StreamController<bass.BassPlayerException>.broadcast(sync: true);
   final StreamController<bass.BassPlaybackSnapshot> _states =
@@ -901,7 +1147,40 @@ class _FakeAudioHandler extends PlayerAudioHandler {
   bass.BassProcessingState _processingState = bass.BassProcessingState.idle;
 
   @override
-  Stream<Duration> get positionStream => const Stream<Duration>.empty();
+  Stream<Duration> get positionStream => _positions.stream;
+
+  void emitPosition(Duration position) {
+    _position = position;
+    _positions.add(position);
+  }
+
+  @override
+  Future<bool> prepareCrossfade(
+    Uri source, {
+    required int token,
+    String? formatHint,
+  }) async {
+    preparedUris.add(source);
+    preparedTokens.add(token);
+    if (failedPreparations.contains(source)) return false;
+    return await prepareGate?.future ?? true;
+  }
+
+  @override
+  Future<bool> startCrossfade({
+    required int token,
+    required Duration duration,
+  }) async {
+    expect(token, preparedTokens.last);
+    startedFades.add(duration);
+    if (!(await startGate?.future ?? true)) return false;
+    emitPosition(Duration.zero);
+    emitPlaybackState(startState);
+    return true;
+  }
+
+  @override
+  Future<void> cancelCrossfade(int token) async => cancelledFades.add(token);
 
   @override
   Stream<Duration?> get durationStream => const Stream<Duration?>.empty();
@@ -963,7 +1242,9 @@ class _FakeAudioHandler extends PlayerAudioHandler {
     if (loadedUris.length <= loadFailures) {
       throw const bass.BassPlayerException(code: 1, message: 'load failed');
     }
+    _position = Duration.zero;
     _duration = const Duration(minutes: 3);
+    updateMediaMetadata(item);
     _processingState = bass.BassProcessingState.ready;
     return _duration;
   }
@@ -1018,6 +1299,7 @@ class _FakeAudioHandler extends PlayerAudioHandler {
 
   @override
   Future<void> disposeHandler() async {
+    await _positions.close();
     await _errors.close();
     await _states.close();
     await super.disposeHandler();
@@ -1031,7 +1313,7 @@ class _FakeMusicApi extends MusicApi {
   @override
   Future<LyricInfo> getLyric({required MusicInfo musicInfo}) async {
     lyricLoadCount++;
-    return const LyricInfo(lyric: '[00:01.000]Test lyric');
+    return LyricInfo(lyric: '[00:01.000]${musicInfo.name} lyric');
   }
 
   @override

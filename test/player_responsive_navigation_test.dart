@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:cy_shine_music/core/models/enums.dart';
+import 'package:cy_shine_music/core/models/lyric_info.dart';
 import 'package:cy_shine_music/core/models/music_info.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
 import 'package:cy_shine_music/core/ui/app_toast.dart';
@@ -688,6 +689,105 @@ void main() {
       tester.getSize(longLineFinder).height,
       closeTo(inactiveHeight, 0.001),
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('bilingual sweeps keep source rests and resume at a seek', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 680);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    const lyrics = KaraokeLyrics([
+      KaraokeLyricLine(
+        startMs: 0,
+        endMs: 4000,
+        text: 'Coming close',
+        translation: '这次请慢慢靠近我 👩🏽‍🚀 再陪我走过长长的路',
+        words: [
+          KaraokeWordTiming(text: 'Coming ', startMs: 500, endMs: 1000),
+          KaraokeWordTiming(text: 'close', startMs: 2000, endMs: 3500),
+        ],
+      ),
+      KaraokeLyricLine(
+        startMs: 4000,
+        endMs: 8000,
+        text: 'No word clock',
+        translation: '只有行时间',
+      ),
+      KaraokeLyricLine(
+        startMs: 8000,
+        endMs: 12000,
+        text: 'Last line',
+        translation: '真实词轴',
+        translationWords: [
+          KaraokeWordTiming(text: '真实词轴', startMs: 10000, endMs: 11000),
+        ],
+      ),
+    ]);
+    final controller = await _pumpLyricsPanel(
+      tester,
+      const PlayerState(lyrics: lyrics),
+    );
+    double progress(bool translation) => tester
+        .state<KaraokeLineTextState>(
+          find.byWidgetPredicate(
+            (w) =>
+                w is KaraokeLineText &&
+                w.active &&
+                w.translation == translation,
+          ),
+        )
+        .debugSweepProgress;
+    Future<void> seek(int ms) async {
+      controller.setStateForTest(
+        controller.state.copyWith(position: Duration(milliseconds: ms)),
+      );
+      await tester.pump();
+    }
+
+    expect(progress(true), 0);
+    await seek(1000);
+    final held = progress(false);
+    expect(progress(true), closeTo(.25, .001));
+    await seek(1900);
+    expect(progress(false), held);
+    expect(progress(true), closeTo(.25, .001));
+    await seek(2750);
+    expect(progress(true), closeTo(.625, .001));
+    await seek(750);
+    expect(progress(true), closeTo(.125, .001));
+    await seek(6000);
+    expect(progress(false), closeTo(.5, .001));
+    expect(progress(true), closeTo(.5, .001));
+    await seek(9000);
+    expect(progress(false), closeTo(.25, .001));
+    expect(progress(true), 0);
+    await seek(10500);
+    expect(progress(true), closeTo(.5, .001));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('untimed lyrics remain readable without a false seek target', (
+    tester,
+  ) async {
+    final lyrics = KaraokeLyricsParser.parse(
+      const LyricInfo(
+        lyric: 'First untimed line\nSecond untimed line',
+        tlyric: '第一行\n第二行',
+      ),
+    );
+    final controller = await _pumpLyricsPanel(
+      tester,
+      PlayerState(lyrics: lyrics, position: const Duration(seconds: 25)),
+    );
+    expect(find.text('First untimed line'), findsOneWidget);
+    expect(find.text('第二行'), findsOneWidget);
+    expect(find.byType(KaraokeLineText), findsNothing);
+    await tester.tap(find.text('第二行'));
+    await tester.pump();
+    expect(controller.state.position, const Duration(seconds: 25));
     expect(tester.takeException(), isNull);
   });
 

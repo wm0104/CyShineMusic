@@ -183,7 +183,7 @@ class LyricLineTile extends ConsumerWidget {
     // Fixed metrics keep line breaks and row heights stable on focus changes.
     // Color, focus scale and per-character lift only affect painting.
     final mainStyle = TextStyle(
-      color: ink.withValues(alpha: line.hasWordTiming || active ? 1 : 0.3),
+      color: ink,
       fontFamilyFallback: kPlayerFontFallback,
       fontSize: font.size,
       fontWeight: FontWeight(font.weight.round()),
@@ -192,7 +192,7 @@ class LyricLineTile extends ConsumerWidget {
       letterSpacing: 0,
     );
     final subStyle = TextStyle(
-      color: ink.withValues(alpha: active && !line.hasWordTiming ? 1 : 0.3),
+      color: ink,
       fontFamilyFallback: kPlayerFontFallback,
       fontSize: font.translationSize,
       fontWeight: FontWeight(font.translationWeight.round()),
@@ -216,12 +216,10 @@ class LyricLineTile extends ConsumerWidget {
     final lineContent = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _LyricTextStyle(
-          duration: colorDuration,
-          curve: _kLyricFocusCurve,
+        DefaultTextStyle(
           style: mainStyle,
           textAlign: TextAlign.start,
-          child: _mainText(),
+          child: _karaokeText(),
         ),
         if (hasTranslationLine)
           TweenAnimationBuilder<double>(
@@ -230,14 +228,13 @@ class LyricLineTile extends ConsumerWidget {
             curve: AppMotion.emphasized,
             child: Padding(
               padding: const EdgeInsets.only(top: 8),
-              child: _LyricTextStyle(
-                duration: colorDuration,
-                curve: _kLyricFocusCurve,
+              child: DefaultTextStyle(
                 style: subStyle,
-                child: Text(translation, textAlign: TextAlign.start),
+                child: _karaokeText(translation: true),
               ),
             ),
             builder: (context, value, child) {
+              if (value == 0) return const SizedBox.shrink();
               return ClipRect(
                 child: Align(
                   alignment: Alignment.topLeft,
@@ -264,6 +261,12 @@ class LyricLineTile extends ConsumerWidget {
                 duration: colorDuration,
                 curve: _kLyricFocusCurve,
                 style: subStyle.copyWith(
+                  color: ink.withValues(
+                    alpha:
+                        !line.hasLineTiming || (active && !line.hasWordTiming)
+                        ? 1
+                        : 0.3,
+                  ),
                   fontSize: 12 * sizeScale,
                   fontWeight: FontWeight(romanWeight.round()),
                   fontVariations: [FontVariation.weight(romanWeight)],
@@ -289,6 +292,13 @@ class LyricLineTile extends ConsumerWidget {
           ),
       ],
     );
+
+    if (!line.hasLineTiming) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 11),
+        child: lineContent,
+      );
+    }
 
     // Paint-only shrink for unfocused rows. Scaling never touches layout, so
     // focus changes cause zero relayout of the list — the stagger wave is the
@@ -364,14 +374,13 @@ class LyricLineTile extends ConsumerWidget {
     );
   }
 
-  Widget _mainText() {
-    if (!line.hasWordTiming) {
-      // No explicit style: the text inherits the AnimatedDefaultTextStyle
-      // above, so color can transition without changing layout metrics.
-      return Text(line.text, textAlign: TextAlign.start);
+  Widget _karaokeText({bool translation = false}) {
+    if (!line.hasLineTiming) {
+      return Text(translation ? line.translation! : line.text);
     }
     return KaraokeLineText(
       line: line,
+      translation: translation,
       anchorMs: anchorMs,
       playing: playing,
       buffering: buffering,
@@ -388,13 +397,11 @@ class _LyricTextStyle extends StatelessWidget {
     required this.duration,
     required this.curve,
     required this.child,
-    this.textAlign = TextAlign.start,
   });
 
   final TextStyle style;
   final Duration duration;
   final Curve curve;
-  final TextAlign textAlign;
   final Widget child;
 
   @override
@@ -405,7 +412,7 @@ class _LyricTextStyle extends StatelessWidget {
     child: child,
     builder: (context, color, child) => DefaultTextStyle(
       style: style.copyWith(color: color),
-      textAlign: textAlign,
+      textAlign: TextAlign.start,
       child: child!,
     ),
   );

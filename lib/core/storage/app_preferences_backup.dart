@@ -40,6 +40,11 @@ Map<String, dynamic> decodeAppPreferencesBackup(Object? value) {
     if (raw is! int || raw < 0 || raw > 0xFFFFFFFF) throw invalid;
     result['themeSeedArgb'] = raw;
   }
+  if (value.containsKey('crossfadeSeconds')) {
+    final raw = value['crossfadeSeconds'];
+    if (raw is! int || raw < 0 || raw > kMaxCrossfadeSeconds) throw invalid;
+    result['crossfadeSeconds'] = raw;
+  }
   final ranges = <String, (double, double)>{
     'lyricFontWeight': (kLyricFontWeightMin, kLyricFontWeightMax),
     'lyricTranslationFontWeight': (kLyricFontWeightMin, kLyricFontWeightMax),

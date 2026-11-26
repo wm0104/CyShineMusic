@@ -30,7 +30,7 @@ class LyricBuilder {
   // `[00:01.00][00:30.50]`.
   static final _timeFieldExp = RegExp(r'^(?:\[[\d:.]+\])+');
   // A single time token inside a bracket: `mm:ss.xx`, `h:mm:ss.xx`.
-  static final _timeExp = RegExp(r'\d{1,3}(?::\d{1,3}){0,2}(?:\.\d{1,3})');
+  static final _timeExp = RegExp(r'\[([\d:.]+)\]');
 
   // Mirrors renderer/worker/download/lrcTool.ts in the desktop source format.
   static String build(LyricInfo info, LyricEmbedOptions options) {
@@ -54,11 +54,22 @@ class LyricBuilder {
       return options.embedLyric ? mainLyric : '';
     }
 
-    final labels = _parseLrcTimeLabels(alignmentLyric);
+    final labels = _embeddedLineAnchors(alignmentLyric, mainLyric);
     var out = mainLyric.trimRight();
 
     if (hasT) {
-      final filtered = _filterExtended(info.tlyric!, labels);
+      final translation = info.tlyric!;
+      final filtered = _filterExtended(
+        _wordTimingExp.hasMatch(translation)
+            ? _buildMainLyric(
+                plainLyric: translation.replaceAll(_wordTimingExp, ''),
+                wordLyric: translation,
+                format: options.format,
+                source: options.source,
+              )
+            : translation,
+        labels,
+      );
       if (filtered.isNotEmpty) out = '${out.trimRight()}\n\n$filtered';
     }
     if (hasR) {
@@ -104,56 +115,80 @@ class LyricBuilder {
     }
   }
 
-  // Strip leading zeros in each numeric component so `[00:01.000]` and
-  // `[0:1.00]` normalize to the same key. Without this, ms-precision drift
-  // between sources made every translation line miss the lookup and get
-  // dropped.
-  static String _formatTimeLabel(String label) {
-    var s = label.replaceFirstMapped(RegExp(r'^0+(\d+)'), (m) => m.group(1)!);
-    s = s.replaceAllMapped(RegExp(r':0+(\d+)'), (m) => ':${m.group(1)!}');
-    s = s.replaceFirstMapped(RegExp(r'\.0+(\d+)'), (m) => '.${m.group(1)!}');
-    return s;
+  static Map<int, String> _textAtTime(String lrc) {
+    final lines = <int, String>{};
+    for (final raw in const LineSplitter().convert(lrc)) {
+      final line = raw.trim();
+      final field = _timeFieldExp.firstMatch(line);
+      if (field == null) continue;
+      final text = line
+          .substring(field.end)
+          .replaceAll(RegExp(r'<[\d:.,]+>'), '')
+          .trim()
+          .toLowerCase()
+          .replaceAll(RegExp(r'\s+'), ' ');
+      if (text.isEmpty) continue;
+      for (final stamp in _timeExp.allMatches(field.group(0)!)) {
+        final ms = _parseTimeMs(stamp.group(1)!);
+        if (ms != null) lines[ms] = text;
+      }
+    }
+    return lines;
   }
 
-  static Set<String> _parseLrcTimeLabels(String lrc) {
-    final labels = <String>{};
-    for (final raw in const LineSplitter().convert(lrc)) {
+  // A word-timed original can start later than its plain LRC counterpart.
+  // Map each original line label to its emitted label without shifting words.
+  static Map<int, int> _embeddedLineAnchors(String original, String rendered) {
+    final output = _textAtTime(rendered);
+    final anchors = {for (final ms in output.keys) ms: ms};
+    if (original == rendered) return anchors;
+    final plain = <String, List<int>>{};
+    for (final line in _textAtTime(original).entries) {
+      (plain[line.value] ??= []).add(line.key);
+    }
+    for (final line in output.entries) {
+      final candidates = plain[line.value];
+      if (candidates == null) continue;
+      final match = _nearestTime(candidates, line.key);
+      if (match != null) anchors[match] = line.key;
+    }
+    return anchors;
+  }
+
+  static int? _nearestTime(Iterable<int> times, int ms, {int? maxDelta}) {
+    int? nearest;
+    for (final time in times) {
+      final delta = (time - ms).abs();
+      if ((maxDelta == null || delta <= maxDelta) &&
+          (nearest == null || delta < (nearest - ms).abs())) {
+        nearest = time;
+      }
+    }
+    return nearest;
+  }
+
+  static String _filterExtended(String extended, Map<int, int> labels) {
+    if (labels.isEmpty) return extended.trim();
+    final lines = <String>[];
+    for (final raw in const LineSplitter().convert(extended)) {
       final line = raw.trim();
       final field = _timeFieldExp.firstMatch(line);
       if (field == null) continue;
       final timeField = field.group(0)!;
       final text = line.substring(timeField.length).trim();
       if (text.isEmpty) continue;
-      for (final t in _timeExp.allMatches(timeField)) {
-        labels.add(_formatTimeLabel(t.group(0)!));
+      final kept = <String>[];
+      for (final stamp in _timeExp.allMatches(timeField)) {
+        final label = stamp.group(1)!;
+        final ms = _parseTimeMs(label);
+        if (ms == null) continue;
+        final anchor =
+            labels[ms] ?? labels[_nearestTime(labels.keys, ms, maxDelta: 120)];
+        if (anchor != null) {
+          kept.add(anchor == ms ? label : _formatTimeMs(anchor));
+        }
       }
-    }
-    return labels;
-  }
-
-  static String _filterExtended(String extended, Set<String> labels) {
-    if (labels.isEmpty) return extended.trim();
-    final lines = <String>[];
-    for (final raw in const LineSplitter().convert(extended)) {
-      var line = raw.trim();
-      final field = _timeFieldExp.firstMatch(line);
-      if (field == null) continue;
-      final timeField = field.group(0)!;
-      final text = line.substring(timeField.length).trim();
-      if (text.isEmpty) continue;
-      final times = _timeExp
-          .allMatches(timeField)
-          .map((m) => m.group(0)!)
-          .toList(growable: false);
-      if (times.isEmpty) continue;
-      final kept = times
-          .where((t) => labels.contains(_formatTimeLabel(t)))
-          .toList(growable: false);
-      if (kept.isEmpty) continue;
-      if (kept.length != times.length) {
-        line = '[${kept.join('][')}]$text';
-      }
-      lines.add(line);
+      if (kept.isNotEmpty) lines.add('[${kept.join('][')}]$text');
     }
     return lines.join('\n');
   }
@@ -170,7 +205,6 @@ class LyricBuilder {
     );
   }
 
-  static final _singleLineTimeExp = RegExp(r'^\[([\d:.]+)\]');
   static final _wordTimingExp = RegExp(r'<(\d+),(\d+)>');
 
   static String _toWordTimedLyric(String lrc) {
@@ -178,14 +212,8 @@ class LyricBuilder {
     for (final raw in const LineSplitter().convert(lrc)) {
       final line = raw.trim();
       if (line.isEmpty) continue;
-      final match = _singleLineTimeExp.firstMatch(line);
+      final match = _timeFieldExp.firstMatch(line);
       if (match == null) {
-        lines.add(line);
-        continue;
-      }
-
-      final lineStart = _parseTimeMs(match.group(1)!);
-      if (lineStart == null) {
         lines.add(line);
         continue;
       }
@@ -197,28 +225,45 @@ class LyricBuilder {
         continue;
       }
 
-      final buffer = StringBuffer()..write('[${_formatTimeMs(lineStart)}]');
-      int? lastEnd;
-      for (var i = 0; i < words.length; i++) {
-        final word = words[i];
-        final relStart = int.tryParse(word.group(1)!);
-        final duration = int.tryParse(word.group(2)!);
-        if (relStart == null || duration == null) continue;
-        final textStart = word.end;
-        final textEnd = i + 1 < words.length ? words[i + 1].start : body.length;
-        final text = body.substring(textStart, textEnd);
-        final absoluteStart = lineStart + relStart;
-        final absoluteEnd = absoluteStart + duration;
-        if (lastEnd == null || absoluteStart != lastEnd) {
-          buffer.write('<${_formatTimeMs(absoluteStart)}>');
-        }
-        buffer.write(text);
-        buffer.write('<${_formatTimeMs(absoluteEnd)}>');
-        lastEnd = absoluteEnd;
+      for (final stamp in _timeExp.allMatches(match.group(0)!)) {
+        final lineStart = _parseTimeMs(stamp.group(1)!);
+        if (lineStart == null) continue;
+        lines.add(_absoluteWordLine(body, words, lineStart));
       }
-      lines.add(buffer.toString());
     }
     return lines.join('\n');
+  }
+
+  static String _absoluteWordLine(
+    String body,
+    List<RegExpMatch> words,
+    int lineStart,
+  ) {
+    final label = _formatTimeMs(lineStart);
+    final buffer = StringBuffer('[$label]');
+    if (words.first.start > 0) {
+      buffer.write('<$label>${body.substring(0, words.first.start)}');
+    }
+    int? lastEnd;
+    for (var i = 0; i < words.length; i++) {
+      final word = words[i];
+      final offset = int.tryParse(word.group(1)!);
+      final duration = int.tryParse(word.group(2)!);
+      if (offset == null || duration == null) {
+        return '[$label]${body.replaceAll(_wordTimingExp, '')}';
+      }
+      final absoluteStart = lineStart + offset;
+      final absoluteEnd = absoluteStart + duration;
+      if (absoluteStart != lastEnd) {
+        buffer.write('<${_formatTimeMs(absoluteStart)}>');
+      }
+      buffer.write(
+        body.substring(word.end, words.elementAtOrNull(i + 1)?.start),
+      );
+      buffer.write('<${_formatTimeMs(absoluteEnd)}>');
+      lastEnd = absoluteEnd;
+    }
+    return buffer.toString();
   }
 
   static int? _parseTimeMs(String label) {
