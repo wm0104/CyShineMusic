@@ -487,8 +487,8 @@ Future<Finder> _revealAlbumTrack(WidgetTester tester, int index, {required doubl
   // ensureVisible cannot locate a sliver row which has not been built yet.
   await tester.scrollUntilVisible(row, delta, scrollable: scrollable);
   await tester.pumpAndSettle();
-  await Scrollable.ensureVisible(tester.element(row), alignment: 0.5,
-    duration: const Duration(milliseconds: 200));
+  // Align immediately: awaiting a timed scroll would stall the test's fake clock.
+  await Scrollable.ensureVisible(tester.element(row), alignment: 0.5);
   await tester.pumpAndSettle();
   expect(row.hitTestable(), findsOneWidget);
   return row;
