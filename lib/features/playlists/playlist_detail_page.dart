@@ -63,11 +63,12 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   bool _batchSubmitting = false;
   bool _removingFavorite = false;
   bool? _customSort;
-  List<String>? _orderDraft;
+  List<String>? _dragOrder;
+  LocalPlaylist? _dragPlaylist;
   bool _orderSaving = false;
-  List<ResolvedPlaylistTrack> _allResolved = const [];
 
-  bool get _ordering => _orderDraft != null;
+  bool get _canDragTracks =>
+      !_searchMode && !_batchMode && !_batchSubmitting && !_orderSaving;
 
   SongSortMode _sortMode = SongSortMode.added;
   bool _ascending = true;
@@ -106,22 +107,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_ordering &&
-        (!TickerMode.valuesOf(context).enabled ||
-            ModalRoute.of(context)?.isCurrent == false)) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _ordering && !_orderSaving) _cancelCustomOrder();
-      });
-    }
-  }
-
-  @override
   void didUpdateWidget(covariant PlaylistDetailPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.playlistId != widget.playlistId) {
-      _orderDraft = null;
+      _dragOrder = null;
+      _dragPlaylist = null;
       _customSort = null;
       _restoreToolbarAfterSearchFocus();
     }
@@ -188,16 +178,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final matching = _searchMode
         ? filterResolvedTracksByQuery(resolved, _searchQuery)
         : resolved;
-    _allResolved = resolved;
-    final byIdentity = {
-      for (final item in resolved) item.track.identityKey: item,
-    };
-    final filtered = _ordering
-        ? [
-            for (final id in _orderDraft!)
-              if (byIdentity[id] != null) byIdentity[id]!,
-          ]
-        : _sortResolvedTracks(matching);
+    final filtered = _sortResolvedTracks(matching);
     final queue = [
       for (final item in filtered)
         if (item.queueEntry != null) item.queueEntry!,
@@ -240,10 +221,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       ImageProvider<Object>? artworkProvider, {
       Widget? artwork,
     }) => PopScope(
-      canPop: !_ordering,
-      onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && _ordering && !_orderSaving) _cancelCustomOrder();
-      },
+      canPop: true,
       child: PlaylistArtworkTheme(
         artworkProvider: artworkProvider,
         cacheKey: 'local:${playlist.id}:$artworkIdentity',
@@ -431,7 +409,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     EdgeInsetsGeometry? padding,
   }) {
     final actions = PlaylistDetailActions(
-      onPlay: _ordering || queue.isEmpty
+      onPlay: _orderSaving || queue.isEmpty
           ? null
           : () => unawaited(_playAll(queue)),
       showFavorite: playlist.isOnlineImport,
@@ -439,7 +417,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       favoriteLabel: '取消收藏',
       saving: _removingFavorite,
       removingFavorite: _removingFavorite,
-      onFavorite: _ordering || _removingFavorite
+      onFavorite: _orderSaving || _removingFavorite
           ? null
           : () => unawaited(_confirmUnfavorite(playlist)),
       padding: padding ?? const EdgeInsets.fromLTRB(16, 4, 16, 8),
@@ -449,7 +427,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       children: [
         actions,
         TextButton.icon(
-          onPressed: _ordering
+          onPressed: _orderSaving
               ? null
               : () => context.push(
                   Uri(
@@ -512,11 +490,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                   ascending: _ascending,
                   customSelected: _customSort ?? false,
                   batchMode: _batchMode,
-                  onOpenSort: _batchMode || _ordering
+                  onOpenSort: _batchMode || _orderSaving
                       ? null
                       : () => unawaited(_openSortSheet()),
                   onToggleBatch:
-                      _ordering || filtered.isEmpty || _batchSubmitting
+                      _orderSaving || filtered.isEmpty || _batchSubmitting
                       ? null
                       : _toggleBatchMode,
                 ),
@@ -534,53 +512,50 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           hasScrollBody: false,
           child: EmptySongSearch(),
         )
-      else if (_ordering)
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
-          sliver: SliverReorderableList(
-            itemCount: filtered.length,
-            onReorder: _reorderDraft,
-            proxyDecorator: (child, index, animation) => AnimatedBuilder(
-              animation: animation,
-              builder: (context, child) => Material(
-                elevation: 6 * Curves.easeInOut.transform(animation.value),
-                color: Theme.of(context).colorScheme.surface,
-                child: child,
-              ),
-              child: child,
-            ),
-            itemBuilder: (context, index) => Column(
-              key: ValueKey(filtered[index].track.identityKey),
-              children: [
-                _buildTrackRow(playlist, filtered[index], index, queue),
-                if (index < filtered.length - 1) const SongListDivider(),
-              ],
-            ),
-          ),
-        )
       else
         SliverPadding(
           key: const ValueKey('playlist-tracks-sliver'),
           padding: EdgeInsets.fromLTRB(
-            12,
-            0,
-            12,
+            12, 0, 12,
             _batchMode ? 12 : ShellBottomArea.contentPadding(context, 156),
           ),
           sliver: SlidableAutoCloseBehavior(
-            child: SliverList.separated(
+            child: SliverReorderableList(
               itemCount: filtered.length,
-              separatorBuilder: (_, _) => Center(
-                child: ConstrainedBox(
-                  constraints: CarDisplayLayout.contentConstraints(
-                    context,
-                    maxWidth: 900,
-                  ),
-                  child: const SongListDivider(),
+              onReorderStart: (_) {
+                _dragPlaylist = playlist;
+                _dragOrder = [for (final item in filtered) item.track.identityKey];
+              },
+              onReorderItem: _reorderDraft,
+              proxyDecorator: (child, index, animation) => AnimatedBuilder(
+                animation: animation,
+                builder: (context, child) => Material(
+                  elevation: 6 * Curves.easeInOut.transform(animation.value),
+                  color: Theme.of(context).colorScheme.surface,
+                  child: child,
                 ),
+                child: child,
               ),
-              itemBuilder: (context, index) =>
-                  _buildTrackRow(playlist, filtered[index], index, queue),
+              itemBuilder: (context, index) => Column(
+                key: ValueKey(filtered[index].track.identityKey),
+                children: [
+                  PlaylistOrderDragRegion(
+                    index: index,
+                    enabled: _canDragTracks && filtered.length > 1,
+                    child: _buildTrackRow(playlist, filtered[index], index, queue),
+                  ),
+                  if (index < filtered.length - 1)
+                    Center(
+                      child: ConstrainedBox(
+                        constraints: CarDisplayLayout.contentConstraints(
+                          context,
+                          maxWidth: 900,
+                        ),
+                        child: const SongListDivider(),
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
         ),
@@ -607,8 +582,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           playing: false,
           batchMode: _batchMode,
           batchSubmitting: _batchSubmitting,
-          reordering: _ordering,
-          reorderEnabled: !_orderSaving,
           selected: _selectedTrackIds.contains(item.track.id),
           onToggleSelected: () => _toggleSelection(item),
           onPlay: () => _playTrack(context, ref, item, queue),
@@ -640,15 +613,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     required int visibleCount,
     bool onImage = true,
   }) {
-    if (_ordering) {
-      return PlaylistOrderTopBar(
-        onImage: onImage,
-        onCancel: _orderSaving ? null : _cancelCustomOrder,
-        onComplete: _orderSaving
-            ? null
-            : () => unawaited(_completeCustomOrder()),
-      );
-    }
     if (_searchMode) {
       return ImmersivePlaylistTopBar(
         title: '搜索歌单歌曲',
@@ -755,7 +719,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   Future<void> _openSortSheet() async {
-    if (_ordering || _batchMode || _batchSubmitting) return;
+    if (_orderSaving || _batchMode || _batchSubmitting) return;
     final toolbar = _shellToolbarController;
     final wasToolbarVisible =
         _toolbarVisibilityBeforeTransientUi ??
@@ -770,7 +734,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         initialAscending: _ascending,
         onChanged: _setSort,
         customSelected: _customSort ?? false,
-        onCustomOrder: () => customRequested = true,
+        onCustomOrder: _searchMode ? null : () => customRequested = true,
       );
     } finally {
       if (toolbar.mounted && !_batchMode && (customRequested || !_searchMode)) {
@@ -781,66 +745,34 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   void _beginCustomOrder() {
-    if (_searchMode) _closeSearch();
-    setState(() {
-      _batchMode = false;
-      _selectedTrackIds.clear();
-      _orderDraft = [
-        for (final item in _sortResolvedTracks(_allResolved))
-          item.track.identityKey,
-      ];
-    });
-    _hideShellToolbarForTransientUi();
+    // Search reorder scope is deliberately unconfirmed; never clear the query.
+    if (_searchMode || _batchMode || _orderSaving) return;
+    setState(() => _customSort = true);
   }
 
-  void _reorderDraft(int oldIndex, int newIndex) {
-    if (_orderSaving) return;
-    // A refresh may remove an item while dragging; do not apply stale indices.
-    final current = _playlistById(
-      ref.read(localPlaylistsProvider),
-      widget.playlistId,
-    );
-    final ids = {
-      for (final track in current?.tracks ?? <PlaylistTrack>[])
-        track.identityKey,
-    };
-    if (ids.length != _orderDraft!.length ||
-        !_orderDraft!.every(ids.contains)) {
-      showAppToast(context, '歌单歌曲已变化，请取消后重新整理', type: AppToastType.warning);
+  Future<void> _reorderDraft(int oldIndex, int newIndex) async {
+    final draft = _dragOrder;
+    final snapshot = _dragPlaylist;
+    _dragOrder = null;
+    _dragPlaylist = null;
+    if (draft == null || snapshot == null || !_canDragTracks) return;
+    final current = _playlistById(ref.read(localPlaylistsProvider), widget.playlistId);
+    // Reject any concurrent refresh, including a same-identity order change.
+    if (!identical(current, snapshot)) {
+      showAppToast(context, '歌单歌曲已变化，请重新拖动', type: AppToastType.warning);
       return;
     }
+    if (oldIndex == newIndex) return;
+    draft.insert(newIndex, draft.removeAt(oldIndex));
     setState(() {
-      if (newIndex > oldIndex) newIndex--;
-      final id = _orderDraft!.removeAt(oldIndex);
-      _orderDraft!.insert(newIndex, id);
+      _orderSaving = true;
+      _customSort = true;
     });
-  }
-
-  void _cancelCustomOrder() {
-    if (_orderSaving) return;
-    setState(() => _orderDraft = null);
-    _restoreToolbarAfterSearchFocus();
-  }
-
-  Future<void> _completeCustomOrder() async {
-    if (!_ordering || _orderSaving) return;
-    setState(() => _orderSaving = true);
     try {
-      await ref
-          .read(localPlaylistsProvider.notifier)
-          .setCustomTrackOrder(
-            widget.playlistId,
-            List<String>.of(_orderDraft!),
-          );
-      if (!mounted) return;
-      setState(() {
-        _orderDraft = null;
-        _customSort = true;
-      });
-      _restoreToolbarAfterSearchFocus();
+      await ref.read(localPlaylistsProvider.notifier).setCustomTrackOrder(widget.playlistId, draft);
+      if (mounted) setState(() => _customSort = true);
     } on PlaylistStoreException catch (error) {
-      if (mounted)
-        showAppToast(context, error.message, type: AppToastType.warning);
+      if (mounted) showAppToast(context, error.message, type: AppToastType.warning);
     } finally {
       if (mounted) setState(() => _orderSaving = false);
     }
@@ -957,12 +889,12 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       if (current.matchesView(
         owner: _toolbarOwner,
         title: title,
-        queueCount: _ordering ? 0 : queueCount,
-        downloadableCount: _ordering ? 0 : downloadableCount,
+        queueCount: _orderSaving ? 0 : queueCount,
+        downloadableCount: _orderSaving ? 0 : downloadableCount,
         selectedCount: selectedCount,
         allSelected: allSelected,
         batchMode: _batchMode,
-        batchSubmitting: _batchSubmitting || _ordering,
+        batchSubmitting: _batchSubmitting || _orderSaving,
         searchMode: _searchMode,
       )) {
         return;
@@ -972,23 +904,23 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           .state = PlaylistDetailToolbarState(
         owner: _toolbarOwner,
         title: title,
-        queueCount: _ordering ? 0 : queueCount,
-        downloadableCount: _ordering ? 0 : downloadableCount,
+        queueCount: _orderSaving ? 0 : queueCount,
+        downloadableCount: _orderSaving ? 0 : downloadableCount,
         selectedCount: selectedCount,
         allSelected: allSelected,
         batchMode: _batchMode,
-        batchSubmitting: _batchSubmitting || _ordering,
+        batchSubmitting: _batchSubmitting || _orderSaving,
         searchMode: _searchMode,
-        onShuffle: _ordering ? null : _shuffleVisible,
-        onToggleBatch: _ordering ? null : _toggleBatchMode,
-        onToggleSelectAll: _ordering ? null : _toggleSelectAllVisible,
-        onToggleSearch: _ordering ? null : _toggleSearchMode,
+        onShuffle: _orderSaving ? null : _shuffleVisible,
+        onToggleBatch: _orderSaving ? null : _toggleBatchMode,
+        onToggleSelectAll: _orderSaving ? null : _toggleSelectAllVisible,
+        onToggleSearch: _orderSaving ? null : _toggleSearchMode,
       );
     });
   }
 
   void _toggleBatchMode() {
-    if (_ordering || _batchSubmitting) return;
+    if (_orderSaving || _batchSubmitting) return;
     if (_searchMode) _closeSearch();
     final next = !_batchMode;
     setState(() {
@@ -1011,7 +943,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   void _openSearch() {
-    if (_ordering || _searchMode || _batchSubmitting) return;
+    if (_orderSaving || _searchMode || _batchSubmitting) return;
     setState(() {
       _searchMode = true;
       _batchMode = false;
@@ -1365,7 +1297,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   }
 
   Future<void> _shuffleVisible() async {
-    if (_ordering) return;
+    if (_orderSaving) return;
     final queue = _visibleQueue;
     if (queue.isEmpty) return;
     final first = queue[math.Random().nextInt(queue.length)];

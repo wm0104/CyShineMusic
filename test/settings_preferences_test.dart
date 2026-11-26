@@ -860,7 +860,12 @@ void main() {
       expect(Icons.high_quality_rounded.fontFamily, 'MaterialIcons');
 
       final anchor = find.byKey(const ValueKey('network-adapter-menu-anchor'));
+      // This fixed-top animation assertion exercises a downward-opening menu.
+      // Keep the anchor in the upper half even when preceding settings grow.
+      await Scrollable.ensureVisible(tester.element(anchor), alignment: 0.25);
+      await tester.pumpAndSettle();
       final anchorRect = tester.getRect(anchor);
+      expect(anchorRect.center.dy, lessThan(450));
       final leftTouch = Offset(anchorRect.left + 12, anchorRect.center.dy);
       await tester.tapAt(leftTouch);
       await tester.pump();

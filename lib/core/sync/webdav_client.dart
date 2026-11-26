@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 
 import '../api/dio_factory.dart';
+import 'package:html_unescape/html_unescape.dart';
 import 'sync_models.dart';
 import 'webdav_config_store.dart';
 
@@ -127,6 +128,60 @@ class WebDavClient {
       412 => WebDavException('云端数据已被其他设备更新', statusCode: status),
       _ => WebDavException('WebDAV 请求失败（HTTP $status）', statusCode: status),
     };
+  }
+
+  Uri get backupDirectoryUri => Uri.parse('${directoryUri.toString()}/playlist-backups');
+
+  Uri _backupUri(String name) {
+    if (!RegExp(r'^playlist-backup-v1-\d+\.json$').hasMatch(name)) {
+      throw const FormatException('备份文件名称无效');
+    }
+    return Uri.parse('${backupDirectoryUri.toString()}/$name');
+  }
+
+  Future<void> uploadPlaylistBackup(String name, String text) async {
+    final uri = _backupUri(name);
+    await ensureDirectory();
+    final directory = await _request(backupDirectoryUri.toString(), options: Options(method: 'MKCOL'));
+    final status = directory.statusCode ?? 0;
+    if (status != 200 && status != 201 && status != 204 && status != 405) {
+      throw _statusException(status);
+    }
+    final response = await _request(uri.toString(), data: text, options: Options(
+      method: 'PUT', headers: {'Content-Type': 'application/json; charset=utf-8', 'If-None-Match': '*'},
+    ));
+    final code = response.statusCode ?? 0;
+    if (code < 200 || code >= 300) throw _statusException(code);
+  }
+
+  Future<List<String>> listPlaylistBackups() async {
+    final response = await _request('${backupDirectoryUri.toString()}/',
+      data: '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>',
+      options: Options(method: 'PROPFIND', headers: {'Depth': '1', 'Content-Type': 'application/xml'}, responseType: ResponseType.plain),
+    );
+    final status = response.statusCode ?? 0;
+    if (status == 404) return const [];
+    if (status != 207 && status != 200) throw _statusException(status);
+    final body = response.data?.toString() ?? '';
+    final names = <String>{};
+    final hrefs = RegExp(r'<(?:[\w.-]+:)?href\b[^>]*>([\s\S]*?)</(?:[\w.-]+:)?href\s*>', caseSensitive: false);
+    for (final match in hrefs.allMatches(body)) {
+      final href = HtmlUnescape().convert(match.group(1)!.trim());
+      final uri = Uri.parse('${backupDirectoryUri.toString()}/').resolve(href);
+      if (uri.host != backupDirectoryUri.host || uri.scheme != backupDirectoryUri.scheme || uri.port != backupDirectoryUri.port) continue;
+      final prefix = '${backupDirectoryUri.path}/';
+      if (!uri.path.startsWith(prefix)) continue;
+      final name = Uri.decodeComponent(uri.path.substring(prefix.length));
+      if (RegExp(r'^playlist-backup-v1-\d+\.json$').hasMatch(name)) names.add(name);
+    }
+    return names.toList()..sort((a, b) => b.compareTo(a));
+  }
+
+  Future<String> readPlaylistBackup(String name) async {
+    final response = await _request(_backupUri(name).toString(), options: Options(method: 'GET', responseType: ResponseType.plain));
+    final status = response.statusCode ?? 0;
+    if (status < 200 || status >= 300) throw _statusException(status);
+    return response.data?.toString() ?? '';
   }
 
   void close() => _dio.close();

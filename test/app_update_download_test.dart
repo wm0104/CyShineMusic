@@ -251,8 +251,8 @@ List<int> _ipa() => ZipEncoder().encode(Archive()
 AppRelease _release({String? digest, int? build}) => AppRelease(version: Version(2, 0, 9),
   ipaSha256: digest, buildNumber: build,
   tagName: 'ios-v2.0.9', title: 'test',
-  pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic-iOS/releases/tag/ios-v2.0.9'),
-  ipaUri: Uri.parse('https://github.com/wm0104/CyShineMusic-iOS/releases/download/ios-v2.0.9/CyShineMusic-unsigned.ipa'));
+  pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic/releases/tag/ios-v2.0.9'),
+  ipaUri: Uri.parse('https://github.com/wm0104/CyShineMusic/releases/download/ios-v2.0.9/CyShineMusic-unsigned.ipa'));
 class _WaitingAdapter implements HttpClientAdapter {
   @override
   Future<ResponseBody> fetch(RequestOptions options, Stream<List<int>>? stream,

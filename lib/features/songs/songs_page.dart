@@ -367,7 +367,13 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     final localIndex = LocalHistoryIndex(history);
     final songs = <DownloadHistoryEntry>[];
     final tracksByEntryId = <String, PlaylistTrack>{};
-    for (final track in playlist.tracks) {
+    // Cross-entry custom-order alignment is limited to manual playlists.
+    // Imported collections deliberately keep their existing songs-page order.
+    final isManual = playlist.id.startsWith('local-') &&
+        playlist.originPlaylistId == null &&
+        playlist.originSourceCode == null;
+    final ordered = isManual ? playlist.customOrderedTracks : playlist.tracks;
+    for (final track in ordered) {
       final localEntry = localIndex.resolve(track, playlist.id);
       final entryId = 'playlist:${playlist.id}:${track.identityKey}';
       final queueEntry = track.spotify != null && localEntry != null

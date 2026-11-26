@@ -91,7 +91,7 @@ class PlaylistCover extends StatelessWidget {
   }
 }
 
-/// Resolves only the first four tracks in the playlist's saved order.
+/// Resolves only the first six tracks in the playlist's saved order.
 class ManualPlaylistArtworkBuilder extends StatefulWidget {
   const ManualPlaylistArtworkBuilder({
     super.key,
@@ -149,7 +149,7 @@ class _ManualPlaylistArtworkBuilderState
     final size = widget.imageSize;
     final configuration = createLocalImageConfiguration(context);
     final sources = [
-      for (final track in tracks.take(4))
+      for (final track in tracks.take(6))
         (
           localPath: track.localPath?.trim(),
           network: CoverImageSource.isUsableUrl(track.picUrl)
@@ -283,7 +283,7 @@ class PlaylistArtworkComposition extends StatelessWidget {
     if (usable.skip(1).isEmpty) return _buildImage(first);
     return Column(
       children: [
-        for (var row = 0; row < 2; row++)
+        for (var row = 0; row < 3; row++)
           Expanded(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,

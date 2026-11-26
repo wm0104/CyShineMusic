@@ -27,6 +27,7 @@ import 'search_controller.dart';
 import 'search_toolbar_state.dart';
 import 'widgets/quality_picker_sheet.dart';
 import 'widgets/search_result_tile.dart';
+import 'widgets/album_result_tile.dart';
 import 'widgets/artist_result_tile.dart';
 import 'widgets/source_filter_chips.dart';
 import '../shell/shell_navigation.dart';
@@ -112,13 +113,15 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           !MusicApi.artistSources.contains(source)) {
         return const [];
       }
-      final tips = state.category == SearchCategory.artists
-          ? (await api.searchArtists(
-              keyword: query,
-              source: source,
-              limit: 8,
-            )).artists.map((a) => a.name)
-          : await api.searchTip(keyword: query, source: source);
+      final tips = switch (state.category) {
+        SearchCategory.artists => (await api.searchArtists(
+          keyword: query, source: source, limit: 8,
+        )).artists.map((artist) => artist.name),
+        SearchCategory.albums => (await api.searchAlbums(
+          keyword: query, source: source, limit: 8,
+        )).albums.map((album) => album.name),
+        SearchCategory.songs => await api.searchTip(keyword: query, source: source),
+      };
       if (!identical(request, _tipRequest) || query != controller.text.trim()) {
         return _lastSuggestionWidgets;
       }
@@ -244,7 +247,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                 padding: EdgeInsets.symmetric(horizontal: 12),
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: SizedBox(width: 108, child: SearchCategoryChips()),
+                  child: SizedBox(width: 162, child: SearchCategoryChips()),
                 ),
               ),
             Expanded(
@@ -343,14 +346,12 @@ class _SearchPageState extends ConsumerState<SearchPage> {
     final hasResults = state.resultCount > 0 &&
         (!_pickingSong || state.error == null);
     final canPrev = state.page > 1;
-    final allPage = state.response?.allPage ?? state.page;
     return SearchToolbarState(
       visible: hasResults || canPrev,
       page: state.page,
       loading: state.loading,
       canPrev: canPrev,
-      canNext:
-          hasResults && state.page < (allPage > 0 ? allPage : state.page + 1),
+      canNext: hasResults && (state.response?.hasNextPage ?? false),
       onPrev: () =>
           _runSearch(page: state.page - 1, scrollToTopOnSuccess: true),
       onNext: () =>
@@ -381,7 +382,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       _controller.text = next.keyword;
     }
     if (previous?.category != next.category ||
-        (next.category == SearchCategory.artists &&
+        (next.category != SearchCategory.songs &&
             previous?.source != next.source)) {
       _tipRequest = null;
       _lastSuggestionWidgets = const [];
@@ -405,7 +406,8 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   }
 
   MusicSource _sourceForSearchRequest(SearchState state) {
-    if (_pickingSong || state.isSearchActive) return state.source;
+    if (_pickingSong || state.isSearchActive ||
+        state.category != SearchCategory.songs) return state.source;
     final discoverySource = ref.read(selectedDiscoverySourceProvider);
     final enabled = ref.read(settingsProvider).enabledSearchSources;
     if (enabled.contains(discoverySource)) return discoverySource;
@@ -870,6 +872,7 @@ class _ResultsArea extends StatelessWidget {
   Widget build(BuildContext context) {
     final pickingSong = onSongSelected != null;
     final artists = state.category == SearchCategory.artists;
+    final albums = state.category == SearchCategory.albums;
     if (artists && !MusicApi.artistSources.contains(state.source)) {
       return _CenterStatus(
         icon: Icons.manage_search_rounded,
@@ -907,9 +910,11 @@ class _ResultsArea extends StatelessWidget {
       );
     }
     return ListView.separated(
-      key: artists
-          ? const PageStorageKey('artist-results-scroll')
-          : const PageStorageKey('search-results-scroll'),
+      key: switch (state.category) {
+        SearchCategory.songs => const PageStorageKey('search-results-scroll'),
+        SearchCategory.artists => const PageStorageKey('artist-results-scroll'),
+        SearchCategory.albums => const PageStorageKey('album-results-scroll'),
+      },
       controller: scrollController,
       padding: EdgeInsets.fromLTRB(
         12,
@@ -927,7 +932,7 @@ class _ResultsArea extends StatelessWidget {
           return Row(
             children: [
               if (!pickingSong) ...[
-                const SizedBox(width: 108, child: SearchCategoryChips()),
+                const SizedBox(width: 162, child: SearchCategoryChips()),
                 const SizedBox(width: 8),
               ],
               Expanded(
@@ -937,7 +942,8 @@ class _ResultsArea extends StatelessWidget {
                   page: state.page,
                   allPage: response.allPage,
                   loading: state.loading,
-                  unit: artists ? '位' : '首',
+                  unit: artists ? '位' : albums ? '张' : '首',
+                  totalIsExact: response.totalIsExact,
                 ),
               ),
             ],
@@ -945,6 +951,9 @@ class _ResultsArea extends StatelessWidget {
         }
         if (artists) {
           return ArtistResultTile(artist: response.artists[index - 1]);
+        }
+        if (albums) {
+          return AlbumResultTile(album: response.albums[index - 1]);
         }
         final music = response.list[index - 1];
         if (onSongSelected case final select?) {
@@ -985,6 +994,7 @@ class _ResultsSummary extends StatelessWidget {
     required this.page,
     required this.allPage,
     required this.loading,
+    this.totalIsExact = true,
   });
 
   final int visibleCount;
@@ -993,11 +1003,12 @@ class _ResultsSummary extends StatelessWidget {
   final int page;
   final int allPage;
   final bool loading;
+  final bool totalIsExact;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final countLabel = reportedTotal > 0
+    final countLabel = totalIsExact && reportedTotal > 0
         ? '$reportedTotal $unit'
         : '本页 $visibleCount $unit';
     final normalizedAllPage = allPage < page ? page : allPage;

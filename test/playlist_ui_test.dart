@@ -34,7 +34,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
-  testWidgets('management saves the outer card order only on completion', (
+  testWidgets('management whole-card long press keeps original regions and saves on release', (
     tester,
   ) async {
     await _useCompactViewport(tester, size: const Size(390, 844));
@@ -61,40 +61,34 @@ void main() {
 
     Future<void> moveFirstCardToEnd() async {
       await tester.pumpAndSettle();
-      expect(find.text('整理顺序'), findsOneWidget);
-      expect(find.byTooltip('歌单选项'), findsNothing);
-      final handles = find.byType(ReorderableDragStartListener);
+      expect(find.text('整理顺序'), findsNothing);
+      expect(find.byTooltip('歌单选项'), findsNWidgets(3));
+      final handles = find.byType(ReorderableDelayedDragStartListener);
       expect(handles, findsNWidgets(3));
       final rowExtent =
           tester.getCenter(handles.at(1)).dy -
           tester.getCenter(handles.first).dy;
-      final start = tester.getCenter(handles.first);
+      final rect = tester.getRect(handles.first);
+      final start = Offset(rect.left + rect.width * .6, rect.bottom - 4);
       final gesture = await tester.startGesture(start);
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
       for (var step = 1; step <= 12; step++) {
         await gesture.moveTo(start + Offset(0, rowExtent * 3 * step / 12));
         await tester.pump(const Duration(milliseconds: 40));
       }
+      expect(savedIds(), ['a', 'b', 'c']);
+      expect(find.text('新建歌单'), findsOneWidget);
+      expect(find.text('在线导入'), findsOneWidget);
+      expect(find.text('洛雪导入'), findsOneWidget);
       await gesture.up();
       await tester.pumpAndSettle();
       expect(cardY('夜晚'), lessThan(cardY('现场')));
       expect(cardY('现场'), lessThan(cardY('通勤')));
-      expect(savedIds(), ['a', 'b', 'c']);
+      expect(savedIds(), ['b', 'c', 'a']);
     }
 
-    await tester.tap(find.byTooltip('自定义排序'));
     await moveFirstCardToEnd();
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect(cardY('通勤'), lessThan(cardY('夜晚')));
-    expect(find.byTooltip('歌单选项'), findsNWidgets(3));
-    expect(savedIds(), ['a', 'b', 'c']);
-
-    await tester.longPress(find.text('通勤'));
-    await moveFirstCardToEnd();
-    await tester.tap(find.text('完成'));
-    await tester.pumpAndSettle();
-    expect(find.byType(ReorderableDragStartListener), findsNothing);
+    expect(find.byIcon(Icons.drag_handle_rounded), findsNothing);
     expect(cardY('现场'), lessThan(cardY('通勤')));
     expect(savedIds(), ['b', 'c', 'a']);
     final reloaded = ProviderContainer(
@@ -915,6 +909,7 @@ void main() {
     await _useCompactViewport(tester);
     final tracks = [
       PlaylistTrack.fromMusicInfo(_playlistMusic('track-1', '第一首')),
+      PlaylistTrack.fromMusicInfo(_playlistMusic('track-2', '第二首')),
     ];
     final prefs = await _prefsWith([
       _playlist(id: 'swipe', name: '左滑歌单', tracks: tracks),

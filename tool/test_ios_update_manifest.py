@@ -45,9 +45,9 @@ class ManifestTests(unittest.TestCase):
 
     def test_manifest_and_actual_hash(self):
         result = self.manifest()
-        base = 'https://github.com/wm0104/CyShineMusic-iOS/releases'
+        base = 'https://github.com/wm0104/CyShineMusic/releases'
         self.assertEqual(result, {
-            'schema': 1, 'repository': 'wm0104/CyShineMusic-iOS',
+            'schema': 1, 'repository': 'wm0104/CyShineMusic',
             'version': '2.0.9', 'build': 123, 'tag': self.tag,
             'page_url': base + '/tag/' + self.tag, 'name': '2.0.9',
             'notes': '已有发行说明', 'source_commit': self.commit,

@@ -590,6 +590,97 @@ class SettingsNotifier extends Notifier<AppSettings> {
     );
   }
 
+  /// Portable manual-backup whitelist; never enumerate SharedPreferences.
+  Map<String, dynamic> exportPreferencesForBackup() => {
+    ...exportAppearanceForSync(),
+    'navigationMode': state.navigationMode.code,
+    'carPadModeEnabled': state.carPadModeEnabled,
+    'skipStartupScreen': state.skipStartupScreen,
+    'autoPlayOnStartup': state.autoPlayOnStartup,
+    'showMiniLyrics': state.showMiniLyrics,
+    'allowMixWithOthers': state.allowMixWithOthers,
+    'bluetoothLyricEnabled': state.bluetoothLyricEnabled,
+    'bluetoothFullLyricEnabled': state.bluetoothFullLyricEnabled,
+    'onlinePlaybackQuality': state.onlinePlaybackQuality.code,
+    'batchDownloadQuality': state.batchDownloadQuality.code,
+    'enabledSearchSources': [
+      for (final source in kManageableSearchSources)
+        if (state.enabledSearchSources.contains(source)) source.code,
+    ],
+    'discoverySourceOrder': [for (final source in state.discoverySourceOrder) source.code],
+    'useBuiltInSourceFilePicker': state.useBuiltInSourceFilePicker,
+  };
+
+  /// Call only after decodeAppPreferencesBackup has validated the whole file.
+  /// Apply present keys only, without the live-sync compatibility side effects.
+  Future<void> applyValidatedPreferencesBackup(Map<String, dynamic> json) async {
+    if (json.containsKey('themeMode')) {
+      await setThemeMode(_decodeThemeMode(json['themeMode'] as String));
+    }
+    if (json.containsKey('themeSeedArgb')) {
+      await setThemeSeed(Color(json['themeSeedArgb'] as int));
+    }
+    if (json.containsKey('colorStyle')) {
+      await setColorStyle(AppColorStyle.fromCode(json['colorStyle'] as String));
+    }
+    if (json.containsKey('customTheme')) {
+      final theme = CustomTheme.fromJson(json['customTheme']);
+      // Restoring a theme must not disable an omitted artwork-color preference.
+      if (!await _prefs.setString(_kCustomThemeKey, jsonEncode(theme.toJson()))) {
+        throw StateError('无法保存备份偏好');
+      }
+      state = state.copyWith(customTheme: theme);
+    }
+    final switches = <String, Future<void> Function(bool)>{
+      'useDynamicColor': setUseDynamicColor,
+      'playlistArtworkColorsEnabled': setPlaylistArtworkColorsEnabled,
+      'flowingLightEnabled': setFlowingLightEnabled,
+      'lyricViewBlurDisabled': setLyricViewBlurDisabled,
+      'squareAlbumCoverEnabled': setSquareAlbumCoverEnabled,
+      'carPadModeEnabled': setCarPadModeEnabled,
+      'skipStartupScreen': setSkipStartupScreen,
+      'autoPlayOnStartup': setAutoPlayOnStartup,
+      'showMiniLyrics': setShowMiniLyrics,
+      'allowMixWithOthers': setAllowMixWithOthers,
+      'bluetoothLyricEnabled': setBluetoothLyricEnabled,
+      'bluetoothFullLyricEnabled': setBluetoothFullLyricEnabled,
+      'useBuiltInSourceFilePicker': setUseBuiltInSourceFilePicker,
+    };
+    for (final entry in switches.entries) {
+      if (json.containsKey(entry.key)) await entry.value(json[entry.key] as bool);
+    }
+    if (json.containsKey('navigationMode')) {
+      await setNavigationMode(AppNavigationMode.fromCode(json['navigationMode'] as String));
+    }
+    if (json.containsKey('onlinePlaybackQuality')) {
+      await setOnlinePlaybackQuality(OnlinePlaybackQuality.fromCode(json['onlinePlaybackQuality'] as String));
+    }
+    if (json.containsKey('batchDownloadQuality')) {
+      await setBatchDownloadQuality(OnlinePlaybackQuality.fromCode(json['batchDownloadQuality'] as String));
+    }
+    if (json.containsKey('enabledSearchSources')) {
+      final sources = (json['enabledSearchSources'] as List).cast<String>()
+          .map((code) => MusicSource.tryFromCode(code)!).toSet();
+      await _prefs.setStringList(_kEnabledSearchSourcesKey,
+          [for (final source in kManageableSearchSources) if (sources.contains(source)) source.code]);
+      state = state.copyWith(enabledSearchSources: Set<MusicSource>.unmodifiable(sources));
+    }
+    if (json.containsKey('discoverySourceOrder')) {
+      await setDiscoverySourceOrder((json['discoverySourceOrder'] as List)
+          .cast<String>().map((code) => MusicSource.tryFromCode(code)!));
+    }
+    if (const ['lyricFontWeight', 'lyricTranslationFontWeight',
+      'lyricFontSize', 'lyricTranslationFontSize'].any(json.containsKey)) {
+      // Pin omitted translations too: legacy derived values must survive restart.
+      await setLyricFontStyle(
+        weight: (json['lyricFontWeight'] as num?)?.toDouble() ?? state.lyricFontWeight,
+        size: (json['lyricFontSize'] as num?)?.toDouble() ?? state.lyricFontSize,
+        translationWeight: (json['lyricTranslationFontWeight'] as num?)?.toDouble() ?? state.lyricTranslationFontWeight,
+        translationSize: (json['lyricTranslationFontSize'] as num?)?.toDouble() ?? state.lyricTranslationFontSize,
+      );
+    }
+  }
+
   Map<String, dynamic> exportAppearanceForSync() => {
     'themeMode': _encodeThemeMode(state.themeMode),
     'themeSeedArgb': state.themeSeed.toARGB32(),

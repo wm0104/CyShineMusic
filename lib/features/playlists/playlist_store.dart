@@ -11,6 +11,7 @@ import '../../core/storage/settings_store.dart';
 import '../downloads/download_history_store.dart';
 import 'lx_playlist_import.dart';
 import 'playlist_models.dart';
+import 'playlist_backup.dart';
 import 'spotify_playlist_import.dart';
 
 const String localPlaylistsStorageKey = 'local_playlists_v1';
@@ -27,6 +28,7 @@ class PlaylistStoreException implements Exception {
 class LocalPlaylistNotifier extends Notifier<List<LocalPlaylist>> {
   late SharedPreferences _prefs;
   int _idSequence = 0;
+  Future<void> _pendingWrites = Future<void>.value();
 
   @override
   List<LocalPlaylist> build() {
@@ -425,6 +427,80 @@ class LocalPlaylistNotifier extends Notifier<List<LocalPlaylist>> {
     state = List<LocalPlaylist>.unmodifiable(next);
     await _persist();
     return List<LocalPlaylist>.unmodifiable(imported);
+  }
+
+  /// Full manifest, including local-only rows and their original association.
+  /// No audio is touched; playback still checks whether the file exists.
+  String exportBackup() => jsonEncode({
+    'format': playlistBackupFormat,
+    'version': 1,
+    'playlists': [for (final playlist in state) playlist.toJson()],
+  });
+
+  /// Validate once, then rebase if local edits happen during the durable write.
+  /// Never publish a candidate built from an older local state snapshot.
+  Future<int> importBackup(String text) async {
+    final incoming = decodePlaylistBackup(text);
+    var mustWrite = false;
+    while (true) {
+      final snapshot = state;
+      final next = [...snapshot];
+      var added = 0;
+      for (final remote in incoming) {
+        final origin = backupPlaylistOrigin(remote);
+        final index = next.indexWhere((local) => local.id == remote.id ||
+            (origin != null && backupPlaylistOrigin(local) == origin));
+        if (index < 0) {
+          next.add(remote);
+          added++;
+          continue;
+        }
+        final local = next[index];
+        if (local.id == remote.id && backupPlaylistOrigin(local) != origin) {
+          throw const FormatException('备份歌单身份冲突');
+        }
+        final identities = {for (final track in local.tracks) track.identityKey};
+        final moved = {...?local.movedOutTrackIds};
+        final additions = [
+          for (final track in remote.customOrderedTracks)
+            if (!moved.contains(track.identityKey) && identities.add(track.identityKey)) track,
+        ];
+        added += additions.length;
+        final localOrder = local.customOrderedTracks.map((t) => t.identityKey);
+        // A backup's move history fills gaps only, never removes local tracks.
+        final movedIds = <String>{...?local.movedOutTrackIds,
+          for (final id in remote.movedOutTrackIds ?? const <String>[])
+            if (!identities.contains(id)) id,
+        };
+        next[index] = local.copyWith(
+          tracks: [...local.tracks, ...additions],
+          customTrackOrder: [...localOrder, for (final track in additions) track.identityKey],
+          onlineTrackIds: local.onlineTrackIds == null && remote.onlineTrackIds == null
+              ? null : _mergeOnlineTrackIds(local.onlineTrackIds, remote.onlineTrackIds ?? const []),
+          movedOutTrackIds: movedIds.isEmpty && local.movedOutTrackIds == null && remote.movedOutTrackIds == null
+              ? null : movedIds.toList(),
+          movedOutTrackProviders: {
+            for (final entry in (remote.movedOutTrackProviders ?? const <String, String?>{}).entries)
+              if (movedIds.contains(entry.key)) entry.key: entry.value,
+            ...?local.movedOutTrackProviders,
+          },
+        );
+      }
+      final rows = [for (final playlist in next) jsonEncode(playlist.toJson())];
+      final currentRows = [for (final playlist in snapshot) jsonEncode(playlist.toJson())];
+      if (!mustWrite && listEquals(rows, currentRows)) return 0;
+      if (!await _writeRows(rows)) {
+        throw const PlaylistStoreException('无法保存导入的备份');
+      }
+      if (!identical(state, snapshot)) {
+        // Even a no-op merge must repair the stale candidate written above.
+        // Queue the retry behind any local edits already awaiting persistence.
+        mustWrite = true;
+        continue;
+      }
+      state = List<LocalPlaylist>.unmodifiable(next);
+      return added;
+    }
   }
 
   List<Map<String, dynamic>> exportForSync() {
@@ -837,9 +913,19 @@ class LocalPlaylistNotifier extends Notifier<List<LocalPlaylist>> {
     return id;
   }
 
+  Future<bool> _writeRows(List<String> rows) {
+    final write = _pendingWrites.then(
+      (_) => _prefs.setStringList(localPlaylistsStorageKey, rows),
+    );
+    // A failed save must not poison later writes; the original caller still
+    // receives its failure through `write`.
+    _pendingWrites = write.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    return write;
+  }
+
   Future<void> _persist() {
     final rows = [for (final playlist in state) jsonEncode(playlist.toJson())];
-    return _prefs.setStringList(localPlaylistsStorageKey, rows);
+    return _writeRows(rows);
   }
 }
 

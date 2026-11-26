@@ -7,7 +7,7 @@ import re
 import zipfile
 
 
-REPOSITORY = 'wm0104/CyShineMusic-iOS'
+REPOSITORY = 'wm0104/CyShineMusic'
 IPA_NAME = 'CyShineMusic-unsigned.ipa'
 APP_PLIST = 'Payload/Runner.app/Info.plist'
 WIDGET_PLIST = 'Payload/Runner.app/PlugIns/CyShineMusicWidget.appex/Info.plist'

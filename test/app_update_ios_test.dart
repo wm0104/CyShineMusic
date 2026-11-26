@@ -11,6 +11,12 @@ void main() {
   setUp(() => debugDefaultTargetPlatformOverride = TargetPlatform.iOS);
   tearDown(() => debugDefaultTargetPlatformOverride = null);
 
+  test('checks the new official iOS update repository', () {
+    expect(iosUpdateRepository, 'wm0104/CyShineMusic');
+    expect(iosUpdateManifestUrl,
+        'https://github.com/wm0104/CyShineMusic/releases/latest/download/ios-update.json');
+  });
+
   Future<AppRelease?> fetch(IosManifestAdapter adapter) {
     final dio = iosManifestDio(adapter);
     addTearDown(dio.close);
@@ -25,7 +31,7 @@ void main() {
     expect(release.manifestVersion, '2.0.9');
     expect(release.comparisonVersion, '2.0.9');
     expect(release.buildNumber, 209);
-    expect(release.displayVersion, '2.0.9 (209)');
+    expect(release.displayVersion, '2.0.9');
     expect(release.tagName, 'ios-v2.0.9');
     expect(release.pageUri.toString(), releasePage);
     expect(release.title, 'CyShineMusic 2.0.9');
@@ -34,7 +40,7 @@ void main() {
     expect(release.ipaSha256, List.filled(64, 'b').join());
     expect(trollStoreInstallUri(release.ipaUri!).queryParameters['url'], ipaUrl);
     expect(trollStoreInstallUri(release.ipaUri!).toString(),
-        'apple-magnifier://install?url=https%3A%2F%2Fgithub.com%2Fwm0104%2FCyShineMusic-iOS%2Freleases%2Fdownload%2Fios-v2.0.9%2FCyShineMusic-unsigned.ipa');
+        'apple-magnifier://install?url=https%3A%2F%2Fgithub.com%2Fwm0104%2FCyShineMusic%2Freleases%2Fdownload%2Fios-v2.0.9%2FCyShineMusic-unsigned.ipa');
   });
 
   test('missing IPA still exposes the release page without an install URL', () async {
@@ -54,14 +60,14 @@ void main() {
     expect(release.version.toString(), '2.0.9');
     expect(release.manifestVersion, '2.0.9.1+209');
     expect(release.comparisonVersion, '2.0.9.1+209');
-    expect(release.displayVersion, '2.0.9.1 (209)');
+    expect(release.displayVersion, '2.0.9.1');
   });
 
   test('nonnumeric metadata retains the explicit manifest build', () async {
     final release = (await fetch(IosManifestAdapter(iosManifest()..['version'] = '2.0.9+release')))!;
     expect(release.manifestVersion, '2.0.9+release');
     expect(release.buildNumber, 209);
-    expect(release.displayVersion, '2.0.9 (209)');
+    expect(release.displayVersion, '2.0.9');
   });
 
   test('optional descriptions and uppercase SHA256 are accepted', () async {
@@ -102,7 +108,7 @@ void main() {
 
   final invalidFields = <String, List<Object?>>{
     'schema': [null, '1', 2],
-    'repository': [null, 1, 'KevinllBin/CyShineMusic'],
+    'repository': [null, 1, 'KevinllBin/CyShineMusic', 'wm0104/CyShineMusic-iOS'],
     'version': [null, 209, '2.0', '2.0.9-beta.1', '2.0.9+210', '2.0.8'],
     'tag': [null, 209, 'ios-v2.0.9-beta.1', 'ios-v2.0.9+210', 'ios-v2.0.8'],
     'build': [null, '209', 209.5, 0, -1, true],
@@ -133,7 +139,7 @@ void main() {
     releasePage.replaceFirst('github.com', 'github.com:444'),
     '$releasePage?evil=1', '$releasePage#fragment',
     releasePage.replaceFirst('ios-v2.0.9', 'ios-v2.0.8'),
-    'https://github.com/wm0104/CyShineMusic-iOS/releases/latest',
+    'https://github.com/wm0104/CyShineMusic/releases/latest',
   ]) {
     test('rejects inconsistent or decorated release page $page', () async {
       await expectLater(fetch(IosManifestAdapter(iosManifest()..['page_url'] = page)), throwsFormatException);

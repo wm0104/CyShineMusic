@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/api/music_api.dart';
+import '../../core/models/album_info.dart';
 import '../../core/models/artist_info.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/leaderboard_info.dart';
@@ -140,10 +141,26 @@ final artistTrackPageProvider =
           );
     });
 
+final artistAlbumPageProvider =
+    FutureProvider.family<AlbumPage, ArtistPageKey>((ref, key) {
+      return ref.watch(musicApiProvider).artistAlbums(
+        artistId: key.id, source: key.source, offset: key.offset,
+        limit: discoveryPlaylistPageSize,
+      );
+    });
+
 final onlinePlaylistDetailProvider =
     FutureProvider.family<PlaylistInfo, OnlinePlaylistKey>((ref, key) {
       final api = ref.watch(musicApiProvider);
       return switch (key.kind) {
+        OnlineCollectionKind.album => api.albumDetail(
+          albumId: key.id, source: key.source,
+        ).then((album) {
+          if (album.hasMoreTracks || album.totalTracks != album.tracks.length) {
+            throw StateError('专辑曲目未完整读取，请重试');
+          }
+          return album;
+        }),
         OnlineCollectionKind.artist =>
           Future.wait([
             for (

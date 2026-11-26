@@ -102,6 +102,10 @@ GoRouter createAppRouter({
                     },
                   ),
                   GoRoute(
+                    path: '/discover/albums/:source/:id',
+                    pageBuilder: (context, state) => _albumDetailPage(context, state),
+                  ),
+                  GoRoute(
                     path: '/discover/artists/:source/:id',
                     pageBuilder: (context, state) =>
                         _artistDetailPage(context, state),
@@ -301,6 +305,10 @@ GoRouter createAppRouter({
             ),
           ),
           GoRoute(
+            path: '/player/artists/:artistSource/:artistId/albums/:source/:id',
+            pageBuilder: (context, state) => _albumDetailPage(context, state, fromPlayback: true),
+          ),
+          GoRoute(
             path: '/player/artists/:source/:id',
             pageBuilder: (context, state) =>
                 _artistDetailPage(context, state, fromPlayback: true),
@@ -308,6 +316,27 @@ GoRouter createAppRouter({
         ],
       ),
     ],
+  );
+}
+
+Page<void> _albumDetailPage(
+  BuildContext context,
+  GoRouterState state, {
+  bool fromPlayback = false,
+}) {
+  return _containerTransformPage(
+    context,
+    key: state.pageKey,
+    extra: state.extra,
+    skipExit: fromPlayback ? _leavesPlaybackArtistStack : _leavesDiscovery,
+    child: _shellPageContent(state, child: OnlinePlaylistDetailPage(
+      source: MusicSource.fromCode(state.pathParameters['source'] ?? ''),
+      playlistId: state.pathParameters['id'] ?? '',
+      kind: OnlineCollectionKind.album,
+      summary: _routePayload<PlaylistSummary>(state.extra),
+      onBack: fromPlayback ? () => closePlaybackArtistPage(context) : null,
+      fromPlayback: fromPlayback,
+    )),
   );
 }
 

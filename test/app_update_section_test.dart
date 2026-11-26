@@ -64,6 +64,10 @@ void main() {
         )),
       ], child: MaterialApp.router(routerConfig: router)));
       await tester.pumpAndSettle();
+      expect(find.text('当前版本：$appDisplayName 2.0.8'), findsOneWidget);
+      expect(find.text('当前版本：$appDisplayName 2.0.8 (6)'), findsNothing);
+      expect(find.text('2.0.9'), findsOneWidget);
+      expect(find.text('2.0.9 (9)'), findsNothing);
       expect(find.text('TrollStore 更新安装'), findsOneWidget);
       expect(find.text('下载 IPA'), findsOneWidget);
       final save = find.text('保存到文件');
@@ -79,7 +83,9 @@ void main() {
       service.release = _release(build: 10);
       await controller.check();
       await tester.pumpAndSettle();
-      expect(find.text('2.0.9 (10)'), findsOneWidget);
+      expect(find.text('2.0.9'), findsOneWidget);
+      expect(find.text('2.0.9 (10)'), findsNothing);
+      expect(controller.release!.buildNumber, 10);
       expect(find.text('保存到文件'), findsNothing,
           reason: 'an older build with the same tag is not offered as the new package');
       expect(find.text('分享安装'), findsNothing);
@@ -92,8 +98,8 @@ void main() {
 AppRelease _release({int build = 9}) => AppRelease(
   version: Version(2, 0, 9), tagName: 'ios-v2.0.9', title: '2.0.9',
   manifestVersion: '2.0.9', buildNumber: build, ipaSha256: 'a' * 64,
-  pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic-iOS/releases/tag/ios-v2.0.9'),
-  ipaUri: Uri.parse('https://github.com/wm0104/CyShineMusic-iOS/releases/download/ios-v2.0.9/CyShineMusic-unsigned.ipa'),
+  pageUri: Uri.parse('https://github.com/wm0104/CyShineMusic/releases/tag/ios-v2.0.9'),
+  ipaUri: Uri.parse('https://github.com/wm0104/CyShineMusic/releases/download/ios-v2.0.9/CyShineMusic-unsigned.ipa'),
   notes: '完善在线更新体验。',
 );
 

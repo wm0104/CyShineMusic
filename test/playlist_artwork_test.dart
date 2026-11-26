@@ -26,7 +26,7 @@ const _secondUrl = 'https://img.test/second.jpg';
 const _missingUrl = 'https://img.test/missing.jpg';
 
 void main() {
-  testWidgets('only usable art in the first four fills the whole cover', (
+  testWidgets('only usable art in the first six fills the whole cover', (
     tester,
   ) async {
     await _cacheNetworkArtwork(_firstUrl);
@@ -39,6 +39,8 @@ void main() {
       first,
       _track('invalid', url: '/unsupported.jpg'),
       _track('missing', url: _missingUrl),
+      _track('empty5'),
+      _track('empty6'),
       fifth,
     ];
     await _pumpCover(tester, _playlist(tracks.take(1).toList()));
@@ -54,7 +56,55 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('saved order determines each quadrant and uses embedded art', (
+  testWidgets('six slots preserve duplicate covers and refresh after removal', (tester) async {
+    await _cacheNetworkArtwork(_firstUrl);
+    await _cacheNetworkArtwork(_secondUrl);
+    final tracks = [
+      for (var i = 0; i < 7; i++)
+        _track('track-$i', url: i == 6 ? _secondUrl : _firstUrl),
+    ];
+    final playlist = _playlist(tracks);
+    await _pumpCover(tester, playlist);
+    final images = find.byType(PlaylistArtworkImage);
+    expect(images, findsNWidgets(6));
+    expect(_networkUrls(tester), List.filled(6, _firstUrl));
+    final origin = tester.getTopLeft(find.byType(PlaylistCover));
+    for (var i = 0; i < 6; i++) {
+      expect(tester.getTopLeft(images.at(i)),
+          origin + Offset((i % 2) * 30, (i ~/ 2) * 20));
+      expect(tester.getSize(images.at(i)), const Size(30, 20));
+    }
+    await _pumpCover(tester, playlist.copyWith(tracks: tracks.skip(1).toList()));
+    expect(_networkUrls(tester), [...List.filled(5, _firstUrl), _secondUrl]);
+    await _pumpCover(tester, playlist.copyWith(tracks: [
+      _track('added', url: _secondUrl), ...tracks,
+    ]));
+    expect(_networkUrls(tester), [_secondUrl, ...List.filled(5, _firstUrl)]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('old pending artwork cannot overwrite a newer saved order', (tester) async {
+    final pending = Completer<ImageInfo>();
+    await _cacheNetworkArtwork(_firstUrl, image: pending.future);
+    await _cacheNetworkArtwork(_secondUrl);
+    final first = _track('pending', url: _firstUrl);
+    final second = _track('ready', url: _secondUrl);
+    final playlist = _playlist([first, second]);
+    await _pumpCover(tester, playlist, settle: false);
+    await _pumpCover(tester, playlist.copyWith(tracks: [second]));
+    expect(_networkUrls(tester), [_secondUrl]);
+    final recorder = PictureRecorder();
+    Canvas(recorder).drawColor(Colors.red, BlendMode.src);
+    final picture = recorder.endRecording();
+    final pixels = picture.toImageSync(2, 2);
+    picture.dispose();
+    pending.complete(ImageInfo(image: pixels));
+    await tester.pumpAndSettle();
+    expect(_networkUrls(tester), [_secondUrl]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('saved order determines each of six cells and uses embedded art', (
     tester,
   ) async {
     await _cacheNetworkArtwork(_firstUrl);
@@ -91,9 +141,9 @@ void main() {
 
     await _pumpCover(tester, playlist);
     final image = find.byType(PlaylistArtworkImage);
-    expect(image, findsNWidgets(2));
-    expect(_networkUrls(tester), [_firstUrl]);
-    expect(find.byKey(_placeholder.key!), findsNWidgets(2));
+    expect(image, findsNWidgets(3));
+    expect(_networkUrls(tester), [_firstUrl, _secondUrl]);
+    expect(find.byKey(_placeholder.key!), findsNWidgets(3));
 
     await _pumpCover(
       tester,
@@ -109,10 +159,10 @@ void main() {
     expect(_providers(tester).last, isA<MemoryImage>());
     final origin = tester.getTopLeft(find.byType(PlaylistCover));
     expect(tester.getTopLeft(image.at(0)), origin);
-    expect(tester.getTopLeft(image.at(1)), origin + const Offset(0, 30));
-    expect(tester.getTopLeft(image.at(2)), origin + const Offset(30, 30));
-    expect(tester.getSize(image.first), const Size.square(_size / 2));
-    expect(find.byKey(_placeholder.key!), findsOneWidget);
+    expect(tester.getTopLeft(image.at(1)), origin + const Offset(0, 20));
+    expect(tester.getTopLeft(image.at(2)), origin + const Offset(30, 20));
+    expect(tester.getSize(image.first), const Size(_size / 2, _size / 3));
+    expect(find.byKey(_placeholder.key!), findsNWidgets(3));
     expect(tester.takeException(), isNull);
   });
 

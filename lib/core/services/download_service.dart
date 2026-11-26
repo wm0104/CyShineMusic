@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
@@ -74,13 +76,125 @@ class BatchDownloadResult {
 }
 
 class DownloadService {
-  DownloadService(this._ref);
+  DownloadService(this._ref) {
+    final progressStore = _ref.read(downloadProgressProvider.notifier);
+    var lastTasks = _ref.read(downloadProgressProvider).tasks;
+    _ref.listen<DownloadProgress>(downloadProgressProvider, (_, next) {
+      lastTasks = next.tasks;
+      for (final entry in _running.entries) {
+        DownloadTask? current;
+        for (final task in next.tasks) {
+          if (task.id == entry.key) { current = task; break; }
+        }
+        if (current == null || current.stage == DownloadStage.paused ||
+            current.generation != _runningGenerations[entry.key]) {
+          entry.value.cancel('stale generation');
+        }
+      }
+    });
+    _ref.onDispose(() {
+      _disposed = true;
+      for (final token in _running.values) { token.cancel('disposed'); }
+      for (final job in _waiting) { job.result.completeError(const DownloadPausedException()); }
+      _waiting.clear();
+      final orphaned = lastTasks.where((task) => task.isBusy && task.stage != DownloadStage.finishing).toList();
+      // A service-only invalidation keeps the progress notifier alive. Defer
+      // its update outside Riverpod disposal; a whole-container shutdown may
+      // already have disposed the notifier, in which case disk recovery wins.
+      scheduleMicrotask(() {
+        for (final task in orphaned) {
+          try { progressStore.pause(task.id, generation: task.generation); }
+          catch (_) { /* Progress was disposed together with the container. */ }
+        }
+      });
+    });
+  }
 
   final Ref _ref;
   static const _mediaScanChannel = MethodChannel('cy_shine_music/media_scan');
   static const int batchConcurrency = 3;
 
   final Set<String> _batchDownloadKeys = {};
+  final Map<String, String> _preparedTasks = {};
+  final Map<String, MusicInfo> _originalMusic = {};
+  final Map<String, CancelToken> _running = {};
+  final Map<String, int> _runningGenerations = {};
+  final List<({String id, int generation, Completer<DownloadResult> result})> _waiting = [];
+  bool _disposed = false;
+
+  DownloadTask? _task(String id) {
+    for (final task in _ref.read(downloadProgressProvider).tasks) {
+      if (task.id == id) return task;
+    }
+    return null;
+  }
+
+  void pauseTask(String id) {
+    final task = _task(id);
+    // File export is a short, committed operation: don't interrupt its rename.
+    if (task == null || !task.isBusy || task.stage == DownloadStage.finishing) return;
+    _ref.read(downloadProgressProvider.notifier).pause(id);
+    _running[id]?.cancel('paused');
+    _pump();
+  }
+
+  void pauseAll() {
+    for (final task in [..._ref.read(downloadProgressProvider).tasks]) {
+      pauseTask(task.id);
+    }
+  }
+
+  Future<void> resumeTask(String id) async {
+    final task = _task(id);
+    if (task == null || task.stage != DownloadStage.paused) return;
+    _ref.read(downloadProgressProvider.notifier).restart(id);
+    try { await _schedule(id); } on DownloadPausedException { return; }
+  }
+
+  Future<void> retryTask(String id) async {
+    final task = _task(id);
+    if (task == null || task.stage != DownloadStage.failed) return;
+    _ref.read(downloadProgressProvider.notifier).restart(id);
+    try { await _schedule(id); } on DownloadPausedException { return; }
+  }
+
+  Future<void> resumeAll() async {
+    final ids = [for (final t in _ref.read(downloadProgressProvider).tasks)
+      if (t.stage == DownloadStage.paused) t.id];
+    await Future.wait(ids.map(resumeTask));
+  }
+
+  Future<DownloadResult> _schedule(String id) {
+    final result = Completer<DownloadResult>();
+    _waiting.add((id: id, generation: _task(id)!.generation, result: result));
+    _ref.read(downloadProgressProvider.notifier).updateStage(id, DownloadStage.queued);
+    _pump();
+    return result.future;
+  }
+
+  void _pump() {
+    if (_disposed) return;
+    while (_running.length < batchConcurrency && _waiting.isNotEmpty) {
+      final index = _waiting.indexWhere((job) => !_running.containsKey(job.id));
+      if (index < 0) return;
+      final job = _waiting.removeAt(index);
+      final task = _task(job.id);
+      if (task == null || !task.isBusy || task.generation != job.generation) {
+        job.result.completeError(const DownloadPausedException());
+        continue;
+      }
+      final token = CancelToken();
+      _running[job.id] = token;
+      _runningGenerations[job.id] = task.generation;
+      _runTask(task, token).then(job.result.complete, onError: job.result.completeError)
+        .whenComplete(() {
+          _running.remove(job.id);
+          _runningGenerations.remove(job.id);
+          _pump();
+        });
+    }
+  }
+
 
   Future<List<BatchDownloadResult>> downloadMany({
     required List<MusicInfo> musics,
@@ -95,7 +209,7 @@ class DownloadService {
         if (task.isBusy && task.musicId.trim().isNotEmpty) task.musicId.trim(),
     };
     final seen = <String>{};
-    final pending = <({String key, MusicInfo music})>[];
+    final pending = <({String key, MusicInfo music, String taskId})>[];
     for (final music in musics) {
       final key = _batchDownloadKey(music);
       final musicId = music.id.trim();
@@ -104,7 +218,19 @@ class DownloadService {
           !_batchDownloadKeys.add(key)) {
         continue;
       }
-      pending.add((key: key, music: music));
+      final destinationDir = _ref.read(settingsProvider).downloadDir;
+      final quality = _batchQualityFor(music, qualityPreference);
+      if (_ref.read(downloadProgressProvider).tasks.any((task) =>
+          _canReuseCompleted(task, key, quality, embed, destinationDir))) {
+        _batchDownloadKeys.remove(key);
+        continue;
+      }
+      final taskId = _ref.read(downloadProgressProvider.notifier).enqueue(
+        music, qualityCode: quality?.code,
+        destinationDir: destinationDir, embedOptions: _embedJson(embed),
+      );
+      _originalMusic[taskId] = music;
+      pending.add((key: key, music: music, taskId: taskId));
     }
     if (pending.isEmpty) return const [];
 
@@ -121,6 +247,10 @@ class DownloadService {
         if (index >= pending.length) return;
         final job = pending[index];
         try {
+          if (_task(job.taskId)?.stage != DownloadStage.queued) {
+            throw const DownloadPausedException();
+          }
+          _preparedTasks[job.key] = job.taskId;
           final quality = _batchQualityFor(job.music, qualityPreference);
           final result = await downloadOne(
             music: job.music,
@@ -134,6 +264,7 @@ class DownloadService {
         } catch (error) {
           results[index] = BatchDownloadResult(music: job.music, error: error);
         } finally {
+          _preparedTasks.remove(job.key);
           _batchDownloadKeys.remove(job.key);
         }
       }
@@ -146,7 +277,9 @@ class DownloadService {
         _batchDownloadKeys.remove(job.key);
       }
     }
-    return results.whereType<BatchDownloadResult>().toList(growable: false);
+    return results.whereType<BatchDownloadResult>()
+        .where((item) => item.error is! DownloadPausedException)
+        .toList(growable: false);
   }
 
   Quality? _batchQualityFor(MusicInfo music, OnlinePlaybackQuality preference) {
@@ -162,28 +295,84 @@ class DownloadService {
         '\u0000${music.singer.trim().toLowerCase()}';
   }
 
+  bool _taskMatchesMusic(DownloadTask task, String key) {
+    try {
+      return task.musicJson != null &&
+          _batchDownloadKey(MusicInfo.fromJson(task.musicJson!)) == key;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _canReuseCompleted(DownloadTask task, String key, Quality? quality,
+      EmbedRequest embed, String destinationDir) =>
+      task.stage == DownloadStage.done && _taskMatchesMusic(task, key) &&
+      task.qualityCode == quality?.code && task.destinationDir == destinationDir &&
+      mapEquals(task.embedOptions, _embedJson(embed)) &&
+      task.savedPath != null && File(task.savedPath!).existsSync();
+
   Future<DownloadResult> downloadOne({
     required MusicInfo music,
     Quality? quality,
     required EmbedRequest embed,
   }) async {
+    final key = _batchDownloadKey(music);
+    final prepared = _preparedTasks.remove(key);
+    if (prepared != null) return _schedule(prepared);
+    final destinationDir = _ref.read(settingsProvider).downloadDir;
+    for (final task in _ref.read(downloadProgressProvider).tasks.reversed) {
+      if (!_taskMatchesMusic(task, key)) continue;
+      if (_canReuseCompleted(task, key, quality, embed, destinationDir)) {
+        return DownloadResult(path: task.savedPath!);
+      }
+      if (task.isBusy) throw StateError('歌曲已在下载队列中');
+    }
+    final id = _ref.read(downloadProgressProvider.notifier).enqueue(
+      music, qualityCode: quality?.code, destinationDir: destinationDir,
+      embedOptions: _embedJson(embed),
+    );
+    _originalMusic[id] = music;
+    return _schedule(id);
+  }
+
+  Future<DownloadResult> _runTask(DownloadTask task, CancelToken token) async {
     final progress = _ref.read(downloadProgressProvider.notifier);
-    final taskId = progress.start(music);
-
-    final api = _ref.read(musicApiProvider);
-    final dio = _ref.read(apiClientProvider);
-    final settings = _ref.read(settingsProvider);
-
+    final taskId = task.id;
+    final generation = task.generation;
+    MusicInfo? failedMusic;
+    Quality? selectedQuality;
+    void check() {
+      if (_disposed || token.isCancelled || _task(taskId)?.generation != generation ||
+          _task(taskId)?.isBusy != true) throw const DownloadPausedException();
+    }
+    void stage(DownloadStage value, {String? message}) {
+      check();
+      progress.updateStage(taskId, value, message: message, generation: generation);
+    }
     void log(String msg) {
       AppLogger.write('download', msg);
     }
 
-    Quality? selectedQuality = quality;
     Directory? taskCacheDir;
     try {
+      check();
+      final music = _originalMusic[taskId] ?? MusicInfo.fromJson(task.musicJson!);
+      failedMusic = music;
+      final quality = task.qualityCode == null ? null : Quality.tryFromCode(task.qualityCode!);
+      if (music.id.trim().isEmpty || music.source == MusicSource.all ||
+          (task.qualityCode != null && quality == null)) {
+        throw const FormatException('下载任务记录无效');
+      }
+      selectedQuality = quality;
+      final embed = _embedFromJson(task.embedOptions);
+      final api = _ref.read(musicApiProvider);
+      final dio = _ref.read(apiClientProvider);
+      final settings = _ref.read(settingsProvider);
+      stage(DownloadStage.resolvingUrl);
       final resolver = _ref.read(musicUrlResolverProvider);
       final requestedQuality = selectedQuality ??= await resolver
           .highestQualityFor(music);
+      check();
       log('==== NEW DOWNLOAD ====');
       log(
         'start ${music.source.code} "${music.name} - ${music.singer}" '
@@ -195,17 +384,23 @@ class DownloadService {
       // Resolve and transfer inside the same source attempt so a stale CDN
       // URL can fall through to the next enabled source.
       log('step1 resolve with enabled local music sources');
-      final destDir = await _resolveDestinationDir(settings.downloadDir, log);
+      final destDir = await _resolveDestinationDir(task.destinationDir ?? settings.downloadDir, log);
       final cacheRoot = await getTemporaryDirectory();
       taskCacheDir = await cacheRoot.createTemp('cyshine-download-');
+      check();
 
       final MusicSourceFallbackResult<_DownloadedAudio> sourceResult;
       try {
         sourceResult = await resolver.useFirstAvailable<_DownloadedAudio>(
           music: music,
           quality: requestedQuality,
-          shouldFallbackOnConsumerError: _shouldFallbackAfterDownloadError,
+          isCancelled: () => _disposed || token.isCancelled || _task(taskId)?.generation != generation,
+          shouldFallbackOnConsumerError: (error) {
+            check();
+            return _shouldFallbackAfterDownloadError(error);
+          },
           use: (source, musicUrl) async {
+            check();
             if (musicUrl.url.trim().isEmpty) {
               throw Exception('音源未返回音频地址');
             }
@@ -221,12 +416,11 @@ class DownloadService {
             );
             final candidateTmpPath = p.join(taskCacheDir!.path, fileName);
 
-            progress.updateStage(
-              taskId,
+            stage(
               DownloadStage.downloading,
               message: '正在尝试音源：${source.name}',
             );
-            progress.updateBytes(taskId, 0, null);
+            progress.updateBytes(taskId, 0, null, generation: generation);
             log(
               'step1 OK source=${source.name} url.len=${musicUrl.url.length} '
               'type=${musicUrl.type}',
@@ -237,6 +431,7 @@ class DownloadService {
               await dio.download(
                 musicUrl.url,
                 candidateTmpPath,
+                cancelToken: token,
                 options: Options(
                   headers: const {
                     'User-Agent':
@@ -251,6 +446,7 @@ class DownloadService {
                     taskId,
                     received,
                     total > 0 ? total : null,
+                    generation: generation,
                   );
                 },
               );
@@ -265,6 +461,7 @@ class DownloadService {
               await _deleteTemporaryFile(candidateTmpPath);
               rethrow;
             }
+            check();
             log('step3 OK source=${source.name} bytes downloaded to tmp');
             return _DownloadedAudio(
               tmpPath: candidateTmpPath,
@@ -285,6 +482,7 @@ class DownloadService {
         }
         rethrow;
       }
+      check();
       final downloaded = sourceResult.value;
       final tmpPath = downloaded.tmpPath;
       final fileName = downloaded.fileName;
@@ -294,9 +492,9 @@ class DownloadService {
       Uint8List? coverBytes;
       String? finalLyric;
       if (embed.needsMetadata) {
-        progress.updateStage(taskId, DownloadStage.fetchingMeta);
+        stage(DownloadStage.fetchingMeta);
         if (embed.embedCover) {
-          coverBytes = await _fetchCoverBytes(api, dio, music, log);
+          coverBytes = await _fetchCoverBytes(api, dio, music, log, cancelToken: token);
           log('step4 cover bytes=${coverBytes?.length ?? 0}');
         }
 
@@ -332,7 +530,7 @@ class DownloadService {
 
       // Title/artist/album are always written. A temporary lyric or cover
       // failure must not leave a downloaded audio file completely untagged.
-      progress.updateStage(taskId, DownloadStage.tagging);
+      stage(DownloadStage.tagging);
       log(
         'step4 tagging start cover=${coverBytes?.length ?? 0} '
         'lyric=${finalLyric?.length ?? 0}',
@@ -363,8 +561,7 @@ class DownloadService {
             final parts = <String>[];
             if (lyricBroken) parts.add('歌词');
             if (coverBroken) parts.add('封面');
-            progress.updateStage(
-              taskId,
+            stage(
               DownloadStage.tagging,
               message: '${parts.join('、')}标签写入失败',
             );
@@ -373,33 +570,38 @@ class DownloadService {
       } catch (e, s) {
         log('step4 tagging FAIL, keep raw audio: $e');
         log('step4 stack: $s');
-        progress.updateStage(
-          taskId,
+        stage(
           DownloadStage.tagging,
           message: '标签写入失败：$e（音频本身正常）',
         );
       }
 
       // 5. Move to user-visible directory + trigger MediaScanner.
-      progress.updateStage(taskId, DownloadStage.finishing);
+      stage(DownloadStage.finishing);
       final finalPath = await _moveToTarget(tmpPath, destDir, fileName);
       await _scanMedia(finalPath);
 
       log('DONE $finalPath');
-      progress.finish(taskId, finalPath);
+      progress.finish(taskId, finalPath, generation: generation);
       await _recordCompleted(music, resolvedQuality, finalPath, log);
       await _attachDownload(music, resolvedQuality, finalPath, log);
       return DownloadResult(path: finalPath);
     } catch (e, s) {
+      if (_disposed || token.isCancelled || e is DownloadPausedException ||
+          _task(taskId)?.generation != generation) {
+        throw const DownloadPausedException();
+      }
       log('FAILED at outer catch: $e');
       log('stack: $s');
-      progress.fail(taskId, _messageFor(e));
-      await _recordFailed(
-        music,
-        selectedQuality ?? music.bestQuality,
-        _messageFor(e),
-        log,
-      );
+      progress.fail(taskId, _messageFor(e), generation: generation);
+      if (failedMusic != null) {
+        await _recordFailed(
+          failedMusic,
+          selectedQuality ?? failedMusic.bestQuality,
+          _messageFor(e),
+          log,
+        );
+      }
       rethrow;
     } finally {
       if (taskCacheDir != null) {
@@ -416,8 +618,9 @@ class DownloadService {
     MusicApi api,
     Dio dio,
     MusicInfo music,
-    void Function(String) log,
-  ) async {
+    void Function(String) log, {
+    CancelToken? cancelToken,
+  }) async {
     String? picUrl;
     try {
       picUrl = await api.getPicUrl(musicInfo: music);
@@ -445,6 +648,7 @@ class DownloadService {
       };
       final resp = await dio.get<List<int>>(
         picUrl,
+        cancelToken: cancelToken,
         options: Options(responseType: ResponseType.bytes, headers: headers),
       );
       final bytes = Uint8List.fromList(resp.data ?? const []);
@@ -637,4 +841,25 @@ class _DownloadedAudio {
 
 final downloadServiceProvider = Provider<DownloadService>(
   (ref) => DownloadService(ref),
+);
+
+class DownloadPausedException implements Exception {
+  const DownloadPausedException();
+  @override
+  String toString() => '下载已暂停';
+}
+
+Map<String, dynamic> _embedJson(EmbedRequest value) => {
+  'cover': value.embedCover, 'lyric': value.embedLyric,
+  'translated': value.embedTranslatedLyric, 'roman': value.embedRomanLyric,
+  'format': value.lyricFormat.code,
+};
+
+EmbedRequest _embedFromJson(Map<String, dynamic> value) => EmbedRequest(
+  embedCover: value['cover'] as bool? ?? true,
+  embedLyric: value['lyric'] as bool? ?? true,
+  embedTranslatedLyric: value['translated'] as bool? ?? true,
+  embedRomanLyric: value['roman'] as bool? ?? true,
+  lyricFormat: EmbeddedLyricFormat.values.firstWhere(
+    (format) => format.code == value['format'], orElse: () => EmbeddedLyricFormat.automatic),
 );

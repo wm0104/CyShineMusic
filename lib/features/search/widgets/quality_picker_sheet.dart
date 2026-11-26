@@ -304,6 +304,8 @@ class _QualityPickerSheetState extends ConsumerState<QualityPickerSheet> {
         type: AppToastType.success,
         duration: const Duration(seconds: 4),
       );
+    } on DownloadPausedException {
+      return;
     } catch (e) {
       showAppToastOnOverlay(toastOverlay, '下载失败：$e', type: AppToastType.error);
     }

@@ -3,11 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 
 import '../../../core/ui/expressive_download_button.dart';
+import '../../../core/ui/tight_track_actions.dart';
 import '../../../theme/app_motion.dart';
 import '../../downloads/download_progress.dart';
 import '../resolved_playlist_track.dart';
 import 'playlist_artwork.dart';
-import 'playlist_order_controls.dart';
 
 const double _trackCoverSize = 52;
 const double _trackRowMinHeight = 68;
@@ -30,8 +30,6 @@ class PlaylistTrackTile extends ConsumerWidget {
     this.onMatch,
     this.onAddToPlaylist,
     this.onMoveToPlaylist,
-    this.reordering = false,
-    this.reorderEnabled = true,
   });
 
   final String playlistId;
@@ -48,8 +46,6 @@ class PlaylistTrackTile extends ConsumerWidget {
   final VoidCallback onRemove;
   final VoidCallback? onAddToPlaylist;
   final VoidCallback? onMoveToPlaylist;
-  final bool reordering;
-  final bool reorderEnabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -64,10 +60,7 @@ class PlaylistTrackTile extends ConsumerWidget {
           );
     final isLocal = item.localEntry != null;
     final tapToMatch =
-        onMatch != null &&
-        item.track.isUnmatchedSpotify &&
-        !batchMode &&
-        !reordering;
+        onMatch != null && item.track.isUnmatchedSpotify && !batchMode;
     final canReplace = onMatch != null && !item.track.isUnmatchedSpotify;
     final tapHint = tapToMatch ? '轻触匹配音源' : '轻触播放';
     final selectionEnabled = !batchSubmitting && task?.isBusy != true;
@@ -99,17 +92,11 @@ class PlaylistTrackTile extends ConsumerWidget {
       child: Material(
         color: Colors.transparent,
         child: Semantics(
-          button: !reordering,
+          button: true,
           selected: batchMode && selected,
-          hint: reordering
-              ? '拖动右侧手柄整理顺序'
-              : batchMode
-              ? '轻触选择歌曲'
-              : tapHint,
+          hint: batchMode ? '轻触选择歌曲' : tapHint,
           child: InkWell(
-            onTap: reordering
-                ? null
-                : batchMode
+            onTap: batchMode
                 ? (selectionEnabled ? onToggleSelected : null)
                 : (tapToMatch ? onMatch : onPlay),
             child: Padding(
@@ -213,15 +200,7 @@ class PlaylistTrackTile extends ConsumerWidget {
                           ),
                         );
                       },
-                      child: reordering
-                          ? PlaylistOrderDragHandle(
-                              key: ValueKey(
-                                'playlist-reorder-${item.track.identityKey}',
-                              ),
-                              index: index,
-                              enabled: reorderEnabled,
-                            )
-                          : batchMode
+                      child: batchMode
                           ? SizedBox.square(
                               key: const ValueKey('playlist-select-action'),
                               dimension: 44,
@@ -270,64 +249,75 @@ class PlaylistTrackTile extends ConsumerWidget {
       ),
     );
 
-    return Slidable(
-      key: ValueKey('playlist-track-slide-${item.track.id}'),
-      groupTag: 'playlist-tracks',
-      enabled: !batchMode && !reordering,
-      endActionPane: ActionPane(
-        motion: const BehindMotion(),
-        extentRatio:
-            0.24 *
-            (1 +
-                (canReplace ? 1 : 0) +
+    return LayoutBuilder(
+      builder: (context, constraints) => Slidable(
+        key: ValueKey('playlist-track-slide-${item.track.id}'),
+        groupTag: 'playlist-tracks',
+        enabled: !batchMode,
+        endActionPane: ActionPane(
+          motion: const BehindMotion(),
+          extentRatio: tightTrackActionExtent(
+            1 + (canReplace ? 1 : 0) +
                 (onAddToPlaylist == null ? 0 : 1) +
-                (onMoveToPlaylist == null ? 0 : 1)),
-        children: [
-          if (onAddToPlaylist case final add?)
-            SlidableAction(
-              key: const ValueKey('playlist-add-to-playlist-action'),
-              autoClose: false,
-              onPressed: (actionContext) async {
-                await Slidable.of(actionContext)?.close();
-                add();
-              },
-              backgroundColor: scheme.secondaryContainer,
-              foregroundColor: scheme.onSecondaryContainer,
-              icon: Icons.playlist_add_rounded,
-              label: '添加到歌单',
-            ),
-          if (onMoveToPlaylist case final move?)
-            SlidableAction(
-              key: const ValueKey('playlist-move-to-playlist-action'),
-              autoClose: false,
-              onPressed: (actionContext) async {
-                await Slidable.of(actionContext)?.close();
-                move();
-              },
-              backgroundColor: scheme.tertiaryContainer,
-              foregroundColor: scheme.onTertiaryContainer,
-              icon: Icons.drive_file_move_rounded,
-              label: '移动到歌单',
-            ),
-          if (canReplace)
-            SlidableAction(
-              onPressed: (_) => onMatch!(),
-              backgroundColor: scheme.secondaryContainer,
-              foregroundColor: scheme.onSecondaryContainer,
-              icon: Icons.search_rounded,
-              label: '更换匹配',
-            ),
-          SlidableAction(
-            key: const ValueKey('playlist-remove-action'),
-            onPressed: (_) => onRemove(),
-            backgroundColor: scheme.error,
-            foregroundColor: scheme.onError,
-            icon: Icons.playlist_remove_rounded,
-            label: '移除',
+                (onMoveToPlaylist == null ? 0 : 1),
+            constraints.maxWidth,
+            textScale: MediaQuery.textScalerOf(context).scale(12) / 12,
           ),
-        ],
+          children: [
+            if (onAddToPlaylist case final add?)
+              SlidableAction(
+                padding: tightTrackActionPadding,
+                key: const ValueKey('playlist-add-to-playlist-action'),
+                autoClose: false,
+                onPressed: (actionContext) async {
+                  await Slidable.of(actionContext)?.close();
+                  add();
+                },
+                backgroundColor: scheme.secondaryContainer,
+                foregroundColor: scheme.onSecondaryContainer,
+                icon: Icons.playlist_add_rounded,
+                label: '添加到歌单',
+                flex: tightTrackActionFlex('添加到歌单'),
+              ),
+            if (onMoveToPlaylist case final move?)
+              SlidableAction(
+                padding: tightTrackActionPadding,
+                key: const ValueKey('playlist-move-to-playlist-action'),
+                autoClose: false,
+                onPressed: (actionContext) async {
+                  await Slidable.of(actionContext)?.close();
+                  move();
+                },
+                backgroundColor: scheme.tertiaryContainer,
+                foregroundColor: scheme.onTertiaryContainer,
+                icon: Icons.drive_file_move_rounded,
+                label: '移动到歌单',
+                flex: tightTrackActionFlex('移动到歌单'),
+              ),
+            if (canReplace)
+              SlidableAction(
+                padding: tightTrackActionPadding,
+                onPressed: (_) => onMatch!(),
+                backgroundColor: scheme.secondaryContainer,
+                foregroundColor: scheme.onSecondaryContainer,
+                icon: Icons.search_rounded,
+                label: '更换匹配',
+                flex: tightTrackActionFlex('更换匹配'),
+              ),
+            SlidableAction(
+              padding: tightTrackActionPadding,
+              key: const ValueKey('playlist-remove-action'),
+              onPressed: (_) => onRemove(),
+              backgroundColor: scheme.error,
+              foregroundColor: scheme.onError,
+              icon: Icons.playlist_remove_rounded,
+              label: '移除',
+              flex: tightTrackActionFlex('移除'),
+            ),
+          ],
+        ),
+        child: row,
       ),
-      child: row,
     );
   }
 }

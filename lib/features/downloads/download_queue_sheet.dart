@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 
 import '../../core/ui/configurable_m3e_progress.dart';
+import '../../core/ui/app_toast.dart';
+import '../../core/services/download_service.dart';
 import '../../theme/app_motion.dart';
 import '../../theme/app_theme.dart';
 import 'download_progress.dart';
@@ -24,7 +26,7 @@ class _DownloadQueueSheet extends ConsumerWidget {
     final scheme = Theme.of(context).colorScheme;
     final progress = ref.watch(downloadProgressProvider);
     final tasks = progress.tasks.reversed.toList();
-    final canClear = progress.tasks.any((task) => !task.isBusy);
+    final canClear = progress.tasks.any((task) => task.stage == DownloadStage.done);
     return SafeArea(
       top: false,
       child: Padding(
@@ -54,6 +56,17 @@ class _DownloadQueueSheet extends ConsumerWidget {
                   ),
               ],
             ),
+            if (progress.isBusy || tasks.any((t) => t.stage == DownloadStage.paused))
+              Wrap(spacing: 8, children: [
+                if (progress.isBusy) TextButton.icon(
+                  onPressed: () => ref.read(downloadServiceProvider).pauseAll(),
+                  icon: const Icon(Icons.pause_rounded), label: const Text('全部暂停'),
+                ),
+                if (tasks.any((t) => t.stage == DownloadStage.paused)) TextButton.icon(
+                  onPressed: () => _control(context, () => ref.read(downloadServiceProvider).resumeAll()),
+                  icon: const Icon(Icons.play_arrow_rounded), label: const Text('全部继续'),
+                ),
+              ]),
             const SizedBox(height: 8),
             if (tasks.isEmpty)
               Padding(
@@ -128,13 +141,13 @@ class _DownloadQueueSheet extends ConsumerWidget {
   }
 }
 
-class _DownloadTaskTile extends StatelessWidget {
+class _DownloadTaskTile extends ConsumerWidget {
   const _DownloadTaskTile({required this.task});
 
   final DownloadTask task;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
     final tone = task.stage == DownloadStage.failed
         ? scheme.error
@@ -194,6 +207,19 @@ class _DownloadTaskTile extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
+              if (task.isBusy && task.stage != DownloadStage.finishing)
+                IconButton(
+                  tooltip: '暂停', icon: const Icon(Icons.pause_rounded),
+                  onPressed: () => ref.read(downloadServiceProvider).pauseTask(task.id),
+                ),
+              if (task.stage == DownloadStage.paused || task.stage == DownloadStage.failed)
+                IconButton(
+                  tooltip: task.stage == DownloadStage.failed ? '重试' : '继续',
+                  icon: Icon(task.stage == DownloadStage.failed ? Icons.refresh_rounded : Icons.play_arrow_rounded),
+                  onPressed: () => _control(context, () => task.stage == DownloadStage.failed
+                    ? ref.read(downloadServiceProvider).retryTask(task.id)
+                    : ref.read(downloadServiceProvider).resumeTask(task.id)),
+                ),
               Text(
                 _statusText(task),
                 style: TextStyle(
@@ -216,7 +242,7 @@ class _DownloadTaskTile extends StatelessWidget {
             curve: AppMotion.emphasized,
             builder: (context, animatedValue, _) {
               return ConfigurableLinearProgressIndicatorM3E(
-                value: task.fraction == null && task.stage != DownloadStage.done
+                value: task.fraction == null && task.isBusy
                     ? null
                     : animatedValue,
                 trackThickness: 2.6,
@@ -272,6 +298,8 @@ class _DownloadTaskTile extends StatelessWidget {
   String _statusText(DownloadTask task) {
     if (task.stage == DownloadStage.done) return '完成';
     if (task.stage == DownloadStage.failed) return '失败';
+    if (task.stage == DownloadStage.paused) return '已暂停';
+    if (task.stage == DownloadStage.queued) return '等待';
     final fraction = task.fraction;
     if (fraction == null) return describeStage(task.stage);
     return '${(fraction * 100).clamp(0, 100).round()}%';
@@ -331,5 +359,12 @@ class _AnimatedQueueItemState extends State<_AnimatedQueueItem>
       opacity: _opacity,
       child: SlideTransition(position: _offset, child: widget.child),
     );
+  }
+}
+
+Future<void> _control(BuildContext context, Future<void> Function() action) async {
+  try { await action(); }
+  catch (error) {
+    if (context.mounted) showAppToast(context, '$error', type: AppToastType.error);
   }
 }

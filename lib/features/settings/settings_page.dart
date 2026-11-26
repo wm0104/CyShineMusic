@@ -33,6 +33,7 @@ import 'widgets/custom_theme_sheet.dart';
 import 'widgets/discovery_source_order_sheet.dart';
 import 'widgets/player_interface_settings_sheet.dart';
 import 'widgets/settings_action.dart';
+import 'widgets/playlist_backup_actions.dart';
 import 'widgets/settings_menu.dart';
 import 'widgets/storage_folder_picker_sheet.dart';
 import 'widgets/theme_mode_row.dart';
@@ -148,6 +149,7 @@ class SettingsPage extends ConsumerWidget {
                               trailing: Symbols.chevron_right,
                               onTap: () => context.go('/settings/webdav'),
                             ),
+                            const PlaylistBackupActions(),
                             SettingsMenuAction(
                               key: const ValueKey('network-adapter-menu'),
                               menuId: 'network-adapter-menu',
