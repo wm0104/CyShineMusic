@@ -415,7 +415,11 @@ class MusicSourceController extends AsyncNotifier<MusicSourceState> {
       state = AsyncData(next);
       await _store.save(next);
     } catch (error) {
-      await _runtime.disposeRuntime();
+      try {
+        await _runtime.disposeRuntime();
+      } catch (_) {
+        // Initialization can leave the runtime unavailable for disposal.
+      }
       final failed = record.copyWith(lastError: error.toString());
       final next = current.copyWith(
         records: _replace(current.records, failed),

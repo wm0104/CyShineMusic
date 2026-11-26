@@ -53,6 +53,7 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({
       'use_built_in_source_file_picker': true,
+      'network_adapter_mode': 'io',
     });
     final prefs = await SharedPreferences.getInstance();
     directory = Directory.systemTemp.createTempSync('source-import-test-');
@@ -152,11 +153,12 @@ void main() {
           break;
         }
       }
-      expect(tester.widget<FilledButton>(button).onPressed, isNotNull);
       final state = container.read(musicSourceControllerProvider).requireValue;
       expect(state.records.single.name, '车机导入测试');
       expect(state.records.single.origin, source.path);
+      expect(state.records.single.lastError, isNull);
       expect(state.enabledIds, [state.records.single.id]);
+      expect(tester.widget<FilledButton>(button).onPressed, isNotNull);
       expect(loadedScripts, [_script]);
       expect(systemPickerCalls, 0);
       expect(container.read(shellToolbarVisibleProvider), isTrue);
