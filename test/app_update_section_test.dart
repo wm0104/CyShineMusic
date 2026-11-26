@@ -49,6 +49,7 @@ void main() {
         overrides: [
           sharedPreferencesProvider.overrideWithValue(prefs),
           appUpdateControllerProvider.overrideWith((ref) => controller),
+          _idleDownloadOverride(),
         ],
         child: MaterialApp.router(routerConfig: router),
       ),
@@ -87,6 +88,7 @@ void main() {
     await tester.pumpWidget(ProviderScope(overrides: [
       sharedPreferencesProvider.overrideWithValue(prefs),
       appUpdateControllerProvider.overrideWith((ref) => controller),
+      _idleDownloadOverride(),
     ], child: MaterialApp.router(routerConfig: router)));
     await tester.pumpAndSettle();
 
@@ -179,6 +181,15 @@ void main() {
     });
   }
 }
+
+Override _idleDownloadOverride() => ipaDownloadProvider.overrideWith((ref) {
+  final dio = Dio();
+  ref.onDispose(() => dio.close(force: true));
+  return IpaDownload(
+    dio: dio,
+    stagingDirectory: () async => throw StateError('Unexpected IPA download'),
+  );
+});
 
 AppRelease _release({int build = 9}) => AppRelease(
   version: Version(2, 0, 9), tagName: 'ios-v2.0.9', title: '2.0.9',
