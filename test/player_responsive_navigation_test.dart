@@ -19,6 +19,7 @@ import 'package:cy_shine_music/features/player/widgets/album_cluster.dart';
 import 'package:cy_shine_music/features/player/widgets/karaoke_line_text.dart';
 import 'package:cy_shine_music/features/player/widgets/karaoke_lyrics_view.dart';
 import 'package:cy_shine_music/features/player/widgets/lyrics_panel.dart';
+import 'package:cy_shine_music/features/player/widgets/spinning_cover_art.dart';
 import 'package:cy_shine_music/features/playlists/playlist_store.dart';
 import 'package:cy_shine_music/features/shell/shell_route_utils.dart';
 import 'package:cy_shine_music/router.dart';
@@ -81,6 +82,12 @@ void main() {
           ],
           remoteUrl: 'https://audio.example/remote-song.mp3',
         ),
+      );
+      expect(
+        tester
+            .widget<SpinningCoverArt>(find.byType(SpinningCoverArt))
+            .boxShadow,
+        isNotEmpty,
       );
       final container = ProviderScope.containerOf(
         tester.element(find.byType(PlayerPage)),
@@ -877,6 +884,166 @@ void main() {
     );
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'phone landscape keeps the cover and album above compact controls',
+    (tester) async {
+      const size = Size(932, 430);
+      tester.view.padding = const FakeViewPadding(
+        left: 59,
+        right: 59,
+        bottom: 21,
+      );
+      addTearDown(tester.view.resetPadding);
+      SharedPreferences.setMockInitialValues({
+        'square_album_cover_enabled': true,
+      });
+      final player = await _pumpPlayer(
+        tester,
+        size: size,
+        track: const PlayerTrack(
+          id: 'tx:landscape',
+          kind: PlayerTrackKind.remote,
+          title: '横屏歌曲',
+          artist: '横屏歌手',
+          album: '横屏专辑',
+          sourceLabel: 'QQ',
+          qualityLabel: 'FLAC',
+        ),
+        lyrics: _timedLyrics(4),
+      );
+
+      final pagerFinder = find.byKey(const ValueKey('player-compact-pager'));
+      final pager = tester.getRect(pagerFinder);
+      final cover = tester.getRect(
+        find.byKey(const ValueKey('player-cover-menu-button')),
+      );
+      final album = tester.getRect(find.text('横屏专辑'));
+      final mini = tester.getRect(
+        find.byKey(const ValueKey('player-mini-lyrics')),
+      );
+      expect(cover.width, closeTo(cover.height, 0.01));
+      expect(cover.top, greaterThanOrEqualTo(pager.top));
+      expect(size.width - cover.right, inInclusiveRange(59, 67));
+      void checkHeaderClearance(Rect artwork) {
+        for (final button in [
+          find.byKey(const ValueKey('player-sleep-timer-button')),
+          find.byTooltip('本地歌曲'),
+        ]) {
+          final bounds = tester.getRect(button);
+          expect(artwork.top - bounds.bottom, greaterThanOrEqualTo(12));
+          expect(artwork.overlaps(bounds), isFalse);
+        }
+      }
+
+      checkHeaderClearance(cover);
+      expect(cover, const Rect.fromLTWH(677, 69, 188, 188));
+      expect(
+        tester
+            .widget<SpinningCoverArt>(find.byType(SpinningCoverArt))
+            .boxShadow,
+        isNull,
+      );
+      expect(mini.right, lessThan(cover.left));
+      expect(album.center.dx, closeTo(cover.center.dx, 0.01));
+      expect(album.top - cover.bottom, closeTo(8, 0.01));
+      expect(album.bottom, lessThanOrEqualTo(pager.bottom));
+      expect(
+        pager.bottom,
+        lessThanOrEqualTo(tester.getTopLeft(find.byType(Slider)).dy),
+      );
+
+      final icons = [
+        Icons.format_list_numbered_rounded,
+        Icons.skip_previous_rounded,
+        Icons.play_arrow_rounded,
+        Icons.skip_next_rounded,
+        Icons.queue_music_rounded,
+      ];
+      final targets = <Rect>[];
+      for (final icon in icons) {
+        final glyph = find.byIcon(icon);
+        final button = find
+            .ancestor(of: glyph, matching: find.byType(InkWell))
+            .first;
+        final rect = tester.getRect(button);
+        expect(rect.width, greaterThanOrEqualTo(48));
+        expect(rect.height, greaterThanOrEqualTo(48));
+        targets.add(rect);
+      }
+      expect(targets.last.right - targets.first.left, lessThanOrEqualTo(312));
+      expect(targets.last.bottom, lessThanOrEqualTo(size.height - 21));
+      expect(
+        tester.widget<Icon>(find.byIcon(Icons.play_arrow_rounded)).size,
+        40,
+      );
+
+      await tester.drag(pagerFinder, const Offset(-700, 0));
+      await _pumpUi(tester);
+      final controller = tester.widget<PageView>(pagerFinder).controller!;
+      expect(controller.page, closeTo(1, 0.01));
+      controller.jumpToPage(0);
+
+      // Short landscape windows can have a cutout on either side.
+      const shortSize = Size(667, 375);
+      tester.view.physicalSize = shortSize;
+      for (final rightInset in [0.0, 32.0]) {
+        tester.view.padding = FakeViewPadding(
+          left: 32 - rightInset,
+          right: rightInset,
+          bottom: 16,
+        );
+        await _pumpUi(tester);
+        final shortCover = tester.getRect(
+          find.byKey(const ValueKey('player-cover-menu-button')),
+        );
+        final shortCaption = tester.getRect(find.text('横屏专辑'));
+        final shortMini = tester.getRect(
+          find.byKey(const ValueKey('player-mini-lyrics')),
+        );
+        expect(
+          shortSize.width - rightInset - shortCover.right,
+          closeTo(8, 0.01),
+        );
+        checkHeaderClearance(shortCover);
+        expect(shortCover.width, closeTo(shortCover.height, 0.01));
+        expect(shortMini.right, lessThan(shortCover.left));
+        expect(shortCaption.center.dx, closeTo(shortCover.center.dx, 0.01));
+        expect(shortCaption.top - shortCover.bottom, closeTo(8, 0.01));
+        expect(
+          shortCaption.bottom,
+          lessThanOrEqualTo(tester.getRect(pagerFinder).bottom),
+        );
+      }
+      const longAlbum = '这张专辑的名称很长，横屏时仍应位于右侧安全区内并在封面正下方居中';
+      player.setStateForTest(
+        player.state.copyWith(
+          track: const PlayerTrack(
+            id: 'tx:long-album',
+            kind: PlayerTrackKind.remote,
+            title: '横屏歌曲',
+            artist: '横屏歌手',
+            album: longAlbum,
+            sourceLabel: 'QQ',
+            qualityLabel: 'FLAC',
+          ),
+        ),
+      );
+      await _pumpUi(tester);
+      final longTitle = tester.getRect(find.text(longAlbum));
+      final longCover = tester.getRect(
+        find.byKey(const ValueKey('player-cover-menu-button')),
+      );
+      expect(longTitle.right, lessThanOrEqualTo(shortSize.width - 32));
+      expect(longTitle.center.dx, closeTo(longCover.center.dx, 0.01));
+      expect(longTitle.top - longCover.bottom, closeTo(8, 0.01));
+      expect(
+        tester.widget<Text>(find.text(longAlbum)).overflow,
+        TextOverflow.ellipsis,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('wide player renders album and lyrics together without pager', (
     tester,

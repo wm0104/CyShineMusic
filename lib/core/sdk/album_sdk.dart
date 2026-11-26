@@ -100,8 +100,9 @@ class AlbumSdk {
       final rows = _rows(album['songs']);
       final total = _count(album['size']);
       if (total == null || rows.length != total) throw const FormatException('网易云专辑曲目不完整');
-      final tracks = [for (final row in rows) _track(PlaylistSdk.parseWySong(row))];
       final info = _album(album, source);
+      final tracks = [for (final row in rows)
+        _track(PlaylistSdk.parseWySong(_withWyAlbum(row, info)))];
       return _detail(info, tracks);
     }
 
@@ -159,8 +160,30 @@ class AlbumSdk {
       rows.sort((a, b) => _count(a['track'])!.compareTo(_count(b['track'])!));
     }
     final tracks = [for (final row in rows)
-      _track(source == MusicSource.tx ? LeaderboardSdk.parseTxTrack(row) : KwPlaylistAdapter.parseTrack({...row, 'id': row['rid']}))];
+      _track(source == MusicSource.tx ? LeaderboardSdk.parseTxTrack(row) : KwPlaylistAdapter.parseTrack({
+        ...row, 'id': row['rid'], 'album': row['album'] ?? info?.name,
+      }))];
     return _detail(info ?? AlbumInfo(id: albumId, source: source, name: albumId, artistName: '', songCount: total), tracks);
+  }
+
+  // Some WY album responses carry the album metadata only on the parent.
+  static Map _withWyAlbum(Map row, AlbumInfo album) {
+    final nested = row['al'] ?? row['album'];
+    final declared = nested is Map ? nested : null;
+    final id = declared?['id']?.toString();
+    final name = declared?['name']?.toString().trim();
+    if (id != null && id != album.id) return row;
+    if (id == null && name != null && name.isNotEmpty && name != album.name) {
+      return row;
+    }
+    return {
+      ...row,
+      'al': {
+        ...?declared,
+        'id': declared?['id'] ?? album.id,
+        'name': name == null || name.isEmpty ? album.name : name,
+      },
+    };
   }
 
   static AlbumPage _page(List<Map> rows, MusicSource source, int offset, int limit, {int? total, bool? more}) {

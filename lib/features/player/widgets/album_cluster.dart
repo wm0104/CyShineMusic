@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/storage/settings_store.dart';
 import '../../shell/player_pull_scope.dart';
 import '../../shell/player_transition.dart';
+import '../player_album_navigation.dart';
 import '../player_controller.dart';
 import 'mini_lyrics_panel.dart';
 import 'player_palette.dart';
@@ -18,9 +19,15 @@ const double _compactAlbumContentLift = 36;
 const double _miniLyricsBottomInset = 20;
 
 class AlbumPage extends ConsumerWidget {
-  const AlbumPage({super.key, this.wide = false, this.onOpenLyrics});
+  const AlbumPage({
+    super.key,
+    this.wide = false,
+    this.phoneLandscape = false,
+    this.onOpenLyrics,
+  });
 
   final bool wide;
+  final bool phoneLandscape;
   final VoidCallback? onOpenLyrics;
 
   @override
@@ -46,8 +53,72 @@ class AlbumPage extends ConsumerWidget {
         miniLyricsEnabled &&
         player.miniLyricsReady;
 
+    final metadataKey = track == null
+        ? 'album-metadata:loading'
+        : 'album-metadata:${track.id}:${track.album}';
+    // Move the landscape text up inside its existing tap target.
+    final captionPadding = phoneLandscape
+        ? const EdgeInsets.only(top: 8, bottom: 14)
+        : EdgeInsets.only(top: wide ? 18 : 22);
+    final metadata = TrackChangeSwitcher(
+      transitionKey: metadataKey,
+      incomingOffset: const Offset(0.12, 0),
+      child: track == null
+          ? SizedBox(height: captionPadding.vertical + 24)
+          : _AlbumMetadata(track: track, padding: captionPadding),
+    );
+
     return LayoutBuilder(
       builder: (context, constraints) {
+        Widget artwork(double size) => _AlbumArtwork(
+          track: track,
+          size: size,
+          wide: wide,
+          showShadow: !phoneLandscape,
+        );
+
+        if (phoneLandscape) {
+          // Size the square in the space left after the caption is laid out,
+          // including text scaling and the phone's landscape safe insets.
+          return Stack(
+            children: [
+              Positioned(
+                right: 0,
+                width: math.min(
+                  constraints.maxHeight,
+                  constraints.maxWidth * 0.60,
+                ),
+                top: 4,
+                bottom: 2,
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: AspectRatio(
+                          aspectRatio: 1,
+                          child: LayoutBuilder(
+                            builder: (_, bounds) => artwork(bounds.maxWidth),
+                          ),
+                        ),
+                      ),
+                      metadata,
+                    ],
+                  ),
+                ),
+              ),
+              if (showMiniLyrics)
+                Positioned(
+                  left: 0,
+                  bottom: 12,
+                  width: math.min(320, constraints.maxWidth * 0.35),
+                  child: MiniLyricsPanel(onOpenLyrics: onOpenLyrics!),
+                ),
+            ],
+          );
+        }
+
         final coverScale = square ? 1.12 : 1.0;
         final maxCoverSize = (wide ? 400.0 : 360.0) * coverScale;
         final coverSize = math.min(
@@ -61,13 +132,6 @@ class AlbumPage extends ConsumerWidget {
         final resolvedCoverSize = coverSize
             .clamp(160.0, maxCoverSize)
             .toDouble();
-        final artworkKey = track == null
-            ? 'album-artwork:loading'
-            : 'album-artwork:${track.id}:${track.coverUrl ?? ''}:'
-                  '${identityHashCode(track.coverBytes)}';
-        final metadataKey = track == null
-            ? 'album-metadata:loading'
-            : 'album-metadata:${track.id}:${track.album}';
         return Stack(
           fit: StackFit.expand,
           children: [
@@ -82,79 +146,7 @@ class AlbumPage extends ConsumerWidget {
                   padding: EdgeInsets.symmetric(vertical: wide ? 8 : 12),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox.square(
-                        dimension: resolvedCoverSize,
-                        // The tap recognizer coexists with the parent's vertical
-                        // pull recognizer, so dragging still dismisses the page.
-                        child: PlayerPullHandle(
-                          child: Semantics(
-                            button: track != null,
-                            label: '打开当前歌曲菜单',
-                            child: GestureDetector(
-                              key: const ValueKey('player-cover-menu-button'),
-                              behavior: HitTestBehavior.opaque,
-                              onTap: track == null
-                                  ? null
-                                  : () => unawaited(
-                                      showPlayerCoverActionsSheet(
-                                        context,
-                                        ref,
-                                        track: track,
-                                        wide: wide,
-                                      ),
-                                    ),
-                              child: PlayerCoverAnchor(
-                                expanded: true,
-                                child: TrackChangeSwitcher(
-                                  transitionKey: artworkKey,
-                                  incomingOffset: Offset.zero,
-                                  scaleBegin: 0.88,
-                                  expand: true,
-                                  child: track == null
-                                      ? _LoadingAlbumArtwork(
-                                          size: resolvedCoverSize,
-                                        )
-                                      : SpinningCoverArt(
-                                          track: track,
-                                          size: resolvedCoverSize,
-                                          placeholder: ColoredBox(
-                                            color: Colors.white.withValues(
-                                              alpha: 0.34,
-                                            ),
-                                            child: Center(
-                                              child: Icon(
-                                                Icons.album_rounded,
-                                                size: 56,
-                                                color: playerMuted(context),
-                                              ),
-                                            ),
-                                          ),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: Colors.black.withValues(
-                                                alpha: 0.16,
-                                              ),
-                                              blurRadius: 28,
-                                              offset: const Offset(0, 18),
-                                            ),
-                                          ],
-                                        ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      SizedBox(height: wide ? 18 : 22),
-                      TrackChangeSwitcher(
-                        transitionKey: metadataKey,
-                        incomingOffset: const Offset(0.12, 0),
-                        child: track == null
-                            ? const SizedBox(height: 24)
-                            : _AlbumMetadata(track: track),
-                      ),
-                    ],
+                    children: [artwork(resolvedCoverSize), metadata],
                   ),
                 ),
               ),
@@ -169,6 +161,88 @@ class AlbumPage extends ConsumerWidget {
           ],
         );
       },
+    );
+  }
+}
+
+class _AlbumArtwork extends ConsumerWidget {
+  const _AlbumArtwork({
+    required this.track,
+    required this.size,
+    required this.wide,
+    required this.showShadow,
+  });
+
+  final PlayerTrack? track;
+  final double size;
+  final bool wide;
+  final bool showShadow;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final track = this.track;
+    final artworkKey = track == null
+        ? 'album-artwork:loading'
+        : 'album-artwork:${track.id}:${track.coverUrl ?? ''}:'
+              '${identityHashCode(track.coverBytes)}';
+    return SizedBox.square(
+      dimension: size,
+      // The tap recognizer coexists with the parent's vertical
+      // pull recognizer, so dragging still dismisses the page.
+      child: PlayerPullHandle(
+        child: Semantics(
+          button: track != null,
+          label: '打开当前歌曲菜单',
+          child: GestureDetector(
+            key: const ValueKey('player-cover-menu-button'),
+            behavior: HitTestBehavior.opaque,
+            onTap: track == null
+                ? null
+                : () => unawaited(
+                    showPlayerCoverActionsSheet(
+                      context,
+                      ref,
+                      track: track,
+                      wide: wide,
+                    ),
+                  ),
+            child: PlayerCoverAnchor(
+              expanded: true,
+              child: TrackChangeSwitcher(
+                transitionKey: artworkKey,
+                incomingOffset: Offset.zero,
+                scaleBegin: 0.88,
+                expand: true,
+                child: track == null
+                    ? _LoadingAlbumArtwork(size: size)
+                    : SpinningCoverArt(
+                        track: track,
+                        size: size,
+                        placeholder: ColoredBox(
+                          color: Colors.white.withValues(alpha: 0.34),
+                          child: Center(
+                            child: Icon(
+                              Icons.album_rounded,
+                              size: 56,
+                              color: playerMuted(context),
+                            ),
+                          ),
+                        ),
+                        boxShadow: showShadow
+                            ? [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.16),
+                                  blurRadius: 28,
+                                  offset: const Offset(0, 18),
+                                ),
+                              ]
+                            : null,
+                      ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -202,30 +276,50 @@ class _LoadingAlbumArtwork extends ConsumerWidget {
   }
 }
 
-class _AlbumMetadata extends StatelessWidget {
-  const _AlbumMetadata({required this.track});
+class _AlbumMetadata extends ConsumerWidget {
+  const _AlbumMetadata({required this.track, required this.padding});
 
   final PlayerTrack track;
+  final EdgeInsets padding;
 
   @override
-  Widget build(BuildContext context) {
-    final album = track.album.trim().isEmpty ? '未知专辑' : track.album.trim();
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          album,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: playerMuted(context).withValues(alpha: 0.78),
-            fontSize: 15,
-            fontWeight: FontWeight.w500,
-            height: 1.15,
-          ),
+  Widget build(BuildContext context, WidgetRef ref) {
+    final text = track.album.trim().isEmpty ? '未知专辑' : track.album.trim();
+    final album = resolvePlayerAlbum(
+      track,
+      ref.read(playerControllerProvider.notifier).currentMusic,
+    );
+    final label = Padding(
+      padding: padding,
+      child: Text(
+        text,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: playerMuted(context).withValues(alpha: 0.78),
+          fontSize: 15,
+          fontWeight: FontWeight.w500,
+          height: 1.15,
         ),
-      ],
+      ),
+    );
+    if (album == null) return label;
+    return Semantics(
+      button: true,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          key: const ValueKey('player-open-album'),
+          borderRadius: BorderRadius.circular(8),
+          onTap: () {
+            if (identical(ref.read(playerControllerProvider).track, track)) {
+              openPlayerAlbum(context, album);
+            }
+          },
+          child: label,
+        ),
+      ),
     );
   }
 }

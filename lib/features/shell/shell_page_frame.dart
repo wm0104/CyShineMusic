@@ -37,7 +37,7 @@ class ShellPageFrame extends StatelessWidget {
         : capsulePadding;
     final hidesHeader =
         isDiscoveryLocation(location) ||
-        isPlaybackArtistLocation(location) ||
+        isPlaybackDetailLocation(location) ||
         isImmersivePlaylistDetailLocation(location);
     final content = Padding(
       padding: EdgeInsets.only(bottom: bottomPadding),

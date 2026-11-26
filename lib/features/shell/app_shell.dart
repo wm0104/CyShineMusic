@@ -178,7 +178,7 @@ class _AppShellState extends ConsumerState<AppShell>
             _animateToolbarTo(1);
           }
         } else if (_settleTarget != 0 &&
-            !isPlaybackArtistLocation(widget.location)) {
+            !isPlaybackDetailLocation(widget.location)) {
           _playerReturnLocation = normalizedPlayerReturnLocation(
             widget.location,
             _playerReturnLocation,
@@ -274,7 +274,7 @@ class _AppShellState extends ConsumerState<AppShell>
     // The transparent route keeps the origin alive. Activate the controls
     // immediately instead of waiting through the spring's subpixel tail.
     if (widget.location != '/player') {
-      if (!isPlaybackArtistLocation(widget.location)) {
+      if (!isPlaybackDetailLocation(widget.location)) {
         _playerReturnLocation = widget.routeLocation;
       }
       openPlayerRoute(
@@ -292,13 +292,15 @@ class _AppShellState extends ConsumerState<AppShell>
     _settleTarget = null;
   }
 
-  Future<void> _dismissPlayer([String? target]) => _settleClosed(
+  Future<void> _dismissPlayer([String? target, Object? extra]) => _settleClosed(
     destination: target,
+    extra: extra,
     velocityDy: -_pull.velocity * _pullExtent,
   );
 
   Future<void> _settleClosed({
     String? destination,
+    Object? extra,
     double velocityDy = 0,
   }) async {
     final generation = ++_pullGeneration;
@@ -309,9 +311,9 @@ class _AppShellState extends ConsumerState<AppShell>
     });
     _transition.capture();
     if (widget.location == '/player') {
-      if (destination != null && isPlaybackArtistLocation(destination)) {
-        // Artist pages go above the player and leave the source tab intact.
-        unawaited(context.push<void>(destination));
+      if (destination != null && isPlaybackDetailLocation(destination)) {
+        // Keep the player and its source tab underneath the detail page.
+        unawaited(context.push<void>(destination, extra: extra));
       } else if (destination == null && GoRouter.of(context).canPop()) {
         // Release the modal barrier while the shell runs the visual tail.
         context.pop();
@@ -351,7 +353,7 @@ class _AppShellState extends ConsumerState<AppShell>
   void _rememberTabLocation() {
     final location = widget.location;
     final routeLocation = widget.routeLocation;
-    if (location == '/player' || isPlaybackArtistLocation(location)) return;
+    if (location == '/player' || isPlaybackDetailLocation(location)) return;
     final index = toolbarIndexFor(location);
     if (index == 2) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -428,7 +430,7 @@ class _AppShellState extends ConsumerState<AppShell>
       context.go('/settings');
     } else if (context.canPop()) {
       context.pop();
-    } else if (isPlaybackArtistLocation(widget.location)) {
+    } else if (isPlaybackDetailLocation(widget.location)) {
       context.go('/songs');
     } else if (isDiscoveryLocation(widget.location) && widget.location != '/') {
       context.go('/');
@@ -589,7 +591,7 @@ class _AppShellState extends ConsumerState<AppShell>
     final contentLocation = _contentLocation;
     // The three-tab bars keep the underlying tab selected because they have
     // no player destination of their own.
-    final tabLocation = isPlaybackArtistLocation(widget.location)
+    final tabLocation = isPlaybackDetailLocation(widget.location)
         ? Uri.parse(_playerReturnLocation).path
         : contentLocation;
     final contentRoute = widget.location == '/player'

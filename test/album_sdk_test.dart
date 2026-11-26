@@ -32,9 +32,24 @@ void main() {
       loadJson: (url, {headers}) async => {'code': 200, 'album': {'id': 7, 'name': 'Full', 'size': 53, 'songs': rows}});
     expect(album.tracks.length, 53);
     expect(album.tracks.last.meta.songId, 53);
+    expect(album.tracks.last.meta.albumId, '7');
+    expect(album.tracks.last.albumName, 'Full');
     expect(album.hasMoreTracks, isFalse);
     await expectLater(AlbumSdk.albumDetail(albumId: '7', source: MusicSource.wy,
       loadJson: (url, {headers}) async => {'code': 200, 'album': {'id': 7, 'size': 54, 'songs': rows}}), throwsFormatException);
+  });
+
+  test('WY keeps a track’s own album metadata on a compilation', () async {
+    final album = await AlbumSdk.albumDetail(albumId: '7', source: MusicSource.wy,
+      loadJson: (url, {headers}) async => {
+        'code': 200, 'album': {'id': 7, 'name': 'Compilation', 'size': 2, 'songs': [
+          {'id': 1, 'name': 'Song A', 'album': {'name': 'Original'}},
+          {'id': 2, 'name': 'Song B', 'al': {'name': 'Original', 'id': 12}},
+        ]},
+      });
+    expect(album.tracks.first.albumName, 'Original');
+    expect(album.tracks.first.meta.albumId, isNull);
+    expect(album.tracks.last.meta.albumId, 12);
   });
 
   test('QQ retains MID and loads all pages in album order', () async {
@@ -72,6 +87,8 @@ void main() {
     expect(pages, ['1', '2']);
     expect(album.tracks.length, 102);
     expect(album.tracks.first.meta.songId, 102);
+    expect(album.tracks.first.albumName, 'A');
+    expect(album.tracks.first.meta.albumId, 1293);
     expect(album.tracks.last.meta.songId, 1);
     expect(album.hasMoreTracks, isFalse);
   });

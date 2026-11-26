@@ -298,15 +298,18 @@ class _NowPlayingBodyState extends ConsumerState<_NowPlayingBody> {
       );
     }
 
+    final size = MediaQuery.sizeOf(context);
+    final phoneLandscape = size.width > size.height && size.shortestSide < 600;
+
     // Keep the lyrics' horizontal inset inside each row so their blur halos
     // have room before reaching the pager clips. Text starts at the same
     // position as the progress track, including the slider's own inset.
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
+      padding: EdgeInsets.fromLTRB(
         playerCompactOuterInset,
         4,
         playerCompactOuterInset,
-        14,
+        phoneLandscape ? 6 : 14,
       ),
       child: Column(
         children: [
@@ -337,10 +340,14 @@ class _NowPlayingBodyState extends ConsumerState<_NowPlayingBody> {
                         key: const ValueKey('player-compact-album-clip'),
                         clipBehavior: Clip.hardEdge,
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: playerContentInset,
+                          padding: EdgeInsets.only(
+                            left: playerContentInset,
+                            right: phoneLandscape ? 0 : playerContentInset,
                           ),
-                          child: AlbumPage(onOpenLyrics: _openLyricsPage),
+                          child: AlbumPage(
+                            phoneLandscape: phoneLandscape,
+                            onOpenLyrics: _openLyricsPage,
+                          ),
                         ),
                       ),
                       ClipRect(
@@ -358,9 +365,9 @@ class _NowPlayingBodyState extends ConsumerState<_NowPlayingBody> {
               ),
             ),
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: playerContentInset),
-            child: TransportBar(),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: playerContentInset),
+            child: TransportBar(compactControls: phoneLandscape),
           ),
         ],
       ),

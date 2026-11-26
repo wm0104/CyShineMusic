@@ -300,9 +300,14 @@ GoRouter createAppRouter({
               context,
               key: state.pageKey,
               extra: state.extra,
-              skipExit: _leavesPlaybackArtistStack,
+              skipExit: _leavesPlaybackDetailStack,
               child: _shellPageContent(state, child: const PlayerArtistsPage()),
             ),
+          ),
+          GoRoute(
+            path: '/player/albums/:source/:id',
+            pageBuilder: (context, state) =>
+                _albumDetailPage(context, state, fromPlayback: true),
           ),
           GoRoute(
             path: '/player/artists/:artistSource/:artistId/albums/:source/:id',
@@ -328,7 +333,7 @@ Page<void> _albumDetailPage(
     context,
     key: state.pageKey,
     extra: state.extra,
-    skipExit: fromPlayback ? _leavesPlaybackArtistStack : _leavesDiscovery,
+    skipExit: fromPlayback ? _leavesPlaybackDetailStack : _leavesDiscovery,
     child: _shellPageContent(state, child: OnlinePlaylistDetailPage(
       source: MusicSource.fromCode(state.pathParameters['source'] ?? ''),
       playlistId: state.pathParameters['id'] ?? '',
@@ -349,7 +354,7 @@ Page<void> _artistDetailPage(
     context,
     key: state.pageKey,
     extra: state.extra,
-    skipExit: fromPlayback ? _leavesPlaybackArtistStack : _leavesDiscovery,
+    skipExit: fromPlayback ? _leavesPlaybackDetailStack : _leavesDiscovery,
     child: _shellPageContent(
       state,
       child: OnlinePlaylistDetailPage(
@@ -464,9 +469,9 @@ bool _leavesDiscovery(BuildContext context) {
   return !isDiscoveryLocation(location.uri.path);
 }
 
-bool _leavesPlaybackArtistStack(BuildContext context) {
+bool _leavesPlaybackDetailStack(BuildContext context) {
   final location = GoRouter.of(context).routeInformationProvider.value.uri.path;
-  return location != '/player' && !isPlaybackArtistLocation(location);
+  return location != '/player' && !isPlaybackDetailLocation(location);
 }
 
 /// 路由 extra 既可能是裸的业务对象，也可能包在 [ContainerTransformExtra] 里。
