@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:cy_shine_music/core/app_info.dart';
 import 'package:cy_shine_music/core/services/app_update_service.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
+import 'package:cy_shine_music/features/settings/widgets/settings_action.dart';
 import 'package:cy_shine_music/features/update/app_update_controller.dart';
 import 'package:cy_shine_music/features/update/app_update_section.dart';
 import 'package:cy_shine_music/features/update/ipa_download.dart';
@@ -19,6 +20,54 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('cy_shine_music/audio_intent');
+
+  testWidgets('inline update results leave room for following settings', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 300));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final controller = AppUpdateController(
+      service: _Service(_release()),
+      preferences: prefs,
+      installedVersion: () async => '2.0.14',
+    );
+    final router = GoRouter(initialLocation: '/settings', routes: [
+      GoRoute(path: '/settings', builder: (_, _) => const Scaffold(
+        body: SingleChildScrollView(
+          child: SettingsCard(
+            title: '关于',
+            children: [AppUpdateSection(), Text('备份与恢复'), Text('调试模式')],
+          ),
+        ),
+      )),
+    ]);
+    addTearDown(router.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          appUpdateControllerProvider.overrideWith((ref) => controller),
+        ],
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final backup = find.text('备份与恢复');
+    final before = tester.getTopLeft(backup).dy;
+    await tester.tap(find.byKey(const ValueKey('check-update-setting')));
+    await tester.pumpAndSettle();
+    expect(find.text('已是最新版（2.0.14）'), findsOneWidget);
+    expect(tester.getTopLeft(backup).dy, greaterThan(before));
+    expect(tester.getTopLeft(backup).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(find.text('重新检查')).dy));
+    await tester.ensureVisible(find.text('调试模式'));
+    await tester.pumpAndSettle();
+    expect(find.text('调试模式').hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   for (final saved in [true, false]) {
     testWidgets('IPA export result $saved reflects the system picker result', (tester) async {
       SharedPreferences.setMockInitialValues({});

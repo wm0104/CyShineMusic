@@ -46,7 +46,6 @@ class SettingsPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(settingsProvider);
     final sourceState = ref.watch(musicSourceControllerProvider);
-    final webDavState = ref.watch(webDavSyncControllerProvider);
     final dynamicColor = ref.watch(dynamicColorStatusProvider);
     final equalizer = ref.watch(equalizerProvider);
     final versionLabel = ref.watch(appVersionLabelProvider);
@@ -141,15 +140,6 @@ class SettingsPage extends ConsumerWidget {
                                   .read(settingsProvider.notifier)
                                   .setUseBuiltInSourceFilePicker(value),
                             ),
-                            SettingsAction(
-                              key: const ValueKey('webdav-sync-setting'),
-                              icon: Icons.cloud_sync_outlined,
-                              title: 'WebDAV 同步',
-                              subtitle: _webDavSubtitle(webDavState),
-                              trailing: Symbols.chevron_right,
-                              onTap: () => context.go('/settings/webdav'),
-                            ),
-                            const PlaylistBackupActions(),
                             SettingsMenuAction(
                               key: const ValueKey('network-adapter-menu'),
                               menuId: 'network-adapter-menu',
@@ -629,25 +619,27 @@ class SettingsPage extends ConsumerWidget {
                               const AppUpdateSection()
                             else
                               SettingsAction(
-                              key: const ValueKey('check-update-setting'),
-                              icon: Icons.system_update_alt_rounded,
-                              title: '检查更新',
-                              subtitle: '当前版本：$versionLabel',
-                              trailing: Symbols.chevron_right,
-                              onTap: () => unawaited(
-                                checkForAppUpdate(
-                                  context,
-                                  ref,
-                                  showFeedback: true,
+                                key: const ValueKey('check-update-setting'),
+                                icon: Icons.system_update_alt_rounded,
+                                title: '检查更新',
+                                subtitle: '当前版本：$versionLabel',
+                                trailing: Symbols.chevron_right,
+                                onTap: () => unawaited(
+                                  checkForAppUpdate(
+                                    context,
+                                    ref,
+                                    showFeedback: true,
+                                  ),
                                 ),
                               ),
+                            SettingsAction(
+                              key: const ValueKey('backup-and-restore-setting'),
+                              icon: Icons.cloud_upload_outlined,
+                              title: '备份与恢复',
+                              subtitle: '本地备份、云端恢复与 WebDAV',
+                              trailing: Symbols.chevron_right,
+                              onTap: () => _openBackupSettings(context, ref),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 30),
-                        SettingsCard(
-                          title: '调试',
-                          children: [
                             DebugModeRow(
                               value: settings.debugMode,
                               onChanged: (value) => ref
@@ -1071,6 +1063,59 @@ class SettingsPage extends ConsumerWidget {
     } finally {
       if (toolbar.mounted) toolbar.state = wasToolbarVisible;
     }
+  }
+
+  Future<void> _openBackupSettings(BuildContext context, WidgetRef ref) async {
+    final toolbar = ref.read(shellToolbarVisibleProvider.notifier);
+    final wasToolbarVisible = toolbar.state;
+    toolbar.state = false;
+    bool? openWebDav;
+    try {
+      openWebDav = await showModalBottomSheet<bool>(
+        context: context,
+        useRootNavigator: true,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (sheetContext) => SafeArea(
+          top: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.85,
+            ),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(24, 4, 24, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '备份与恢复',
+                    style: Theme.of(sheetContext).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 16),
+                  Consumer(
+                    builder: (context, ref, _) => SettingsAction(
+                      key: const ValueKey('webdav-sync-setting'),
+                      icon: Icons.cloud_sync_outlined,
+                      title: 'WebDAV 同步',
+                      subtitle: _webDavSubtitle(
+                        ref.watch(webDavSyncControllerProvider),
+                      ),
+                      trailing: Symbols.chevron_right,
+                      onTap: () => Navigator.of(sheetContext).pop(true),
+                    ),
+                  ),
+                  const PlaylistBackupActions(),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    } finally {
+      if (toolbar.mounted) toolbar.state = wasToolbarVisible;
+    }
+    if (openWebDav == true && context.mounted) context.go('/settings/webdav');
   }
 
   Future<void> _customizeTheme(BuildContext context, WidgetRef ref) async {

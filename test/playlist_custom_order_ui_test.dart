@@ -67,6 +67,7 @@ void main() {
     _expectOrder(tester, ['Bravo', 'Charlie', 'Alpha']);
     await tester.tap(find.byKey(const ValueKey('playlist-sort-button')));
     await tester.pumpAndSettle();
+    expect(find.text('自定义排序'), findsNothing);
     await tester.tap(find.text('标题'));
     await tester.pumpAndSettle();
     await tester.tapAt(const Offset(5, 5));

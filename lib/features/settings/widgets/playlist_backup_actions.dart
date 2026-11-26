@@ -58,9 +58,10 @@ class _PlaylistBackupActionsState extends ConsumerState<PlaylistBackupActions> {
       subtitle: _busy ? '正在处理备份' : '选择备份，合并补入缺少的内容',
       onTap: () => _run((service) async {
         final names = await service.listCloud();
-        if (!mounted) return null;
+        if (!context.mounted) return null;
         final selected = await showModalBottomSheet<String>(
-          context: context, showDragHandle: true, isScrollControlled: true,
+          context: context, useRootNavigator: true,
+          showDragHandle: true, isScrollControlled: true,
           builder: (sheetContext) => SafeArea(
             top: false,
             child: ConstrainedBox(
@@ -68,6 +69,7 @@ class _PlaylistBackupActionsState extends ConsumerState<PlaylistBackupActions> {
               child: names.isEmpty
                 ? const Padding(padding: EdgeInsets.all(28), child: Text('暂无云端备份'))
                 : ListView.builder(
+                    key: const ValueKey('cloud-backup-list'),
                     shrinkWrap: true, itemCount: names.length,
                     itemBuilder: (_, index) => ListTile(
                       leading: const Icon(Icons.description_outlined),
@@ -78,7 +80,7 @@ class _PlaylistBackupActionsState extends ConsumerState<PlaylistBackupActions> {
             ),
           ),
         );
-        if (selected == null || !mounted) return null;
+        if (selected == null || !context.mounted) return null;
         final added = await service.restoreCloud(selected);
         return '备份已恢复，补入 $added 项';
       }),

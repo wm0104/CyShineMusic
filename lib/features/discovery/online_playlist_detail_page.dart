@@ -6,6 +6,7 @@ import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/models/album_info.dart';
+import '../../core/models/artist_album_group.dart';
 import '../../core/services/download_service.dart';
 import '../../core/ui/expressive_download_button.dart';
 import '../../core/ui/tight_track_actions.dart';
@@ -691,15 +692,17 @@ class _OnlinePlaylistDetailPageState
     }
     final loadedPage = last;
     final loadState = pending;
+    final groups = groupArtistAlbums(albums);
     return [
       if (albums.isNotEmpty) SliverPadding(
         padding: const EdgeInsets.symmetric(horizontal: 16),
         sliver: SliverList.separated(
-          itemCount: albums.length,
+          itemCount: groups.length,
           separatorBuilder: (_, _) => _trackListDivider(context, Theme.of(context).colorScheme),
           itemBuilder: (context, index) => Center(child: ConstrainedBox(
             constraints: CarDisplayLayout.contentConstraints(context, maxWidth: 900),
-            child: AlbumResultTile(album: albums[index], fromPlayback: widget.fromPlayback),
+            child: AlbumResultTile(album: groups[index].representative,
+              variants: groups[index].variants, fromPlayback: widget.fromPlayback),
           )),
         ),
       ),

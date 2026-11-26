@@ -726,7 +726,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         (toolbar.mounted ? toolbar.state : true);
     FocusManager.instance.primaryFocus?.unfocus();
     if (toolbar.mounted) toolbar.state = false;
-    var customRequested = false;
     try {
       await showSongsSortSheet(
         context: context,
@@ -734,20 +733,12 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
         initialAscending: _ascending,
         onChanged: _setSort,
         customSelected: _customSort ?? false,
-        onCustomOrder: _searchMode ? null : () => customRequested = true,
       );
     } finally {
-      if (toolbar.mounted && !_batchMode && (customRequested || !_searchMode)) {
+      if (toolbar.mounted && !_batchMode && !_searchMode) {
         toolbar.state = wasToolbarVisible;
       }
     }
-    if (customRequested && mounted) _beginCustomOrder();
-  }
-
-  void _beginCustomOrder() {
-    // Search reorder scope is deliberately unconfirmed; never clear the query.
-    if (_searchMode || _batchMode || _orderSaving) return;
-    setState(() => _customSort = true);
   }
 
   Future<void> _reorderDraft(int oldIndex, int newIndex) async {

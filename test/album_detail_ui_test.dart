@@ -109,6 +109,62 @@ void main() {
     expect(find.text('第二张专辑'), findsOneWidget);
   });
 
+  testWidgets('artist album versions share one row and request only the chosen ID', (tester) async {
+    final h = await _pump(tester, '/discover/artists/wy/person', catalog: 'versions');
+    await _albums(tester);
+    expect(find.text('发行专辑'), findsOneWidget);
+    expect(find.textContaining('2 个版本'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('album-wy-record')));
+    await _frames(tester);
+    expect(h.api.albumRequests, isEmpty);
+    expect(find.text('版本 1 · 2025-09-05'), findsOneWidget);
+    expect(find.text('版本 2 · 2025-09-05'), findsOneWidget);
+    expect(find.byKey(const ValueKey('album-versions-wy-record-barrier')), findsOneWidget);
+    await tester.tapAt(const Offset(10, 10));
+    await _frames(tester);
+    expect(h.location, '/discover/artists/wy/person');
+    expect(h.api.albumRequests, isEmpty);
+    await tester.tap(find.byKey(const ValueKey('album-wy-record')));
+    await _frames(tester);
+    await tester.tap(find.text('版本 2 · 2025-09-05'));
+    await _frames(tester);
+    expect(h.location, '/discover/albums/wy/record-version');
+    expect(h.api.albumRequests, ['wy:record-version']);
+    expect(h.player.played, isEmpty);
+  });
+
+  testWidgets('later album pages add versions while preserving different counts', (tester) async {
+    final h = await _pump(tester, '/discover/artists/wy/person', catalog: 'paged-versions');
+    await _albums(tester);
+    expect(find.textContaining('个版本'), findsNothing);
+    await tester.ensureVisible(find.text('加载更多专辑'));
+    await tester.tap(find.text('加载更多专辑'));
+    await _frames(tester);
+    expect(h.api.catalogRequests, ['wy:person:0', 'wy:person:30']);
+    expect(find.text('发行专辑'), findsNWidgets(2));
+    expect(find.textContaining('2 个版本'), findsOneWidget);
+    expect(find.byKey(const ValueKey('album-wy-record-version')), findsNothing);
+    expect(find.byKey(const ValueKey('album-wy-record-short')), findsOneWidget);
+    expect(h.api.albumRequests, isEmpty);
+  });
+
+  testWidgets('chosen album version preserves the playback artist stack', (tester) async {
+    final h = await _pump(tester, '/player/artists/wy/person', catalog: 'versions');
+    await _albums(tester);
+    await tester.tap(find.byKey(const ValueKey('album-wy-record')));
+    await _frames(tester);
+    await tester.tap(find.text('版本 2 · 2025-09-05'));
+    await _frames(tester);
+    expect(h.location, '/player/artists/wy/person/albums/wy/record-version');
+    expect(h.api.albumRequests, ['wy:record-version']);
+    await tester.tap(find.byTooltip('返回'));
+    await _frames(tester);
+    expect(h.location, '/player/artists/wy/person');
+    expect(find.text('发行专辑'), findsOneWidget);
+    expect(find.textContaining('2 个版本'), findsOneWidget);
+    expect(h.player.played, isEmpty);
+  });
+
   testWidgets('album row callback override does not navigate', (tester) async {
     var tapped = 0;
     await tester.pumpWidget(ProviderScope(child: MaterialApp(home: Scaffold(
@@ -341,6 +397,11 @@ void main() {
 }
 
 const _album = AlbumInfo(id: 'record', source: MusicSource.wy, name: '发行专辑', artistName: '艺人');
+final _albumVersions = [
+  for (final id in ['record', 'record-version']) AlbumInfo(id: id,
+    source: MusicSource.wy, name: '发行专辑', artistName: '艺人', songCount: 44,
+    publishTime: DateTime.utc(2025, 9, 5)),
+];
 MusicInfo _song(int index) => MusicInfo.fromJson({
   'id': 'wy_$index', 'name': '原曲 $index', 'singer': '艺人', 'source': 'wy',
   'meta': {'songId': '$index'},
@@ -393,6 +454,14 @@ class _Api extends MusicApi {
     catalogRequests.add('${source.code}:$artistId:$offset');
     if (catalog == 'error') throw StateError('offline albums');
     if (catalog == 'unsupported') throw UnsupportedError('此平台不支持歌手专辑');
+    if (catalog == 'versions' || catalog == 'paged-versions') {
+      return AlbumPage(albums: catalog == 'versions' ? _albumVersions : offset == 0
+        ? [_albumVersions.first]
+        : [..._albumVersions, const AlbumInfo(id: 'record-short',
+          source: MusicSource.wy, name: '发行专辑', artistName: '艺人', songCount: 9)],
+        offset: offset, limit: limit,
+        hasMore: catalog == 'paged-versions' && offset == 0);
+    }
     return AlbumPage(albums: catalog == 'empty' ? [] : [offset == 0 ? _album :
       const AlbumInfo(id: 'record2', source: MusicSource.wy, name: '第二张专辑', artistName: '艺人')],
       offset: offset, limit: limit, hasMore: catalog == 'paged' && offset == 0);
