@@ -15,8 +15,6 @@ import 'package:cy_shine_music/features/playlists/playlist_store.dart';
 import 'package:cy_shine_music/features/settings/settings_page.dart';
 import 'package:cy_shine_music/router.dart';
 
-import 'helpers/prism_test_environment.dart';
-
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -24,31 +22,25 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
-  testWidgets('settings section keeps its scroll offset across tab switches', (
+  testWidgets('settings keeps its scroll offset across tab switches', (
     tester,
   ) async {
     await _usePhoneViewport(tester);
-    final router = await _pumpApp(
-      tester,
-      initialLocation: '/settings/appearance',
-    );
+    final router = await _pumpApp(tester, initialLocation: '/settings');
 
     await tester.drag(find.byType(SettingsPage), const Offset(0, -260));
     await _pumpUi(tester);
     final offset = _offsetOf(tester, find.byType(SettingsPage));
     expect(offset, greaterThan(0));
 
-    // Navigate directly because scrolling can hide the bottom capsule.
+    // 直接走路由切换（滚动后底部胶囊会自动隐藏，点不到 tab 按钮）。
     router.go('/');
     await _pumpUi(tester);
     expect(router.routeInformationProvider.value.uri.path, '/');
 
-    router.go('/settings/appearance');
+    router.go('/settings');
     await _pumpUi(tester);
-    expect(
-      router.routeInformationProvider.value.uri.path,
-      '/settings/appearance',
-    );
+    expect(router.routeInformationProvider.value.uri.path, '/settings');
     expect(
       _offsetOf(tester, find.byType(SettingsPage)),
       moreOrLessEquals(offset, epsilon: 1),
@@ -112,7 +104,6 @@ Future<GoRouter> _pumpApp(
         playerAudioHandlerProvider.overrideWithValue(audioHandler),
       ],
       child: MaterialApp.router(
-        builder: buildPrismTestEnvironment,
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           useMaterial3: true,

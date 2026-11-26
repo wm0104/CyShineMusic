@@ -4,71 +4,67 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:cy_shine_music/features/downloads/download_history_entry.dart';
 import 'package:cy_shine_music/features/songs/widgets/song_row.dart';
 
-import 'helpers/prism_test_environment.dart';
-
 void main() {
-  testWidgets('song row exposes next-play, playlist and delete menu actions', (
-    tester,
-  ) async {
-    _useNarrowPhone(tester);
-    final entry = _entry();
-    var addNextCount = 0;
-    var addToPlaylistCount = 0;
-    var deleteCount = 0;
+  testWidgets(
+    'song row keeps next-play direct and adds playlist swipe action',
+    (tester) async {
+      _useNarrowPhone(tester);
+      final entry = _entry();
+      var addNextCount = 0;
+      var addToPlaylistCount = 0;
+      var deleteCount = 0;
 
-    await tester.pumpWidget(
-      MaterialApp(
-        builder: buildPrismTestEnvironment,
-        theme: ThemeData(
-          useMaterial3: true,
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
-        ),
-        home: Scaffold(
-          body: SongRow(
-            entry: entry,
-            artworkVersion: null,
-            playing: false,
-            batchMode: false,
-            selected: false,
-            onToggleSelected: () {},
-            onAddNext: () => addNextCount++,
-            onAddToPlaylist: () => addToPlaylistCount++,
-            onPlay: () {},
-            onDelete: () => deleteCount++,
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+          ),
+          home: Scaffold(
+            body: SongRow(
+              entry: entry,
+              artworkVersion: null,
+              playing: false,
+              batchMode: false,
+              selected: false,
+              onToggleSelected: () {},
+              onAddNext: () => addNextCount++,
+              onAddToPlaylist: () => addToPlaylistCount++,
+              onPlay: () {},
+              onDelete: () => deleteCount++,
+            ),
           ),
         ),
-      ),
-    );
+      );
 
-    final menu = find.byTooltip('歌曲操作');
-    expect(menu, findsOneWidget);
-    expect(find.byType(MenuAnchor), findsNothing);
-    expect(find.byType(SubmenuButton), findsNothing);
-    await tester.tap(menu);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('下一首播放'));
-    await tester.pumpAndSettle();
-    expect(addNextCount, 1);
+      expect(find.byTooltip('添加到下一首播放'), findsOneWidget);
+      expect(find.byType(MenuAnchor), findsNothing);
+      expect(find.byType(SubmenuButton), findsNothing);
+      await tester.tap(find.byTooltip('添加到下一首播放'));
+      await tester.pumpAndSettle();
+      expect(addNextCount, 1);
 
-    await tester.tap(menu);
-    await tester.pumpAndSettle();
-    expect(find.text('添加到歌单'), findsOneWidget);
-    expect(find.text('删除'), findsOneWidget);
+      final row = find.byKey(const ValueKey('song-slide-song-1'));
+      await tester.drag(row, const Offset(-280, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('歌单'), findsOneWidget);
+      expect(find.text('删除'), findsOneWidget);
 
-    await tester.tap(find.text('添加到歌单'));
-    await tester.pumpAndSettle();
-    expect(addToPlaylistCount, 1);
-    expect(deleteCount, 0);
+      await tester.tap(find.byKey(const ValueKey('song-add-playlist-action')));
+      await tester.pumpAndSettle();
+      expect(addToPlaylistCount, 1);
+      expect(deleteCount, 0);
 
-    await tester.tap(menu);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('删除'));
-    await tester.pumpAndSettle();
-    expect(deleteCount, 1);
-    expect(tester.takeException(), isNull);
-  });
+      await tester.drag(row, const Offset(-280, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('song-delete-action')));
+      await tester.pumpAndSettle();
+      expect(deleteCount, 1);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
-  testWidgets('playlist song row exposes remove-from-playlist in the menu', (
+  testWidgets('playlist song row only exposes remove-from-playlist on swipe', (
     tester,
   ) async {
     _useNarrowPhone(tester);
@@ -76,7 +72,6 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        builder: buildPrismTestEnvironment,
         theme: ThemeData(
           useMaterial3: true,
           colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
@@ -99,18 +94,19 @@ void main() {
       ),
     );
 
-    await tester.tap(find.byTooltip('歌曲操作'));
+    final row = find.byKey(const ValueKey('song-slide-song-1'));
+    await tester.drag(row, const Offset(-280, 0));
     await tester.pumpAndSettle();
 
     expect(find.text('移出歌单'), findsOneWidget);
-    expect(find.text('添加到歌单'), findsNothing);
+    expect(find.text('歌单'), findsNothing);
     expect(find.text('删除'), findsNothing);
     expect(
       find.byKey(const ValueKey('song-add-playlist-action')),
       findsNothing,
     );
 
-    await tester.tap(find.text('移出歌单'));
+    await tester.tap(find.byKey(const ValueKey('song-remove-playlist-action')));
     await tester.pumpAndSettle();
     expect(removeCount, 1);
     expect(tester.takeException(), isNull);
@@ -136,7 +132,6 @@ void main() {
 
 Widget _songRowApp({required bool playingActive}) {
   return MaterialApp(
-    builder: buildPrismTestEnvironment,
     theme: ThemeData(
       useMaterial3: true,
       colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),

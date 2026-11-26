@@ -16,7 +16,7 @@ import 'package:cy_shine_music/features/player/widgets/transport_bar.dart';
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  test('slider thumb reserves a stable layout size', () {
+  test('滑块始终预留相同布局尺寸', () {
     const shape = PlayerSliderThumbShape(disableAnimations: false);
     for (final enabled in [true, false]) {
       for (final discrete in [true, false]) {
@@ -28,7 +28,7 @@ void main() {
     }
   });
 
-  testWidgets('thumb animates without waiting for seek', (tester) async {
+  testWidgets('拖动时平滑放大，松手后不等待 seek 即可缩回', (tester) async {
     final controller = await _pumpTransport(tester);
     final sliderFinder = find.byType(Slider);
     final originalSize = tester.getSize(sliderFinder);
@@ -72,7 +72,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('reduced motion changes thumb size immediately', (tester) async {
+  testWidgets('减少动画时按压与松手立即切换滑块大小', (tester) async {
     final controller = await _pumpTransport(tester, disableAnimations: true);
     final sliderFinder = find.byType(Slider);
     final gesture = await tester.startGesture(tester.getCenter(sliderFinder));
@@ -93,7 +93,7 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('old seek completion preserves a new drag', (tester) async {
+  testWidgets('旧 seek 完成不会清掉后一次拖动的目标进度', (tester) async {
     final controller = await _pumpTransport(tester);
     _startDrag(tester, 45000);
     final firstSeek = _releaseDrag(tester, 45000);
@@ -114,7 +114,7 @@ void main() {
     expect(_slider(tester).value, 90000);
   });
 
-  testWidgets('failed seeks allow subsequent drags', (tester) async {
+  testWidgets('seek 失败后清理目标进度，后续拖动仍可正常使用', (tester) async {
     final controller = await _pumpTransport(tester);
     _startDrag(tester, 45000);
     final seek = _releaseDrag(tester, 45000);
@@ -122,9 +122,7 @@ void main() {
     expect(_slider(tester).value, 45000);
 
     final assertion = expectLater(seek, throwsStateError);
-    controller.requests.single.completion.completeError(
-      StateError('Seek failed'),
-    );
+    controller.requests.single.completion.completeError(StateError('seek 失败'));
     await assertion;
     await tester.pump();
     expect(_slider(tester).value, 20000);
@@ -137,7 +135,7 @@ void main() {
     expect(_slider(tester).value, 60000);
   });
 
-  testWidgets('track changes clear previous interactions', (tester) async {
+  testWidgets('换曲会清理旧交互，旧 seek 不影响新曲拖动', (tester) async {
     final controller = await _pumpTransport(tester);
     final originalKey = _slider(tester).key;
     _startDrag(tester, 45000);
@@ -163,7 +161,7 @@ void main() {
     expect(_slider(tester).value, 30000);
   });
 
-  testWidgets('seek completion after disposal is safe', (tester) async {
+  testWidgets('组件卸载后 seek 完成不会触发 setState', (tester) async {
     final controller = await _pumpTransport(tester);
     _startDrag(tester, 45000);
     final seek = _releaseDrag(tester, 45000);
@@ -174,8 +172,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('keeps drag time labels and accessibility', (tester) async {
+  testWidgets('保留拖动时间气泡与无障碍时间语义', (tester) async {
     await _pumpTransport(tester);
+    expect(find.text('03:00'), findsOneWidget);
     _startDrag(tester, 65000);
     await tester.pump();
     final slider = _slider(tester);
@@ -189,15 +188,63 @@ void main() {
       ShowValueIndicator.onDrag,
     );
   });
+
+  testWidgets('iOS 剩余时间跟随拖动和等待 seek 时展示的位置', (tester) async {
+    final controller = await _pumpTransport(
+      tester,
+      platform: TargetPlatform.iOS,
+    );
+    expect(find.text('00:20'), findsOneWidget);
+    expect(find.text('−2:40'), findsOneWidget);
+
+    _startDrag(tester, 156000);
+    await tester.pump();
+    expect(find.text('02:36'), findsOneWidget);
+    expect(find.text('−0:24'), findsOneWidget);
+    expect(_slider(tester).label, '02:36');
+    expect(_slider(tester).semanticFormatterCallback!(156000), '02:36');
+    expect(controller.requests, isEmpty);
+
+    final seek = _releaseDrag(tester, 156000);
+    await tester.pump();
+    expect(find.text('−0:24'), findsOneWidget);
+    expect(controller.requests, hasLength(1));
+
+    controller.completeSeek(0);
+    await seek;
+    await tester.pump();
+    expect(find.text('−0:24'), findsOneWidget);
+  });
+
+  testWidgets('iOS 在曲终和时长未知时显示零剩余时间', (tester) async {
+    final controller = await _pumpTransport(
+      tester,
+      platform: TargetPlatform.iOS,
+    );
+    controller.seedTrack(
+      'completed',
+      position: const Duration(milliseconds: 179500),
+    );
+    await tester.pump();
+    expect(find.text('−0:01'), findsOneWidget);
+
+    controller.seedTrack('completed', position: const Duration(minutes: 3));
+    await tester.pump();
+    expect(find.text('0:00'), findsOneWidget);
+
+    controller.seedTrack('unknown', duration: Duration.zero);
+    await tester.pump();
+    expect(find.text('0:00'), findsOneWidget);
+  });
 }
 
-PaintPattern _paintsThumbRadius(bool Function(double) matchesRadius) =>
-    paints..something((method, args) {
-      if (method != #drawCircle) return false;
-      final color = (args[2] as Paint).color;
-      return color.toARGB32() == kPlayerInk.toARGB32() &&
-          matchesRadius(args[1] as double);
-    });
+PaintPattern _paintsThumbRadius(bool Function(double) matchesRadius) => paints
+  ..something((method, args) {
+    if (method != #drawCircle) return false;
+    final color = (args[2] as Paint).color;
+    return color.toARGB32() == kPlayerInk.toARGB32() &&
+        matchesRadius(args[1] as double);
+  });
 
 Slider _slider(WidgetTester tester) =>
     tester.widget<Slider>(find.byType(Slider));
@@ -209,13 +256,14 @@ void _startDrag(WidgetTester tester, double target) {
 }
 
 Future<void> _releaseDrag(WidgetTester tester, double target) {
-  // Preserve the future so tests can observe errors and final cleanup.
+  // 保留异步回调返回值，以便测试能观察异常与 finally 清理。
   return Function.apply(_slider(tester).onChangeEnd!, [target]) as Future<void>;
 }
 
 Future<_TestPlayerController> _pumpTransport(
   WidgetTester tester, {
   bool disableAnimations = false,
+  TargetPlatform? platform,
 }) async {
   final preferences = await SharedPreferences.getInstance();
   final audioHandler = PlayerAudioHandler();
@@ -234,6 +282,7 @@ Future<_TestPlayerController> _pumpTransport(
       child: MaterialApp(
         theme: ThemeData(
           colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+          platform: platform,
         ),
         home: MediaQuery(
           data: MediaQueryData(disableAnimations: disableAnimations),
@@ -256,20 +305,24 @@ class _TestPlayerController extends PlayerController {
   final requests =
       <({String? trackId, Duration position, Completer<void> completion})>[];
 
-  void seedTrack(String id, {Duration position = const Duration(seconds: 20)}) {
+  void seedTrack(
+    String id, {
+    Duration position = const Duration(seconds: 20),
+    Duration duration = const Duration(minutes: 3),
+  }) {
     state = PlayerState(
       track: PlayerTrack(
         id: id,
         kind: PlayerTrackKind.localFile,
-        title: 'Test song',
-        artist: 'Test artist',
-        album: 'Test album',
-        sourceLabel: 'Local',
+        title: '测试歌曲',
+        artist: '测试歌手',
+        album: '测试专辑',
+        sourceLabel: '本地',
         qualityLabel: 'FLAC',
         localPath: '$id.flac',
       ),
       position: position,
-      duration: const Duration(minutes: 3),
+      duration: duration,
     );
   }
 

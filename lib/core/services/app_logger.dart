@@ -2,17 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
-import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-import 'log_category.dart';
-import 'log_policy.dart';
 
 // File-backed log so the user can hand over a real trace when something
 // looks wrong. Each line is `ISO8601 [scope] message`, persisted to
@@ -23,106 +18,16 @@ class AppLogger {
   static final _live = StreamController<String>.broadcast(sync: false);
   static final List<String> _recent = <String>[];
   static File? _file;
-  static File? _crashFile;
-  static final _policy = LogPolicy();
-  static const recordingPreferenceKey = 'log_recording_categories';
-  static final _recordingCategories = ValueNotifier<Set<AppLogCategory>>(
-    const {},
-  );
-  static SharedPreferences? _preferences;
-  static Future<void> _writeChain = Future<void>.value();
-  static Future<void> _crashWriteChain = Future<void>.value();
-  static int _writtenBytes = 0;
-  static int _crashWrittenBytes = 0;
+  static IOSink? _sink;
   static Future<void>? _initFuture;
   static const _maxBytes = 1024 * 1024;
-  static const _maxCrashBytes = 256 * 1024;
   static const _maxRecentLines = 500;
-  static const _lastProcessExitTimestampKey =
-      'app_logger_last_process_exit_timestamp';
-  static const _lastJavaCrashIdKey = 'app_logger_last_java_crash_id';
-  static int _lastProcessExitTimestamp = -1;
-  static String? _lastJavaCrashId;
   static final sessionId = '${DateTime.now().microsecondsSinceEpoch}-$pid';
   static String _environment = 'environment=unavailable';
   static String _androidDiagnostics = 'unavailable';
-  static bool _errorHandlersInstalled = false;
-
-  static ValueListenable<Set<AppLogCategory>> get recordingCategories =>
-      _recordingCategories;
-
-  static bool isRecording(AppLogCategory category) =>
-      _recordingCategories.value.contains(category);
-
-  static bool isRecordingScope(String scope) =>
-      isRecording(logCategoryForScope(scope));
-
-  /// Install the process-wide Dart error hooks before asynchronous startup.
-  ///
-  /// Fatal native exits cannot reach Dart, so those are recovered from
-  /// Android's historical process-exit records on the next launch. These
-  /// handlers cover errors that stay inside the Dart/Flutter engine.
-  static void installErrorHandlers() {
-    if (_errorHandlersInstalled) return;
-    _errorHandlersInstalled = true;
-    final previousFlutterHandler = FlutterError.onError;
-    final previousPlatformHandler = ui.PlatformDispatcher.instance.onError;
-    FlutterError.onError = (details) {
-      unawaited(
-        recordUnhandledError(
-          'flutter',
-          details.exception,
-          details.stack ?? StackTrace.empty,
-          context: details.context?.toString(),
-        ),
-      );
-      (previousFlutterHandler ?? FlutterError.presentError)(details);
-    };
-    ui.PlatformDispatcher.instance.onError = (error, stack) {
-      unawaited(recordUnhandledError('platform', error, stack));
-      return previousPlatformHandler?.call(error, stack) ?? false;
-    };
-  }
-
-  static void configureRecording(SharedPreferences preferences) {
-    _drainPolicy();
-    _policy.clear();
-    _preferences = preferences;
-    _lastProcessExitTimestamp =
-        preferences.getInt(_lastProcessExitTimestampKey) ?? -1;
-    _lastJavaCrashId = preferences.getString(_lastJavaCrashIdKey);
-    _recordingCategories.value = Set.unmodifiable(
-      decodeLogCategories(preferences.getStringList(recordingPreferenceKey)),
-    );
-  }
-
-  static Future<void> setRecordingCategories(
-    Set<AppLogCategory> categories,
-  ) async {
-    final preferences = _preferences;
-    if (preferences == null) throw StateError('日志设置尚未初始化');
-    final previous = _recordingCategories.value;
-    _drainPolicy();
-    _policy.clear();
-    final next = Set<AppLogCategory>.unmodifiable(categories);
-    _recordingCategories.value = next;
-    try {
-      final saved = await preferences.setStringList(recordingPreferenceKey, [
-        for (final category in next) category.name,
-      ]);
-      if (!saved) throw StateError('无法保存日志分类');
-    } catch (_) {
-      _drainPolicy();
-      _policy.clear();
-      if (identical(_recordingCategories.value, next)) {
-        _recordingCategories.value = previous;
-      }
-      rethrow;
-    }
-  }
+  static String _iosDiagnostics = 'unavailable';
 
   static Future<void> logEnvironment() async {
-    await _ensureInit();
     final environment = <String, Object?>{
       'platform': Platform.operatingSystem,
       'os': Platform.operatingSystemVersion,
@@ -148,57 +53,93 @@ class AppLogger {
       'app-session',
       'start session=$sessionId environment=$_environment',
     );
-    // A headless media engine has no Activity to answer this optional request.
-    unawaited(logAndroidDiagnostics('startup'));
+    await logAndroidDiagnostics('startup');
+    // 启动时记录桌面 Widget 包与用户配置情况，不推断系统媒体岛状态。
+    await logIosWidgetStatus('startup');
   }
 
-  /// Persist an uncaught Dart/Flutter error independently of log categories.
-  ///
-  /// The normal diagnostic journal is intentionally opt-in. Crash records are
-  /// kept in a small separate file so a user can reproduce a crash without
-  /// first remembering to enable every category.
-  static Future<void> recordUnhandledError(
-    String source,
-    Object error,
-    StackTrace stack, {
-    String? context,
-  }) async {
-    final details = <String>[
-      'source=$source session=$sessionId environment=$_environment',
-      if (context != null && context.isNotEmpty)
-        'context=${compactLogMessage(context, maxLength: 1000)}',
-      'error=${error.runtimeType}: '
-          '${compactLogMessage(error.toString(), maxLength: 4000)}',
-      'stack=${compactLogMessage(stack.toString(), maxLength: 12000)}',
-    ].join(' ');
-    await _queueCrashLine(details);
-  }
-
+  /// 方法名沿用上游（改名字会平添一处 rebase 冲突），但两端都跑：
+  /// 原生 `cy_shine_music/app_task.diagnostics` 在 Android 与 iOS 上都已经实现，
+  /// 上游只是没给 iOS 开门。放开后日志页能直接看到
+  /// 机型 / 系统版本 / 低电量模式等运行环境；通知开关不决定系统媒体岛。
   static Future<void> logAndroidDiagnostics(String reason) async {
-    if (!Platform.isAndroid) return;
+    final scope = Platform.isAndroid
+        ? 'android-runtime'
+        : (Platform.isIOS ? 'ios-runtime' : null);
+    if (scope == null) return;
+    final String json;
     try {
       final data = await const MethodChannel('cy_shine_music/app_task')
           .invokeMapMethod<String, dynamic>('diagnostics')
           .timeout(const Duration(seconds: 2));
-      if (data != null) await recordAndroidDiagnostics(data);
-      if (isRecording(AppLogCategory.application)) {
-        await write(
-          'android-runtime',
-          'reason=$reason data=$_androidDiagnostics',
-        );
-      }
+      json = jsonEncode(data);
     } catch (error) {
-      if (isRecording(AppLogCategory.application)) {
-        await write('android-runtime', 'reason=$reason unavailable=$error');
+      await write(scope, 'reason=$reason unavailable=$error');
+      return;
+    }
+    if (Platform.isIOS) {
+      _iosDiagnostics = json;
+    } else {
+      _androidDiagnostics = json;
+    }
+    await write(scope, 'reason=$reason data=$json');
+  }
+
+  /// ★ 锁屏 / 控制中心播放卡片的诊断（仅 iOS）。
+  ///
+  /// 系统媒体岛与锁屏卡片由 audio_service 写入 `MPNowPlayingInfoCenter` 驱动，
+  /// 系统自己画，不需要 ActivityKit 或 Widget 扩展。查「锁屏没有播放卡片」时
+  /// 看这一行就够了 —— 它直接把 nowPlayingInfo 是否为空、封面有没有、
+  /// 后台音频有没有声明都列出来了。
+  ///
+  /// 方法名 `mediaSession` 是 iOS 侧新增的扩展（上游 Android 没有这个能力，
+  /// 不存在改名冲突的问题）。
+  static Future<void> logIosMediaSession(String reason) async {
+    if (!Platform.isIOS) return;
+    try {
+      final data = await const MethodChannel('cy_shine_music/app_task')
+          .invokeMapMethod<String, dynamic>('mediaSession')
+          .timeout(const Duration(seconds: 2));
+      final summary = data?['summary'] ?? '(空)';
+      await write('media-session', 'reason=$reason $summary');
+    } catch (error) {
+      await write('media-session', 'reason=$reason unavailable=$error');
+    }
+  }
+
+  /// 记录桌面 Widget 包与配置查询结果；空列表不是扩展加载/签名失败证据。
+  static Future<void> logIosWidgetStatus(String reason) async {
+    if (!Platform.isIOS) return;
+    try {
+      final data = await const MethodChannel('cy_shine_music/app_task')
+          .invokeMapMethod<String, dynamic>('widgetStatus')
+          .timeout(const Duration(seconds: 3));
+      if (data == null) {
+        await write('widget-status', 'reason=$reason 无返回');
+        return;
       }
+      final onDisk = data['extensionOnDisk'] == true;
+      final kinds = (data['widgetKinds'] as List?)?.join(',') ?? '—';
+      await write(
+        'widget-status',
+        'reason=$reason 扩展${onDisk ? "在包内" : "缺失"} '
+            '配置查询=${data["configurationQuerySucceeded"] == true ? "成功" : "未知"} '
+            '小组件数=${data['widgetConfigCount'] ?? '?'} kinds=$kinds '
+            '活动数=${data['activityCount'] ?? '?'} '
+            '自定义播放活动=已禁用 '
+            'Widget共享容器=${data['widgetSharedContainerAvailable'] ?? '?'} '
+            '| ${data['verdict'] ?? ''}',
+      );
+    } catch (error) {
+      await write('widget-status', 'reason=$reason unavailable=$error');
     }
   }
 
   static String exportText(List<String> lines) =>
       '${DateTime.now().toIso8601String()} [log-export] session=$sessionId '
       'pid=$pid environment=$_environment '
-      'recording=${_recordingCategories.value.map((item) => item.name).join(',')} '
-      'lastAndroidSnapshot=$_androidDiagnostics\n${lines.join('\n')}';
+      'lastAndroidSnapshot=$_androidDiagnostics '
+      'lastIosSnapshot=$_iosDiagnostics\n${lines.join('\n')}';
 
   static Future<void> _ensureInit() => _initFuture ??= _initialize();
 
@@ -214,172 +155,21 @@ class AppLogger {
         file.renameSync(backup.path);
       }
       _file = file;
-      _writtenBytes = file.existsSync() ? file.lengthSync() : 0;
-      final crashFile = File(p.join(dir.path, 'cyshine-crash.log'));
-      if (crashFile.existsSync() && crashFile.lengthSync() > _maxCrashBytes) {
-        crashFile.writeAsStringSync('');
-      }
-      _crashFile = crashFile;
-      _crashWrittenBytes = crashFile.existsSync() ? crashFile.lengthSync() : 0;
+      _sink = file.openWrite(mode: FileMode.writeOnlyAppend);
     } catch (_) {
       // Persistence is best-effort; console logging still works.
     }
   }
 
   static Future<void> write(String scope, String message) async {
-    if (!isRecordingScope(scope)) return;
-    final compact = compactLogMessage(
-      message,
-      maxLength: scope.startsWith('groove-shift') ? 3200 : 1200,
-    );
-    for (final item in _policy.accept(scope, compact, DateTime.now())) {
-      _append(scope, item);
-    }
-    // Disk writes are queued; only flush/export waits for persistence.
-  }
-
-  static void _append(String scope, String message) {
     final line = '${DateTime.now().toIso8601String()} [$scope] $message';
     developer.log(message, name: 'lx.$scope');
-    if (scope == 'groove-shift-ui' ||
-        (scope == 'groove-shift-trace' && message.contains('dart_'))) {
-      debugPrint('[$scope] $message');
-    }
     _remember(line);
-    _writeChain = _writeChain
-        .then((_) async {
-          await _ensureInit();
-          final file = _file;
-          if (file == null) return;
-          if (_writtenBytes >= _maxBytes && await file.exists()) {
-            final backup = File(p.join(file.parent.path, 'cyshine.prev.log'));
-            if (await backup.exists()) await backup.delete();
-            await file.rename(backup.path);
-            _writtenBytes = 0;
-          }
-          final bytes = utf8.encode('$line\n');
-          await file.writeAsBytes(bytes, mode: FileMode.append);
-          _writtenBytes += bytes.length;
-        })
-        .catchError((Object _) {});
-  }
-
-  static Future<void> _queueCrashLine(String message) {
-    final line =
-        '${DateTime.now().toIso8601String()} [crash-diagnostic] $message';
-    _remember(line);
-    // Error callbacks must finish writing before control returns to the
-    // engine's default handler. Normal log traffic stays queued.
-    if (_crashFile != null) {
-      _appendCrashLineSync(line);
-      return Future<void>.value();
-    }
-    _crashWriteChain = _crashWriteChain
-        .then((_) async {
-          await _ensureInit();
-          _appendCrashLineSync(line);
-        })
-        .catchError((Object _) {});
-    return _crashWriteChain;
-  }
-
-  static void _appendCrashLineSync(String line) {
+    await _ensureInit();
+    // Write into the sink before completing so a following flush includes it.
     try {
-      final file = _crashFile;
-      if (file == null) return;
-      final bytes = utf8.encode('$line\n');
-      if (_crashWrittenBytes + bytes.length > _maxCrashBytes) {
-        file.writeAsStringSync('');
-        _crashWrittenBytes = 0;
-      }
-      file.writeAsBytesSync(bytes, mode: FileMode.append, flush: true);
-      _crashWrittenBytes += bytes.length;
-    } catch (_) {
-      // Reporting must never replace the original error with an IO error.
-    }
-  }
-
-  /// Import Android records without depending on an enabled log category.
-  static Future<void> recordAndroidDiagnostics(
-    Map<String, dynamic> data,
-  ) async {
-    final snapshot = Map<String, dynamic>.from(data)
-      ..remove('javaCrash')
-      ..remove('recentProcessExits');
-    _androidDiagnostics = compactLogMessage(
-      jsonEncode(snapshot),
-      maxLength: 16000,
-    );
-    final javaCrash = data['javaCrash'];
-    if (javaCrash is String && javaCrash.trim().isNotEmpty) {
-      final id = javaCrash.split('\n').first;
-      if (id != _lastJavaCrashId) {
-        _lastJavaCrashId = id;
-        await _queueCrashLine(
-          'previous_java_crash '
-          'details=${compactLogMessage(javaCrash, maxLength: 48000)}',
-        );
-        await _preferences?.setString(_lastJavaCrashIdKey, id);
-      }
-    }
-    final raw = data['recentProcessExits'];
-    if (raw is! List || raw.isEmpty) return;
-    final entries = [
-      for (final item in raw)
-        if (item is Map && item['timestamp'] is num)
-          Map<String, dynamic>.from(item),
-    ]..sort((a, b) => (a['timestamp'] as num).compareTo(b['timestamp'] as num));
-    for (final entry in entries) {
-      final timestamp = (entry['timestamp'] as num).toInt();
-      if (timestamp <= _lastProcessExitTimestamp) continue;
-      _lastProcessExitTimestamp = timestamp;
-      // A native crash carries its tombstone backtrace, which needs more room.
-      final maxLength = entry['nativeTrace'] == null ? 5000 : 16000;
-      await _queueCrashLine(
-        'previous_process_exit '
-        'details=${compactLogMessage(jsonEncode(entry), maxLength: maxLength)}',
-      );
-    }
-    await _preferences?.setInt(
-      _lastProcessExitTimestampKey,
-      _lastProcessExitTimestamp,
-    );
-  }
-
-  /// A snapshot of both retained files, not just the visible console tail.
-  static Future<String> exportFile() async {
-    await logAndroidDiagnostics('export');
-    await flush();
-    final pending = _writeChain.then((_) async {
-      final chunks = <String>[];
-      final file = _file;
-      if (file != null) {
-        final previous = File(p.join(file.parent.path, 'cyshine.prev.log'));
-        if (await previous.exists()) chunks.add(await previous.readAsString());
-        if (await file.exists()) chunks.add(await file.readAsString());
-      }
-      final crashFile = _crashFile;
-      if (crashFile != null && await crashFile.exists()) {
-        final crashText = await crashFile.readAsString();
-        if (crashText.isNotEmpty) {
-          chunks.add('--- crash diagnostics ---\n$crashText');
-        }
-      }
-      if (chunks.isEmpty) chunks.add(_recent.join('\n'));
-      final temp = await getTemporaryDirectory();
-      final snapshot = File(p.join(temp.path, 'cyshine-log-export.txt'));
-      await snapshot.writeAsString(exportText(chunks), flush: true);
-      return snapshot;
-    });
-    _writeChain = pending.then<void>((_) {}).catchError((Object _) {});
-    final snapshot = await pending;
-    if (!Platform.isAndroid) return snapshot.path;
-    final result = await const MethodChannel(
-      'cy_shine_music/app_task',
-    ).invokeMapMethod<String, dynamic>('exportLog', {'path': snapshot.path});
-    final path = result?['path'] as String?;
-    if (path == null) throw StateError('日志导出未返回保存位置');
-    return path;
+      _sink?.writeln(line);
+    } catch (_) {}
   }
 
   static Stream<String> get liveLines => _live.stream;
@@ -389,18 +179,12 @@ class AppLogger {
   static Future<List<String>> readRecentLines({int limit = 400}) async {
     await _ensureInit();
     try {
-      await flush();
-      final lines = <String>[];
       final file = _file;
-      if (file != null && await file.exists()) {
-        lines.addAll(await file.readAsLines());
+      if (file == null || !file.existsSync()) {
+        return _tail(_recent, limit);
       }
-      final crashFile = _crashFile;
-      if (crashFile != null && await crashFile.exists()) {
-        lines.addAll(await crashFile.readAsLines());
-      }
-      if (lines.isEmpty) return _tail(_recent, limit);
-      lines.sort();
+      await flush();
+      final lines = await file.readAsLines();
       return _tail(lines, limit);
     } catch (_) {
       return _tail(_recent, limit);
@@ -408,38 +192,17 @@ class AppLogger {
   }
 
   static Future<void> clear() async {
-    await flush();
     await _ensureInit();
-    final previousWrites = _writeChain;
-    _writeChain = previousWrites
-        .then((_) async {
-          final file = _file;
-          if (file != null) {
-            await file.writeAsString('');
-            final backup = File(p.join(file.parent.path, 'cyshine.prev.log'));
-            if (await backup.exists()) await backup.delete();
-          }
-          _writtenBytes = 0;
-        })
-        .catchError((Object _) {});
-    _policy.clear();
-    _recent.clear();
-    await _writeChain;
-    await _crashWriteChain;
-    final crashFile = _crashFile;
-    if (crashFile != null) {
-      try {
-        crashFile.writeAsStringSync('');
-        _crashWrittenBytes = 0;
-      } catch (_) {}
-    }
-    if (Platform.isAndroid) {
-      try {
-        await const MethodChannel('cy_shine_music/app_task')
-            .invokeMethod<void>('clearCrashLog')
-            .timeout(const Duration(seconds: 2));
-      } catch (_) {}
-    }
+    try {
+      await _sink?.flush();
+      await _sink?.close();
+      final file = _file;
+      if (file != null) {
+        await file.writeAsString('');
+        _sink = file.openWrite(mode: FileMode.writeOnlyAppend);
+      }
+      _recent.clear();
+    } catch (_) {}
   }
 
   static Future<File?> currentLogFile() async {
@@ -449,15 +212,7 @@ class AppLogger {
 
   static Future<void> flush() async {
     await _ensureInit();
-    _drainPolicy();
-    await _writeChain;
-    await _crashWriteChain;
-  }
-
-  static void _drainPolicy() {
-    for (final entry in _policy.drain().entries) {
-      if (isRecordingScope(entry.key)) _append(entry.key, entry.value);
-    }
+    await _sink?.flush();
   }
 
   static void _remember(String line) {

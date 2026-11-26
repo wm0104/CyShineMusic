@@ -1,8 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
-import 'package:prism_ui/icons/icons.dart' as prism_glyph;
 
-import '../../../core/ui/music_action_glyphs.dart';
 import '../../../theme/app_motion.dart';
 
 class PlaylistBatchDownloadBar extends StatelessWidget {
@@ -14,8 +11,9 @@ class PlaylistBatchDownloadBar extends StatelessWidget {
     required this.onRemove,
     required this.onDownload,
     required this.onPlaySelected,
-    this.showRemove = true,
+    this.showPlaylistTransfers = false,
     this.onAddToPlaylist,
+    this.onMoveToPlaylist,
   });
 
   final int selectedCount;
@@ -24,69 +22,76 @@ class PlaylistBatchDownloadBar extends StatelessWidget {
   final VoidCallback? onRemove;
   final VoidCallback? onDownload;
   final VoidCallback? onPlaySelected;
-  final bool showRemove;
+  final bool showPlaylistTransfers;
   final VoidCallback? onAddToPlaylist;
+  final VoidCallback? onMoveToPlaylist;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return SafeArea(
+    return Material(
       key: const ValueKey('playlist-batch-bottom-bar'),
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-        child: prism.GooSurface(
-          color: scheme.surfaceContainer,
-          glass: prism.LiquidGlassScope.of(context)
-              ? prism.LiquidGlassStyle.pill(prism.Theme.of(context).colorScheme)
-              : null,
-          child: prism.GooPane(
-            child: SizedBox(
-              height: 64,
-              child: Row(
-                children: [
-                  if (showRemove)
-                    Expanded(
-                      child: _PlaylistBatchAction(
-                        icon: MusicActionGlyphs.playlistRemove,
-                        label: selectedCount == 0
-                            ? '移出歌单'
-                            : '移出 $selectedCount 首',
-                        onPressed: submitting ? null : onRemove,
-                        enabledColor: scheme.error,
-                      ),
-                    ),
-                  if (!showRemove)
-                    Expanded(
-                      child: _PlaylistBatchAction(
-                        icon: MusicActionGlyphs.playlistAdd,
-                        label: '加入歌单',
-                        onPressed: submitting ? null : onAddToPlaylist,
-                      ),
-                    ),
-                  Expanded(
-                    child: _PlaylistBatchAction(
-                      icon: MusicActionGlyphs.download,
-                      label: submitting
-                          ? '处理中...'
-                          : downloadableCount == 0
-                          ? '下载选中'
-                          : '下载 $downloadableCount 首',
-                      onPressed: submitting ? null : onDownload,
-                    ),
-                  ),
-                  Expanded(
-                    child: _PlaylistBatchAction(
-                      icon: MusicActionGlyphs.playNext,
-                      label: selectedCount == 0
-                          ? '播放选中'
-                          : '播放 $selectedCount 首',
-                      onPressed: submitting ? null : onPlaySelected,
-                    ),
-                  ),
-                ],
+      color: scheme.surfaceContainer,
+      elevation: 5,
+      shadowColor: scheme.shadow.withValues(alpha: 0.18),
+      child: SafeArea(
+        top: false,
+        child: Container(
+          height: 64,
+          decoration: BoxDecoration(
+            border: Border(
+              top: BorderSide(
+                color: scheme.outlineVariant.withValues(alpha: 0.42),
               ),
             ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: _PlaylistBatchAction(
+                  icon: Icons.playlist_remove_rounded,
+                  label: selectedCount == 0 ? '移出歌单' : '移出 $selectedCount 首',
+                  onPressed: submitting ? null : onRemove,
+                  enabledColor: scheme.error,
+                ),
+              ),
+              if (showPlaylistTransfers) ...[
+                Expanded(
+                  child: _PlaylistBatchAction(
+                    icon: Icons.playlist_add_rounded,
+                    label: '添加到歌单',
+                    onPressed: submitting ? null : onAddToPlaylist,
+                  ),
+                ),
+                Expanded(
+                  child: _PlaylistBatchAction(
+                    icon: Icons.drive_file_move_rounded,
+                    label: '移动到歌单',
+                    onPressed: submitting ? null : onMoveToPlaylist,
+                  ),
+                ),
+              ],
+              Expanded(
+                child: _PlaylistBatchAction(
+                  icon: submitting
+                      ? Icons.downloading_rounded
+                      : Icons.download_rounded,
+                  label: submitting
+                      ? '下载中...'
+                      : downloadableCount == 0
+                      ? '下载选中'
+                      : '下载 $downloadableCount 首',
+                  onPressed: submitting ? null : onDownload,
+                ),
+              ),
+              Expanded(
+                child: _PlaylistBatchAction(
+                  icon: Icons.playlist_play_rounded,
+                  label: selectedCount == 0 ? '播放选中' : '播放 $selectedCount 首',
+                  onPressed: submitting ? null : onPlaySelected,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -102,7 +107,7 @@ class _PlaylistBatchAction extends StatelessWidget {
     this.enabledColor,
   });
 
-  final prism_glyph.Glyph icon;
+  final IconData icon;
   final String label;
   final VoidCallback? onPressed;
   final Color? enabledColor;
@@ -128,7 +133,7 @@ class _PlaylistBatchAction extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                prism_glyph.GlyphIcon(icon, size: 21, fill: 0, color: color),
+                Icon(icon, size: 21, color: color),
                 const SizedBox(height: 3),
                 Text(
                   label,

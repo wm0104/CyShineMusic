@@ -1,11 +1,15 @@
+import 'dart:async';
+import 'dart:ui' as ui;
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/ui/cover_image_source.dart';
-import '../../../core/ui/artwork_colors.dart';
 import '../../../theme/app_motion.dart';
+import '../flow_palette.dart';
 import '../player_controller.dart';
+import 'lyric_ink.dart';
 import 'player_palette.dart';
 
 // Share the backdrop's resized image cache entry, including local artwork.
@@ -28,18 +32,67 @@ final playerArtworkProvider = Provider<ImageProvider<Object>?>((ref) {
   );
 });
 
-// AppShell keeps this alive, so selecting a song prepares its colors even
-// before the player page is mounted or opened.
-final playerArtworkColorsProvider = FutureProvider.autoDispose<ArtworkColors?>((
+typedef _ArtworkColors = ({Color? accent, Color? lyricInk});
+const _emptyArtworkColors = (accent: null, lyricInk: null);
+
+final _artworkColorsProvider = FutureProvider.autoDispose<_ArtworkColors>((
   ref,
 ) async {
   final provider = ref.watch(playerArtworkProvider);
-  if (provider == null) return null;
-  return loadArtworkColors(provider, requestGroup: 'player');
+  if (provider == null) return _emptyArtworkColors;
+  final result = Completer<_ArtworkColors>();
+  final stream = provider.resolve(ImageConfiguration.empty);
+  var sampling = false;
+  final listener = ImageStreamListener(
+    (info, _) async {
+      if (sampling || result.isCompleted) {
+        info.dispose();
+        return;
+      }
+      sampling = true;
+      Color? accent;
+      Color? lyricInk;
+      try {
+        final image = info.image;
+        final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+        if (data != null) {
+          final pixels = data.buffer.asUint8List(
+            data.offsetInBytes,
+            data.lengthInBytes,
+          );
+          final palette = extractFlowPalette(pixels, image.width, image.height);
+          if (palette != FlowPalette.fallback) {
+            accent = Color(palette.accentsArgb.first);
+          }
+          lyricInk = extractLyricInk(pixels);
+        }
+      } catch (_) {
+        // Artwork failures should leave playback controls usable.
+      } finally {
+        info.dispose();
+        if (!result.isCompleted) {
+          result.complete((accent: accent, lyricInk: lyricInk));
+        }
+      }
+    },
+    onError: (Object error, StackTrace? stackTrace) {
+      if (!result.isCompleted) result.complete(_emptyArtworkColors);
+    },
+  );
+  ref.onDispose(() {
+    // Release a pending request when a newer cover supersedes it.
+    if (!result.isCompleted) result.complete(_emptyArtworkColors);
+  });
+  stream.addListener(listener);
+  try {
+    return await result.future;
+  } finally {
+    stream.removeListener(listener);
+  }
 });
 
 final playerLyricInkProvider = Provider.autoDispose<Color?>((ref) {
-  final colors = ref.watch(playerArtworkColorsProvider);
+  final colors = ref.watch(_artworkColorsProvider);
   return colors.hasError ? null : colors.valueOrNull?.lyricInk;
 });
 
@@ -52,7 +105,7 @@ class PlayerControlColor extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final artworkColors = ref.watch(playerArtworkColorsProvider);
+    final artworkColors = ref.watch(_artworkColorsProvider);
     // 新封面尚未就绪时沿用上次取色，避免换曲先闪回默认色。
     final accent = artworkColors.hasError
         ? null
@@ -73,7 +126,7 @@ class PlayerControlColor extends ConsumerWidget {
       }
     }
     return TweenAnimationBuilder<Color?>(
-      tween: ColorTween(begin: color, end: color),
+      tween: ColorTween(begin: fallback, end: color),
       duration: MediaQuery.disableAnimationsOf(context)
           ? Duration.zero
           : AppMotion.long,

@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
+import 'package:flutter_slidable/flutter_slidable.dart';
+
+import '../../../core/ui/expressive_download_button.dart';
 import '../../../theme/app_motion.dart';
 import '../../downloads/download_progress.dart';
-import '../../songs/widgets/song_actions_menu.dart';
 import '../resolved_playlist_track.dart';
 import 'playlist_artwork.dart';
+import 'playlist_order_controls.dart';
 
 const double _trackCoverSize = 52;
 const double _trackRowMinHeight = 68;
@@ -24,8 +26,12 @@ class PlaylistTrackTile extends ConsumerWidget {
     required this.onToggleSelected,
     required this.onPlay,
     required this.onDownload,
-    required this.onAddNext,
     required this.onRemove,
+    this.onMatch,
+    this.onAddToPlaylist,
+    this.onMoveToPlaylist,
+    this.reordering = false,
+    this.reorderEnabled = true,
   });
 
   final String playlistId;
@@ -37,9 +43,13 @@ class PlaylistTrackTile extends ConsumerWidget {
   final bool selected;
   final VoidCallback onToggleSelected;
   final VoidCallback onPlay;
+  final VoidCallback? onMatch;
   final VoidCallback? onDownload;
-  final VoidCallback? onAddNext;
   final VoidCallback onRemove;
+  final VoidCallback? onAddToPlaylist;
+  final VoidCallback? onMoveToPlaylist;
+  final bool reordering;
+  final bool reorderEnabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -53,6 +63,13 @@ class PlaylistTrackTile extends ConsumerWidget {
             ),
           );
     final isLocal = item.localEntry != null;
+    final tapToMatch =
+        onMatch != null &&
+        item.track.isUnmatchedSpotify &&
+        !batchMode &&
+        !reordering;
+    final canReplace = onMatch != null && !item.track.isUnmatchedSpotify;
+    final tapHint = tapToMatch ? '轻触匹配音源' : '轻触播放';
     final selectionEnabled = !batchSubmitting && task?.isBusy != true;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final shortDuration = reduceMotion ? Duration.zero : AppMotion.short;
@@ -74,7 +91,7 @@ class PlaylistTrackTile extends ConsumerWidget {
         ? scheme.primary.withValues(alpha: 0.86)
         : scheme.onSurfaceVariant;
 
-    return AnimatedContainer(
+    final row = AnimatedContainer(
       duration: shortDuration,
       curve: AppMotion.emphasized,
       constraints: const BoxConstraints(minHeight: _trackRowMinHeight),
@@ -82,13 +99,19 @@ class PlaylistTrackTile extends ConsumerWidget {
       child: Material(
         color: Colors.transparent,
         child: Semantics(
-          button: true,
+          button: !reordering,
           selected: batchMode && selected,
-          hint: batchMode ? '轻触选择歌曲' : '轻触播放',
+          hint: reordering
+              ? '拖动右侧手柄整理顺序'
+              : batchMode
+              ? '轻触选择歌曲'
+              : tapHint,
           child: InkWell(
-            onTap: batchMode
+            onTap: reordering
+                ? null
+                : batchMode
                 ? (selectionEnabled ? onToggleSelected : null)
-                : onPlay,
+                : (tapToMatch ? onMatch : onPlay),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(4, 8, 2, 8),
               child: Row(
@@ -153,7 +176,8 @@ class PlaylistTrackTile extends ConsumerWidget {
                             item.track.singer.trim().isEmpty
                                 ? '未知歌手'
                                 : item.track.singer,
-                            isLocal ? '本地' : item.track.source.label,
+                            isLocal ? '本地' : item.track.sourceLabel,
+                            if (tapToMatch) '轻触匹配',
                           ].join(' · '),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -189,27 +213,52 @@ class PlaylistTrackTile extends ConsumerWidget {
                           ),
                         );
                       },
-                      child: batchMode
+                      child: reordering
+                          ? PlaylistOrderDragHandle(
+                              key: ValueKey(
+                                'playlist-reorder-${item.track.identityKey}',
+                              ),
+                              index: index,
+                              enabled: reorderEnabled,
+                            )
+                          : batchMode
                           ? SizedBox.square(
                               key: const ValueKey('playlist-select-action'),
-                              dimension: 48,
+                              dimension: 44,
                               child: Center(
-                                child: prism.Checkbox(
+                                child: Checkbox(
                                   value: selected,
-                                  isCircle: true,
+                                  visualDensity: VisualDensity.compact,
+                                  materialTapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
                                   onChanged: selectionEnabled
                                       ? (_) => onToggleSelected()
                                       : null,
                                 ),
                               ),
                             )
-                          : SongActionsMenu.playlist(
-                              key: ValueKey('playlist-menu-${item.track.id}'),
-                              onRemove: onRemove,
-                              onAddNext: onAddNext,
-                              onDownload: onDownload,
-                              downloadTask: task,
-                              downloaded: isLocal,
+                          : Row(
+                              key: const ValueKey('playlist-track-actions'),
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (!isLocal && onDownload != null)
+                                  ExpressiveDownloadButton(
+                                    key: const ValueKey(
+                                      'playlist-download-action',
+                                    ),
+                                    isLoading: task?.isBusy ?? false,
+                                    isDone: task?.stage == DownloadStage.done,
+                                    progress: task?.fraction,
+                                    onPressed: task?.isBusy == true
+                                        ? null
+                                        : onDownload,
+                                    tooltip: '选择音质下载',
+                                    size: 44,
+                                    tonal: true,
+                                  )
+                                else
+                                  const SizedBox.square(dimension: 44),
+                              ],
                             ),
                     ),
                   ),
@@ -219,6 +268,66 @@ class PlaylistTrackTile extends ConsumerWidget {
           ),
         ),
       ),
+    );
+
+    return Slidable(
+      key: ValueKey('playlist-track-slide-${item.track.id}'),
+      groupTag: 'playlist-tracks',
+      enabled: !batchMode && !reordering,
+      endActionPane: ActionPane(
+        motion: const BehindMotion(),
+        extentRatio:
+            0.24 *
+            (1 +
+                (canReplace ? 1 : 0) +
+                (onAddToPlaylist == null ? 0 : 1) +
+                (onMoveToPlaylist == null ? 0 : 1)),
+        children: [
+          if (onAddToPlaylist case final add?)
+            SlidableAction(
+              key: const ValueKey('playlist-add-to-playlist-action'),
+              autoClose: false,
+              onPressed: (actionContext) async {
+                await Slidable.of(actionContext)?.close();
+                add();
+              },
+              backgroundColor: scheme.secondaryContainer,
+              foregroundColor: scheme.onSecondaryContainer,
+              icon: Icons.playlist_add_rounded,
+              label: '添加到歌单',
+            ),
+          if (onMoveToPlaylist case final move?)
+            SlidableAction(
+              key: const ValueKey('playlist-move-to-playlist-action'),
+              autoClose: false,
+              onPressed: (actionContext) async {
+                await Slidable.of(actionContext)?.close();
+                move();
+              },
+              backgroundColor: scheme.tertiaryContainer,
+              foregroundColor: scheme.onTertiaryContainer,
+              icon: Icons.drive_file_move_rounded,
+              label: '移动到歌单',
+            ),
+          if (canReplace)
+            SlidableAction(
+              onPressed: (_) => onMatch!(),
+              backgroundColor: scheme.secondaryContainer,
+              foregroundColor: scheme.onSecondaryContainer,
+              icon: Icons.search_rounded,
+              label: '更换匹配',
+            ),
+          SlidableAction(
+            key: const ValueKey('playlist-remove-action'),
+            onPressed: (_) => onRemove(),
+            backgroundColor: scheme.error,
+            foregroundColor: scheme.onError,
+            icon: Icons.playlist_remove_rounded,
+            label: '移除',
+          ),
+        ],
+      ),
+      child: row,
     );
   }
 }

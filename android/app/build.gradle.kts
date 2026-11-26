@@ -33,7 +33,6 @@ val appLabel = if (isDevChannel) "栖弦dev" else "栖弦"
 val targetPlatformToAbi = mapOf(
     "android-arm" to "armeabi-v7a",
     "android-arm64" to "arm64-v8a",
-    "android-x64" to "x86_64",
 )
 val requestedAbis = (project.findProperty("target-platform") as? String)
     ?.split(",")
@@ -96,25 +95,18 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         manifestPlaceholders["appLabel"] = appLabel
-        // Match Flutter's requested targets, including native plugin libraries.
-        // Do not combine NDK filters with --split-per-abi.
-        if (!splitPerAbi) {
-            ndk {
-                abiFilters.clear()
-                abiFilters += requestedAbis
-            }
-        }
     }
 
     buildTypes {
-        debug {
-            // Let local dev builds replace the installed dev release without
-            // clearing its playlists and settings.
-            if (isDevChannel && releaseSigningReady) {
-                signingConfig = signingConfigs.getByName("channelRelease")
-            }
-        }
         release {
+            // ABI splits already select the packaged architectures. AGP rejects
+            // combining them with an NDK abiFilters selection, even for debug.
+            if (!splitPerAbi) {
+                ndk {
+                    abiFilters.clear()
+                    abiFilters += requestedAbis
+                }
+            }
             if (releaseSigningReady) {
                 signingConfig = signingConfigs.getByName("channelRelease")
             }

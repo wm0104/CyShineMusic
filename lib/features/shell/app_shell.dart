@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,27 +11,26 @@ import '../../core/ui/app_toast.dart';
 import '../../core/ui/cover_image_source.dart';
 import '../../theme/app_motion.dart';
 import '../player/player_page.dart';
-import '../player/widgets/player_control_color.dart';
 import '../player/widgets/spinning_cover_art.dart';
 import '../player/player_controller.dart';
 import '../playlists/playlist_detail_toolbar_state.dart';
 import '../search/search_controller.dart';
-import '../search/search_toolbar_state.dart';
-import '../settings/settings_section.dart';
 import '../songs/songs_toolbar_state.dart';
 import 'player_pull_scope.dart';
 import 'player_transition.dart';
 import 'shell_bottom_area.dart';
+import 'shell_edge_back.dart';
+import 'shell_navigation.dart';
 import 'shell_route_utils.dart';
 import 'shell_toolbar_visibility.dart';
 import 'tab_location_memory.dart';
+import 'widgets/bottom_toolbar.dart';
 import 'widgets/discovery_category_fab.dart';
 import 'widgets/dual_capsule_bottom_navigation.dart';
 import 'widgets/native_bottom_navigation.dart';
-import 'widgets/player_surface_clipper.dart';
 import 'widgets/search_paging_fab.dart';
-import 'widgets/toolbar_capsule.dart';
 import 'widgets/toolbar_metrics.dart';
+import 'widgets/toolbar_capsule.dart';
 
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({
@@ -76,6 +76,10 @@ class _AppShellState extends ConsumerState<AppShell>
   double _dragStartProgress = 0;
   Timer? _returnToDesktopTimer;
   AppToastHandle? _returnToDesktopToast;
+
+  bool _toolbarScrollSequenceActive = false;
+  double _lastToolbarScrollDelta = 0;
+  double _toolbarTravelExtent = toolbarDefaultTravelExtent;
 
   @override
   void initState() {
@@ -146,7 +150,9 @@ class _AppShellState extends ConsumerState<AppShell>
     }
     if (oldWidget.location != widget.location) {
       _resetTopLevelBack();
-      // Keep the bottom controls fully revealed when the route shell changes.
+      _toolbarScrollSequenceActive = false;
+      _lastToolbarScrollDelta = 0;
+      // Preserve the underlying toolbar's scroll position during the morph.
       if (!_pullActive && _pull.value == 0) {
         _toolbarRevealController.value = 1;
       }
@@ -171,7 +177,8 @@ class _AppShellState extends ConsumerState<AppShell>
             _pull.value = 0;
             _animateToolbarTo(1);
           }
-        } else if (_settleTarget != 0) {
+        } else if (_settleTarget != 0 &&
+            !isPlaybackArtistLocation(widget.location)) {
           _playerReturnLocation = normalizedPlayerReturnLocation(
             widget.location,
             _playerReturnLocation,
@@ -267,8 +274,13 @@ class _AppShellState extends ConsumerState<AppShell>
     // The transparent route keeps the origin alive. Activate the controls
     // immediately instead of waiting through the spring's subpixel tail.
     if (widget.location != '/player') {
-      _playerReturnLocation = widget.routeLocation;
-      unawaited(context.push<void>('/player', extra: _playerReturnLocation));
+      if (!isPlaybackArtistLocation(widget.location)) {
+        _playerReturnLocation = widget.routeLocation;
+      }
+      openPlayerRoute(
+        GoRouter.of(context),
+        returnLocation: _playerReturnLocation,
+      );
     }
     try {
       await _animatePullTo(1, velocityDy: velocityDy).orCancel;
@@ -296,10 +308,12 @@ class _AppShellState extends ConsumerState<AppShell>
       _settledExpanded = false;
     });
     _transition.capture();
-    // Remove the transparent route and its modal barrier before animating,
-    // so the next pointer can scroll/click the live page immediately.
     if (widget.location == '/player') {
-      if (destination == null && GoRouter.of(context).canPop()) {
+      if (destination != null && isPlaybackArtistLocation(destination)) {
+        // Artist pages go above the player and leave the source tab intact.
+        unawaited(context.push<void>(destination));
+      } else if (destination == null && GoRouter.of(context).canPop()) {
+        // Release the modal barrier while the shell runs the visual tail.
         context.pop();
       } else {
         context.go(destination ?? _playerReturnLocation);
@@ -337,7 +351,7 @@ class _AppShellState extends ConsumerState<AppShell>
   void _rememberTabLocation() {
     final location = widget.location;
     final routeLocation = widget.routeLocation;
-    if (location == '/player') return;
+    if (location == '/player' || isPlaybackArtistLocation(location)) return;
     final index = toolbarIndexFor(location);
     if (index == 2) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -351,16 +365,11 @@ class _AppShellState extends ConsumerState<AppShell>
     });
   }
 
-  Future<bool> _handleBackButton() async {
+  Future<bool> _handleBackButton([BuildContext? gesturePage]) async {
     final navigator = Navigator.of(context, rootNavigator: true);
     if (navigator.canPop()) {
+      if (gesturePage != null) return false;
       await navigator.maybePop();
-      return true;
-    }
-    final popupNavigator = _nestedPopupNavigator();
-    if (popupNavigator != null) {
-      _resetTopLevelBack();
-      await popupNavigator.maybePop();
       return true;
     }
     if (widget.location == '/player') {
@@ -383,48 +392,44 @@ class _AppShellState extends ConsumerState<AppShell>
         songsToolbar.onToggleBatch!();
         return true;
       }
-      if (songsToolbar.searchMode && songsToolbar.onCloseSearch != null) {
-        songsToolbar.onCloseSearch!();
-        return true;
-      }
     }
     if (isPlaylistDetailLocation(widget.location)) {
       final playlistToolbar = ref.read(playlistDetailToolbarStateProvider);
-      if (playlistToolbar.batchMode && playlistToolbar.onToggleBatch != null) {
-        playlistToolbar.onToggleBatch!();
-        return true;
-      }
       if (playlistToolbar.searchMode &&
           playlistToolbar.onToggleSearch != null) {
         playlistToolbar.onToggleSearch!();
         return true;
       }
-    }
-    if (widget.location == '/' &&
-        ref.read(searchControllerProvider).isSearchActive) {
-      final closeSearch = ref.read(searchToolbarStateProvider).onCloseSearch;
-      if (closeSearch != null) {
-        _resetTopLevelBack();
-        closeSearch();
+      if (playlistToolbar.batchMode && playlistToolbar.onToggleBatch != null) {
+        playlistToolbar.onToggleBatch!();
         return true;
       }
     }
 
     _releaseRouteFocus();
-    final settingsParent = settingsParentLocation(widget.location);
-    if (_isTopLevelMenuLocation(widget.location)) {
+    if (gesturePage != null) {
+      final location = widget.routeLocation;
+      // The branch navigator honors page-local pop handling, including
+      // playlist ordering and artist pages' return-to-player callbacks.
+      if (await Navigator.of(gesturePage).maybePop()) return true;
+      if (!mounted || !gesturePage.mounted || widget.routeLocation != location) {
+        return false;
+      }
+    }
+    if (isTopLevelShellLocation(widget.location)) {
       await _handleTopLevelBack();
     } else if (widget.location == '/downloads' ||
         widget.location == '/songs/search') {
       context.go('/songs');
-    } else if (settingsParent != null) {
-      if (context.canPop()) {
-        context.pop();
-      } else {
-        context.go(settingsParent);
-      }
+    } else if (widget.location == '/settings/sources' ||
+        widget.location == '/settings/webdav' ||
+        widget.location == '/settings/equalizer' ||
+        widget.location == '/debug') {
+      context.go('/settings');
     } else if (context.canPop()) {
       context.pop();
+    } else if (isPlaybackArtistLocation(widget.location)) {
+      context.go('/songs');
     } else if (isDiscoveryLocation(widget.location) && widget.location != '/') {
       context.go('/');
     } else if (isPlaylistLocation(widget.location)) {
@@ -433,29 +438,6 @@ class _AppShellState extends ConsumerState<AppShell>
       unawaited(_moveAppTaskToBack());
     }
     return true;
-  }
-
-  NavigatorState? _nestedPopupNavigator() {
-    RouteMatchBase match = GoRouter.of(
-      context,
-    ).routerDelegate.currentConfiguration.matches.last;
-    // Sheets and menus belong to the navigator that opened them, including
-    // retained tab navigators. Inspect outer overlays before inner ones.
-    while (match is ShellRouteMatch) {
-      final navigator = match.navigatorKey.currentState;
-      if (navigator == null ||
-          ModalRoute.of(navigator.context)?.isCurrent == false) {
-        break;
-      }
-      var hasPopup = false;
-      navigator.popUntil((route) {
-        hasPopup = route is PopupRoute || route.willHandlePopInternally;
-        return true; // Inspect the top route without popping a page.
-      });
-      if (hasPopup) return navigator;
-      match = match.matches.last;
-    }
-    return null;
   }
 
   Future<void> _handleTopLevelBack() async {
@@ -492,6 +474,98 @@ class _AppShellState extends ConsumerState<AppShell>
     });
   }
 
+  bool _handleToolbarScrollNotification(ScrollNotification notification) {
+    // While a player pull owns the toolbar reveal, scrolling must not fight it.
+    if (_pullActive ||
+        _settleTarget == 0 ||
+        ref.read(settingsProvider).navigationMode !=
+            AppNavigationMode.singleCapsule) {
+      return false;
+    }
+    final songsBatchMode =
+        isSongsLibraryLocation(widget.location) &&
+        ref.read(songsToolbarStateProvider).batchMode;
+    final playlistBatchMode =
+        isPlaylistDetailLocation(widget.location) &&
+        ref.read(playlistDetailToolbarStateProvider).batchMode;
+    if (!ref.read(shellToolbarVisibleProvider) ||
+        songsBatchMode ||
+        playlistBatchMode) {
+      _toolbarScrollSequenceActive = false;
+      _lastToolbarScrollDelta = 0;
+      _toolbarRevealController.stop(canceled: false);
+      return false;
+    }
+    // Discovery's vertical lists sit inside the horizontal source PageView.
+    // Search results and other routes still only accept the outermost list.
+    final maxScrollDepth =
+        widget.location == '/' &&
+            !ref.read(searchControllerProvider).isSearchActive
+        ? 1
+        : 0;
+    if (widget.location == '/player' ||
+        notification.depth > maxScrollDepth ||
+        notification.metrics.axis != Axis.vertical) {
+      return false;
+    }
+
+    if (notification is ScrollStartNotification &&
+        notification.dragDetails != null) {
+      _toolbarScrollSequenceActive = true;
+      _lastToolbarScrollDelta = 0;
+      _toolbarRevealController.stop(canceled: false);
+      return false;
+    }
+
+    if (notification is ScrollUpdateNotification &&
+        notification.dragDetails != null) {
+      _toolbarScrollSequenceActive = true;
+      _applyToolbarScrollDelta(notification.scrollDelta ?? 0);
+      return false;
+    }
+
+    if (notification is OverscrollNotification &&
+        notification.dragDetails != null) {
+      _toolbarScrollSequenceActive = true;
+      _applyToolbarScrollDelta(notification.overscroll);
+      return false;
+    }
+
+    if (notification is ScrollEndNotification) {
+      _finishToolbarScrollSequence();
+    }
+    return false;
+  }
+
+  void _finishToolbarScrollSequence() {
+    if (!_toolbarScrollSequenceActive) return;
+    _toolbarScrollSequenceActive = false;
+    _settleToolbarAfterScroll();
+  }
+
+  void _applyToolbarScrollDelta(double delta) {
+    if (delta.abs() < toolbarScrollDeltaEpsilon) return;
+    _lastToolbarScrollDelta = delta;
+    _toolbarRevealController.stop(canceled: false);
+    _toolbarRevealController.value =
+        (_toolbarRevealController.value - delta / _toolbarTravelExtent)
+            .clamp(0.0, 1.0)
+            .toDouble();
+  }
+
+  void _settleToolbarAfterScroll() {
+    final reveal = _toolbarRevealController.value;
+    final target = switch (_lastToolbarScrollDelta) {
+      > toolbarScrollDeltaEpsilon =>
+        reveal <= toolbarHideDirectionThreshold ? 0.0 : 1.0,
+      < -toolbarScrollDeltaEpsilon =>
+        reveal >= toolbarShowDirectionThreshold ? 1.0 : 0.0,
+      _ => reveal >= 0.5 ? 1.0 : 0.0,
+    };
+    _lastToolbarScrollDelta = 0;
+    _animateToolbarTo(target);
+  }
+
   void _animateToolbarTo(double target) {
     if (_pullActive) return;
     if ((_toolbarRevealController.value - target).abs() < 0.001) {
@@ -512,15 +586,16 @@ class _AppShellState extends ConsumerState<AppShell>
 
   @override
   Widget build(BuildContext context) {
-    // Keep artwork sampling tied to song selection, including before the
-    // lazily mounted player is first opened. Listening also retains its result.
-    ref.listen(playerArtworkColorsProvider, (_, _) {});
     final contentLocation = _contentLocation;
+    // The three-tab bars keep the underlying tab selected because they have
+    // no player destination of their own.
+    final tabLocation = isPlaybackArtistLocation(widget.location)
+        ? Uri.parse(_playerReturnLocation).path
+        : contentLocation;
     final contentRoute = widget.location == '/player'
         ? _playerReturnLocation
         : widget.routeLocation;
     final viewport = MediaQuery.sizeOf(context);
-    _transition.devicePixelRatio = View.of(context).devicePixelRatio;
     if (_transition.viewport != viewport) {
       _transition.viewport = viewport;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -538,15 +613,20 @@ class _AppShellState extends ConsumerState<AppShell>
     );
     final pageBackground = Theme.of(context).scaffoldBackgroundColor;
     final isPlayer = widget.location == '/player';
+    final toolbarTravelExtent = _bottomToolbarTravelExtent(context);
+    _toolbarTravelExtent = toolbarTravelExtent;
     final navigationMode = ref.watch(
       settingsProvider.select((settings) => settings.navigationMode),
     );
-    final showPlayerBar = ref.watch(
-      playerControllerProvider.select(
-        (state) => state.hasTrack || state.loading,
-      ),
-    );
+    final showPlayerBar =
+        navigationMode != AppNavigationMode.singleCapsule &&
+        ref.watch(
+          playerControllerProvider.select(
+            (state) => state.hasTrack || state.loading,
+          ),
+        );
     final shellControlsVisible =
+        navigationMode != AppNavigationMode.singleCapsule &&
         MediaQuery.viewInsetsOf(context).bottom == 0 &&
         ref.watch(shellToolbarVisibleProvider) &&
         !(isSongsLibraryLocation(contentLocation) &&
@@ -572,13 +652,15 @@ class _AppShellState extends ConsumerState<AppShell>
         ? nativeFloatingPlayerExtent(context)
         : 0.0;
     final dualBottomExtent =
-        shellControlsVisible &&
-            navigationMode == AppNavigationMode.floatingCapsule
-        ? floatingCapsuleBottomAreaHeight(context, showPlayer: showPlayerBar)
+        shellControlsVisible && navigationMode == AppNavigationMode.dualCapsule
+        ? dualCapsuleBottomAreaHeight(context, showPlayer: showPlayerBar)
         : 0.0;
+
     ref.listen<AppNavigationMode>(
       settingsProvider.select((settings) => settings.navigationMode),
       (previous, next) {
+        _toolbarScrollSequenceActive = false;
+        _lastToolbarScrollDelta = 0;
         _toolbarRevealController.stop(canceled: false);
         _toolbarRevealController.value = 1;
       },
@@ -590,6 +672,8 @@ class _AppShellState extends ConsumerState<AppShell>
     ref.listen<SongsToolbarState>(songsToolbarStateProvider, (previous, next) {
       if (!isSongsLibraryLocation(contentLocation)) return;
       if (next.batchMode) {
+        _toolbarScrollSequenceActive = false;
+        _lastToolbarScrollDelta = 0;
         _toolbarRevealController.stop(canceled: false);
       } else if (previous?.batchMode == true) {
         _animateToolbarTo(1);
@@ -601,6 +685,8 @@ class _AppShellState extends ConsumerState<AppShell>
     ) {
       if (!isPlaylistDetailLocation(contentLocation)) return;
       if (next.batchMode) {
+        _toolbarScrollSequenceActive = false;
+        _lastToolbarScrollDelta = 0;
         _toolbarRevealController.stop(canceled: false);
       } else if (previous?.batchMode == true) {
         _animateToolbarTo(1);
@@ -617,11 +703,13 @@ class _AppShellState extends ConsumerState<AppShell>
             navigationMode: navigationMode,
             extent: switch (navigationMode) {
               AppNavigationMode.native => nativeBottomExtent,
-              AppNavigationMode.floatingCapsule => dualBottomExtent,
+              AppNavigationMode.dualCapsule => dualBottomExtent,
+              AppNavigationMode.singleCapsule => 0.0,
             },
             floatingExtent: switch (navigationMode) {
               AppNavigationMode.native => nativeFloatingExtent,
-              AppNavigationMode.floatingCapsule => dualBottomExtent,
+              AppNavigationMode.dualCapsule => dualBottomExtent,
+              AppNavigationMode.singleCapsule => 0.0,
             },
             child: Scaffold(
               extendBody: true,
@@ -641,7 +729,22 @@ class _AppShellState extends ConsumerState<AppShell>
                       // Keep the outer navigator mounted across tab changes;
                       // its StatefulShellRoute owns the retained branch stacks.
                       child: RepaintBoundary(
-                        child: ClipRect(child: widget.child),
+                        child: ClipRect(
+                          child: Listener(
+                            behavior: HitTestBehavior.translucent,
+                            onPointerUp: (_) => _finishToolbarScrollSequence(),
+                            onPointerCancel: (_) =>
+                                _finishToolbarScrollSequence(),
+                            child: NotificationListener<ScrollNotification>(
+                              onNotification: _handleToolbarScrollNotification,
+                              child: ShellEdgeBackScope(
+                                location: widget.location,
+                                onBack: _handleBackButton,
+                                child: widget.child,
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -676,9 +779,9 @@ class _AppShellState extends ConsumerState<AppShell>
                         );
                       },
                       child: switch (navigationMode) {
-                        AppNavigationMode.floatingCapsule =>
-                          FloatingCapsuleBottomNavigation(
-                            location: contentLocation,
+                        AppNavigationMode.dualCapsule =>
+                          DualCapsuleBottomNavigation(
+                            location: tabLocation,
                             routeLocation: contentRoute,
                             showPlayer: showPlayerBar,
                             visible: shellControlsVisible,
@@ -686,11 +789,17 @@ class _AppShellState extends ConsumerState<AppShell>
                             isPlayer: isPlayer,
                           ),
                         AppNavigationMode.native => NativeBottomNavigation(
-                          location: contentLocation,
+                          location: tabLocation,
                           routeLocation: contentRoute,
                           showPlayer: showPlayerBar,
                           visible: shellControlsVisible,
                           reveal: _toolbarRevealController,
+                        ),
+                        AppNavigationMode.singleCapsule => BottomToolbar(
+                          location: contentLocation,
+                          routeLocation: contentRoute,
+                          reveal: _toolbarRevealController,
+                          travelExtent: toolbarTravelExtent,
                         ),
                       },
                     ),
@@ -738,7 +847,7 @@ class _AppShellState extends ConsumerState<AppShell>
             final p = _pull.value;
             final visible = p > 0 || isPlayer;
             final interactive = visible && _settleTarget != 0;
-            return IgnorePointer(
+            final surface = IgnorePointer(
               ignoring: !interactive,
               child: ExcludeSemantics(
                 excluding: !interactive,
@@ -751,14 +860,9 @@ class _AppShellState extends ConsumerState<AppShell>
                         fit: StackFit.expand,
                         clipBehavior: Clip.none,
                         children: [
-                          ClipPath(
+                          ClipRRect(
                             key: const ValueKey('player-surface-clip'),
-                            clipBehavior: p == 1 ? Clip.none : Clip.antiAlias,
-                            clipper: PlayerSurfaceClipper(
-                              _transition.surface,
-                              _transition.screenCorners.curve,
-                              _transition.cornerBlend,
-                            ),
+                            clipper: _PlayerSurfaceClipper(_transition.surface),
                             child: Stack(
                               fit: StackFit.expand,
                               children: [
@@ -777,6 +881,15 @@ class _AppShellState extends ConsumerState<AppShell>
                   ),
                 ),
               ),
+            );
+            return ShellEdgeBack(
+              canStart: () =>
+                  widget.location == '/player' &&
+                  !_pullActive &&
+                  _settleTarget == null &&
+                  !Navigator.of(context, rootNavigator: true).canPop(),
+              onBack: _dismissPlayer,
+              child: surface,
             );
           },
         ),
@@ -798,17 +911,18 @@ class _AppShellState extends ConsumerState<AppShell>
         child: ExcludeSemantics(
           child: AnimatedBuilder(
             animation: _transition,
-            child: RotationTransition(
-              turns: square
-                  ? const AlwaysStoppedAnimation<double>(0)
-                  : _coverRotation,
-              child: RepaintBoundary(
+            child: RepaintBoundary(
+              child: RotationTransition(
+                turns: square
+                    ? const AlwaysStoppedAnimation<double>(0)
+                    : _coverRotation,
                 child: PlayerArtworkImage(
                   url: CoverImageSource.normalizeUrl(
                     track?.coverUrl,
                     size: 700,
                   ),
                   bytes: track?.coverBytes,
+                  animate: false,
                   placeholder: ColoredBox(
                     color: scheme.surfaceContainerHighest,
                     child: const Center(child: Icon(Icons.album_rounded)),
@@ -818,45 +932,21 @@ class _AppShellState extends ConsumerState<AppShell>
             ),
             builder: (context, child) {
               final flight = track == null ? null : _transition.coverRect;
-              final destination = _transition.fullCover;
-              final visible = flight != null && destination != null;
-              final artworkRect = destination ?? Rect.zero;
               return Stack(
                 children: [
-                  // Keep this image subscribed between flights so it retains
-                  // the same ready artwork as the mini and full player covers.
-                  Positioned.fromRect(
-                    rect: artworkRect,
-                    child: Offstage(
-                      offstage: !visible,
-                      child: TickerMode(
-                        enabled: true,
-                        child: Transform.translate(
-                          offset: visible
-                              ? flight.topLeft - artworkRect.topLeft
-                              : Offset.zero,
-                          child: Transform.scale(
-                            scale: visible
-                                ? flight.width / artworkRect.width
-                                : 1,
-                            alignment: Alignment.topLeft,
-                            child: RepaintBoundary(
-                              key: const ValueKey('player-shared-cover'),
-                              child: square
-                                  ? ClipRRect(
-                                      borderRadius: BorderRadius.circular(
-                                        artworkRect.width *
-                                            kSquareCoverRadiusFactor,
-                                      ),
-                                      child: child,
-                                    )
-                                  : ClipOval(child: child),
-                            ),
-                          ),
-                        ),
-                      ),
+                  if (flight != null)
+                    Positioned.fromRect(
+                      key: const ValueKey('player-shared-cover'),
+                      rect: flight,
+                      child: square
+                          ? ClipRRect(
+                              borderRadius: BorderRadius.circular(
+                                flight.width * kSquareCoverRadiusFactor,
+                              ),
+                              child: child,
+                            )
+                          : ClipOval(child: child),
                     ),
-                  ),
                 ],
               );
             },
@@ -869,10 +959,6 @@ class _AppShellState extends ConsumerState<AppShell>
 
 const _doubleBackExitWindow = Duration(seconds: 2);
 
-bool _isTopLevelMenuLocation(String location) {
-  return location == '/' || location == '/songs' || location == '/settings';
-}
-
 const _appTaskChannel = MethodChannel('cy_shine_music/app_task');
 
 Future<void> _moveAppTaskToBack() async {
@@ -882,4 +968,23 @@ Future<void> _moveAppTaskToBack() async {
     // If the native channel is unavailable, still consume back so Android does
     // not destroy the Flutter route stack.
   }
+}
+
+double _bottomToolbarTravelExtent(BuildContext context) {
+  final toolbarHeight = toolbarHeightFor(context);
+  final safeBottom = math.max(
+    MediaQuery.paddingOf(context).bottom,
+    toolbarMinimumBottomInset,
+  );
+  return toolbarHeight + safeBottom;
+}
+
+class _PlayerSurfaceClipper extends CustomClipper<RRect> {
+  const _PlayerSurfaceClipper(this.surface);
+  final RRect surface;
+  @override
+  RRect getClip(Size size) => surface;
+  @override
+  bool shouldReclip(_PlayerSurfaceClipper oldClipper) =>
+      surface != oldClipper.surface;
 }

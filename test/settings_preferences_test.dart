@@ -7,16 +7,14 @@ import 'package:cy_shine_music/core/api/dio_factory.dart';
 import 'package:cy_shine_music/core/models/enums.dart';
 import 'package:cy_shine_music/core/models/music_info.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
+import 'package:cy_shine_music/features/player/lyric_parser.dart';
+import 'package:cy_shine_music/features/player/widgets/lyric_line.dart';
 import 'package:cy_shine_music/features/search/widgets/source_filter_chips.dart';
 import 'package:cy_shine_music/features/settings/settings_page.dart';
-import 'package:cy_shine_music/features/settings/settings_section.dart';
 import 'package:cy_shine_music/features/settings/widgets/settings_action.dart';
 import 'package:cy_shine_music/features/settings/widgets/settings_style.dart';
 import 'package:cy_shine_music/theme/app_theme.dart';
 import 'package:cy_shine_music/theme/color_style.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
-
-import 'helpers/prism_test_environment.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -26,35 +24,7 @@ void main() {
   });
 
   test(
-    'Qishui search is added once on upgrade and stays disabled after an explicit choice',
-    () async {
-      SharedPreferences.setMockInitialValues({
-        'enabled_search_source_codes': ['kw'],
-      });
-      final prefs = await SharedPreferences.getInstance();
-      final first = _settingsContainer(prefs);
-      expect(first.read(settingsProvider).enabledSearchSources, {
-        MusicSource.kw,
-        MusicSource.qs,
-      });
-      await first
-          .read(settingsProvider.notifier)
-          .setSearchSourceEnabled(MusicSource.qs, false);
-      first.dispose();
-      final restored = _settingsContainer(prefs);
-      addTearDown(restored.dispose);
-      expect(restored.read(settingsProvider).enabledSearchSources, {
-        MusicSource.kw,
-      });
-      expect(
-        restored.read(settingsProvider).enabledSearchSources,
-        isNot(contains(MusicSource.mg)),
-      );
-    },
-  );
-
-  test(
-    'settings default to five search sources and highest quality preferences',
+    'settings default to four search sources and highest quality preferences',
     () async {
       final prefs = await SharedPreferences.getInstance();
       final container = _settingsContainer(prefs);
@@ -69,7 +39,6 @@ void main() {
       expect(settings.showMiniLyrics, isTrue);
       expect(settings.allowMixWithOthers, isFalse);
       expect(settings.autoPlayOnStartup, isFalse);
-      expect(settings.grooveShiftEnabled, isFalse);
       expect(settings.bluetoothLyricEnabled, isFalse);
       expect(settings.bluetoothFullLyricEnabled, isFalse);
       expect(settings.bluetoothLyricNoticeSeen, isFalse);
@@ -98,6 +67,229 @@ void main() {
     expect(restored.useDynamicColor, isTrue);
     expect(restored.onlinePlaybackQuality, OnlinePlaybackQuality.lossless);
   });
+
+  test(
+    'translation style migrates and persists independently of originals',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        'lyric_font_size': 48.0,
+        'lyric_font_weight': 800.0,
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final container = _settingsContainer(prefs);
+      final notifier = container.read(settingsProvider.notifier);
+      expect(container.read(settingsProvider).lyricTranslationFontSize, 21);
+      expect(container.read(settingsProvider).lyricFontWeight, 800);
+      expect(container.read(settingsProvider).lyricTranslationFontWeight, 700);
+
+      final legacyAppearance = notifier.exportAppearanceForSync()
+        ..remove('lyricTranslationFontSize')
+        ..remove('lyricTranslationFontWeight');
+      await notifier.applyAppearanceFromSync({
+        ...legacyAppearance,
+        'lyricFontSize': 40,
+        'lyricFontWeight': 200,
+      });
+      container.dispose();
+
+      final restored = _settingsContainer(prefs);
+      final restoredNotifier = restored.read(settingsProvider.notifier);
+      expect(restored.read(settingsProvider).lyricFontSize, 40);
+      expect(restored.read(settingsProvider).lyricTranslationFontSize, 21);
+      expect(restored.read(settingsProvider).lyricFontWeight, 200);
+      expect(restored.read(settingsProvider).lyricTranslationFontWeight, 700);
+
+      await restoredNotifier.applyAppearanceFromSync({
+        ...legacyAppearance,
+        'lyricTranslationFontSize': 30,
+        'lyricTranslationFontWeight': 900,
+      });
+      await restoredNotifier.setLyricFontStyle(weight: 500, size: 32);
+      expect(
+        restoredNotifier.exportAppearanceForSync()['lyricTranslationFontSize'],
+        30,
+      );
+      expect(
+        restoredNotifier
+            .exportAppearanceForSync()['lyricTranslationFontWeight'],
+        900,
+      );
+      restored.dispose();
+
+      final reloaded = _settingsContainer(prefs);
+      addTearDown(reloaded.dispose);
+      expect(reloaded.read(settingsProvider).lyricFontSize, 32);
+      expect(reloaded.read(settingsProvider).lyricTranslationFontSize, 30);
+      expect(reloaded.read(settingsProvider).lyricFontWeight, 500);
+      expect(reloaded.read(settingsProvider).lyricTranslationFontWeight, 900);
+    },
+  );
+
+  testWidgets('lyric settings preview, save and reset independent styles', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final prefs = await SharedPreferences.getInstance();
+    final container = _settingsContainer(prefs);
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(theme: AppTheme.light(), home: const SettingsPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final playerRow = find.byKey(const ValueKey('player-interface-setting'));
+    await tester.ensureVisible(playerRow);
+    await tester.pumpAndSettle();
+    await tester.tap(playerRow);
+    await tester.pumpAndSettle();
+    final lyricRow = find.byKey(const ValueKey('lyric-interface-setting'));
+    await tester.tap(lyricRow);
+    await tester.pumpAndSettle();
+
+    final weightLabels = find.text('字体粗细');
+    expect(weightLabels, findsNWidgets(2));
+    final positions = [
+      tester.getTopLeft(find.text('原歌词大小')).dy,
+      tester.getTopLeft(weightLabels.first).dy,
+      tester.getTopLeft(find.text('译文大小')).dy,
+      tester.getTopLeft(weightLabels.last).dy,
+    ];
+    expect(positions, [...positions]..sort());
+
+    TextStyle previewStyle(String sample) =>
+        tester.widget<Text>(find.text(sample)).style!;
+    const original = 'Hear what you love';
+    const translation = '听见热爱';
+    expect(previewStyle(original).fontSize, 32);
+    expect(previewStyle(translation).fontSize, 14);
+    expect(previewStyle(original).fontWeight, FontWeight.w500);
+    expect(previewStyle(translation).fontWeight, FontWeight.w400);
+
+    final originalIncrease = find.byTooltip('增大原歌词大小');
+    await tester.ensureVisible(originalIncrease);
+    await tester.pumpAndSettle();
+    await tester.tap(originalIncrease);
+    await tester.pumpAndSettle();
+    expect(previewStyle(original).fontSize, 33);
+    expect(previewStyle(translation).fontSize, 14);
+
+    final originalWeightIncrease = find.byTooltip('增大字体粗细').first;
+    await tester.ensureVisible(originalWeightIncrease);
+    await tester.pumpAndSettle();
+    await tester.tap(originalWeightIncrease);
+    await tester.pumpAndSettle();
+    expect(previewStyle(original).fontWeight, FontWeight.w600);
+    expect(previewStyle(translation).fontWeight, FontWeight.w400);
+
+    Finder styleField(String label) => find.descendant(
+      of: find.byWidgetPredicate(
+        (widget) => widget is Semantics && widget.properties.label == label,
+      ),
+      matching: find.byType(TextField),
+    );
+    final translationSize = styleField('译文大小');
+    await tester.ensureVisible(translationSize);
+    await tester.pumpAndSettle();
+    await tester.enterText(translationSize, '27');
+    await tester.pumpAndSettle();
+    expect(previewStyle(original).fontSize, 33);
+    expect(previewStyle(translation).fontSize, 27);
+
+    final translationWeight = styleField('字体粗细').last;
+    await tester.ensureVisible(translationWeight);
+    await tester.pumpAndSettle();
+    await tester.enterText(translationWeight, '800');
+    await tester.pumpAndSettle();
+    expect(previewStyle(original).fontWeight, FontWeight.w600);
+    expect(previewStyle(translation).fontWeight, FontWeight.w800);
+
+    await tester.tap(find.widgetWithText(FilledButton, '完成').last);
+    await tester.pumpAndSettle();
+    expect(container.read(settingsProvider).lyricFontSize, 33);
+    expect(container.read(settingsProvider).lyricTranslationFontSize, 27);
+    expect(container.read(settingsProvider).lyricFontWeight, 600);
+    expect(container.read(settingsProvider).lyricTranslationFontWeight, 800);
+
+    await tester.tap(lyricRow);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('重置'));
+    await tester.pumpAndSettle();
+    expect(previewStyle(original).fontWeight, FontWeight.w500);
+    expect(previewStyle(translation).fontWeight, FontWeight.w400);
+    await tester.tap(find.widgetWithText(FilledButton, '完成').last);
+    await tester.pumpAndSettle();
+    expect(container.read(settingsProvider).lyricFontWeight, 500);
+    expect(container.read(settingsProvider).lyricTranslationFontWeight, 400);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'full lyrics render translation style independently of original and roman',
+    (tester) async {
+      final prefs = await SharedPreferences.getInstance();
+      final container = _settingsContainer(prefs);
+      addTearDown(container.dispose);
+      final blurSuppressed = ValueNotifier(false);
+      final anchorMs = ValueNotifier(0);
+      final playing = ValueNotifier(false);
+      final buffering = ValueNotifier(false);
+      addTearDown(blurSuppressed.dispose);
+      addTearDown(anchorMs.dispose);
+      addTearDown(playing.dispose);
+      addTearDown(buffering.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: LyricLineTile(
+                line: const KaraokeLyricLine(
+                  startMs: 0,
+                  endMs: 1000,
+                  text: 'Original lyric',
+                  translation: '中文译文',
+                  roman: 'zhong wen yi wen',
+                ),
+                active: true,
+                selected: false,
+                distance: 0,
+                blurSuppressed: blurSuppressed,
+                showTranslation: true,
+                anchorMs: anchorMs,
+                playing: playing,
+                buffering: buffering,
+                onSelect: () {},
+                onSeek: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      TextStyle renderedStyle(String lyric) =>
+          DefaultTextStyle.of(tester.element(find.text(lyric))).style;
+      await container
+          .read(settingsProvider.notifier)
+          .setLyricFontStyle(
+            weight: 700,
+            size: 32,
+            translationWeight: 900,
+            translationSize: 30,
+          );
+      await tester.pumpAndSettle();
+      expect(renderedStyle('Original lyric').fontSize, 32);
+      expect(renderedStyle('中文译文').fontSize, 30);
+      expect(renderedStyle('zhong wen yi wen').fontSize, 12);
+      expect(renderedStyle('Original lyric').fontWeight, FontWeight.w700);
+      expect(renderedStyle('中文译文').fontWeight, FontWeight.w900);
+      expect(renderedStyle('zhong wen yi wen').fontWeight, FontWeight.w600);
+    },
+  );
 
   test('color style persists and defaults to soft', () async {
     final prefs = await SharedPreferences.getInstance();
@@ -268,35 +460,6 @@ void main() {
     },
   );
 
-  test('GrooveShift switch persists under its current name', () async {
-    final prefs = await SharedPreferences.getInstance();
-    final container = _settingsContainer(prefs);
-    expect(container.read(settingsProvider).grooveShiftEnabled, isFalse);
-
-    await container.read(settingsProvider.notifier).setGrooveShiftEnabled(true);
-    expect(prefs.getBool('groove_shift_enabled'), isTrue);
-    container.dispose();
-
-    final restored = _settingsContainer(prefs);
-    addTearDown(restored.dispose);
-    expect(restored.read(settingsProvider).grooveShiftEnabled, isTrue);
-  });
-
-  test('GrooveShift can be disabled after restart', () async {
-    SharedPreferences.setMockInitialValues({'groove_shift_enabled': true});
-    final prefs = await SharedPreferences.getInstance();
-    final container = _settingsContainer(prefs);
-    expect(container.read(settingsProvider).grooveShiftEnabled, isTrue);
-    await container
-        .read(settingsProvider.notifier)
-        .setGrooveShiftEnabled(false);
-    container.dispose();
-
-    final restored = _settingsContainer(prefs);
-    addTearDown(restored.dispose);
-    expect(restored.read(settingsProvider).grooveShiftEnabled, isFalse);
-  });
-
   test('player preferences persist', () async {
     final prefs = await SharedPreferences.getInstance();
     final container = _settingsContainer(prefs);
@@ -344,20 +507,13 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: MaterialApp(
-          builder: buildPrismTestEnvironment,
-          theme: AppTheme.light(),
-          home: const SettingsPage(section: SettingsSection.playback),
-        ),
+        child: MaterialApp(theme: AppTheme.light(), home: const SettingsPage()),
       ),
     );
     await tester.pumpAndSettle();
 
     final row = find.byKey(const ValueKey('bluetooth-lyric-setting'));
-    final toggle = find.descendant(
-      of: row,
-      matching: find.byType(prism.Switch),
-    );
+    final toggle = find.descendant(of: row, matching: find.byType(Switch));
     await tester.ensureVisible(toggle);
     await tester.pumpAndSettle();
     await tester.tap(toggle);
@@ -381,7 +537,6 @@ void main() {
   ) async {
     await tester.pumpWidget(
       MaterialApp(
-        builder: buildPrismTestEnvironment,
         theme: AppTheme.light(),
         home: Scaffold(
           body: Column(
@@ -449,58 +604,42 @@ void main() {
     expect(prefs.getString('base_url'), isNull);
   });
 
-  testWidgets(
-    'settings categories expose related controls instead of resolver settings',
-    (tester) async {
-      await tester.binding.setSurfaceSize(const Size(430, 900));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      final prefs = await SharedPreferences.getInstance();
-      final container = _settingsContainer(prefs);
-      addTearDown(container.dispose);
+  testWidgets('settings exposes music source management instead of resolver', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final prefs = await SharedPreferences.getInstance();
+    final container = _settingsContainer(prefs);
+    addTearDown(container.dispose);
 
-      Future<void> pumpSection(SettingsSection section) async {
-        await tester.pumpWidget(
-          UncontrolledProviderScope(
-            container: container,
-            child: MaterialApp(
-              builder: buildPrismTestEnvironment,
-              theme: AppTheme.light(),
-              home: SettingsPage(section: section),
-            ),
-          ),
-        );
-        await tester.pumpAndSettle();
-      }
-
-      await pumpSection(SettingsSection.network);
-      expect(find.text('音源管理'), findsOneWidget);
-      final pickerSetting = find.byKey(
-        const ValueKey('source-file-picker-setting'),
-      );
-      await tester.tap(
-        find.descendant(of: pickerSetting, matching: find.byType(prism.Switch)),
-      );
-      await tester.pumpAndSettle();
-      expect(
-        container.read(settingsProvider).useBuiltInSourceFilePicker,
-        isTrue,
-      );
-      expect(find.text('WebDAV 同步'), findsOneWidget);
-      expect(find.text('URL 解析服务器'), findsNothing);
-      expect(find.text('解析服务器健康检查'), findsNothing);
-      await pumpSection(SettingsSection.playback);
-      expect(find.text('允许与其他 APP 共同播放'), findsOneWidget);
-      await pumpSection(SettingsSection.downloads);
-      expect(find.text('批量下载音质'), findsOneWidget);
-      expect(find.text('目录'), findsOneWidget);
-      expect(find.text('浏览U盘'), findsOneWidget);
-      expect(find.text('添加 U 盘文件夹'), findsOneWidget);
-      expect(find.text('下载位置'), findsOneWidget);
-      await pumpSection(SettingsSection.about);
-      expect(find.text('检查更新'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(theme: AppTheme.light(), home: const SettingsPage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('音源管理'), findsOneWidget);
+    final pickerSetting = find.byKey(
+      const ValueKey('source-file-picker-setting'),
+    );
+    await tester.tap(
+      find.descendant(of: pickerSetting, matching: find.byType(Switch)),
+    );
+    await tester.pumpAndSettle();
+    expect(container.read(settingsProvider).useBuiltInSourceFilePicker, isTrue);
+    expect(find.text('WebDAV 同步'), findsOneWidget);
+    expect(find.text('允许与其他 APP 共同播放'), findsOneWidget);
+    expect(find.text('批量下载音质'), findsOneWidget);
+    expect(find.text('扫描文件夹'), findsOneWidget);
+    expect(find.text('浏览U盘'), findsNWidgets(2));
+    expect(find.text('检查更新'), findsOneWidget);
+    expect(find.byIcon(Icons.folder_outlined), findsOneWidget);
+    expect(find.text('URL 解析服务器'), findsNothing);
+    expect(find.text('解析服务器健康检查'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   test(
     'search sources and playback quality persist and reject an empty set',
@@ -515,12 +654,7 @@ void main() {
       );
       await notifier.setOnlinePlaybackQuality(OnlinePlaybackQuality.lossless);
       await notifier.setBatchDownloadQuality(OnlinePlaybackQuality.high);
-      for (final source in [
-        MusicSource.kg,
-        MusicSource.tx,
-        MusicSource.wy,
-        MusicSource.qs,
-      ]) {
+      for (final source in [MusicSource.kg, MusicSource.tx, MusicSource.wy]) {
         expect(await notifier.setSearchSourceEnabled(source, false), isTrue);
       }
       expect(
@@ -660,7 +794,6 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp(
-            builder: buildPrismTestEnvironment,
             theme: AppTheme.light(),
             home: const Scaffold(body: SourceFilterChips()),
           ),
@@ -700,78 +833,158 @@ void main() {
     },
   );
 
-  testWidgets('Prism menus apply network and quality choices and can reopen', (
-    tester,
-  ) async {
-    await tester.binding.setSurfaceSize(const Size(430, 900));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    final container = _settingsContainer(await SharedPreferences.getInstance());
-    addTearDown(container.dispose);
+  testWidgets(
+    'anchored menu uses the staggered Material radio menu animation',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(430, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final prefs = await SharedPreferences.getInstance();
+      final container = _settingsContainer(prefs);
+      addTearDown(container.dispose);
 
-    Future<void> pumpSection(SettingsSection section) async {
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp(
-            builder: buildPrismTestEnvironment,
             theme: AppTheme.light(),
-            home: SettingsPage(section: section),
+            home: const SettingsPage(),
           ),
         ),
       );
       await tester.pumpAndSettle();
-    }
+      expect(find.byIcon(Icons.cable_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.manage_search_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.high_quality_rounded), findsOneWidget);
+      expect(Icons.cable_rounded.fontFamily, 'MaterialIcons');
+      expect(Icons.manage_search_rounded.fontFamily, 'MaterialIcons');
+      expect(Icons.high_quality_rounded.fontFamily, 'MaterialIcons');
 
-    await pumpSection(SettingsSection.network);
-    final anchor = find.byKey(const ValueKey('network-adapter-menu-anchor'));
-    await tester.tap(anchor);
-    await tester.pumpAndSettle();
-    expect(find.byType(prism.PopupMenu), findsOneWidget);
-    expect(
-      tester
-          .widget<prism.PopupMenu>(find.byType(prism.PopupMenu))
-          .items
-          .singleWhere((item) => item.label == NetworkAdapterMode.system.label)
-          .checked,
-      isTrue,
-    );
-    await tester.tap(find.text(NetworkAdapterMode.io.label));
-    await tester.pumpAndSettle();
-    expect(
-      container.read(settingsProvider).networkAdapterMode,
-      NetworkAdapterMode.io,
-    );
-    expect(find.byType(prism.PopupMenu), findsNothing);
-    await tester.tap(anchor);
-    await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<prism.PopupMenu>(find.byType(prism.PopupMenu))
-          .items
-          .singleWhere((item) => item.label == NetworkAdapterMode.io.label)
-          .checked,
-      isTrue,
-    );
-    expect(await tester.binding.handlePopRoute(), isTrue);
-    await tester.pumpAndSettle();
+      final anchor = find.byKey(const ValueKey('network-adapter-menu-anchor'));
+      final anchorRect = tester.getRect(anchor);
+      final leftTouch = Offset(anchorRect.left + 12, anchorRect.center.dy);
+      await tester.tapAt(leftTouch);
+      await tester.pump();
 
-    await pumpSection(SettingsSection.playback);
-    final qualityAnchor = find.byKey(
-      const ValueKey('online-quality-menu-anchor'),
-    );
-    await tester.tap(qualityAnchor);
-    await tester.pumpAndSettle();
-    expect(find.byType(prism.PopupMenu), findsOneWidget);
-    await tester.tap(find.text(OnlinePlaybackQuality.lossless.label));
-    await tester.pumpAndSettle();
-    expect(
-      container.read(settingsProvider).onlinePlaybackQuality,
-      OnlinePlaybackQuality.lossless,
-    );
-    expect(find.byType(prism.PopupMenu), findsNothing);
-    expect(tester.takeException(), isNull);
-    await tester.pump(const Duration(seconds: 4));
-  });
+      final panel = find.byKey(const ValueKey('network-adapter-menu-panel'));
+      final fade = find.byKey(const ValueKey('network-adapter-menu-fade'));
+      final reveal = find.byKey(const ValueKey('network-adapter-menu-reveal'));
+      final firstOptionFade = find.byKey(
+        const ValueKey('network-adapter-menu-option-system-fade'),
+      );
+      final middleOptionFade = find.byKey(
+        const ValueKey('network-adapter-menu-option-io-fade'),
+      );
+      final lastOptionFade = find.byKey(
+        const ValueKey('network-adapter-menu-option-native-fade'),
+      );
+      expect(panel, findsOneWidget);
+      final initialPanelRect = tester.getRect(panel);
+      expect(
+        tester.widget<FadeTransition>(fade).opacity.value,
+        closeTo(0, 0.001),
+      );
+      expect(tester.widget<Align>(reveal).heightFactor, closeTo(0, 0.001));
+      expect(
+        tester.widget<FadeTransition>(firstOptionFade).opacity.value,
+        closeTo(0, 0.001),
+      );
+
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(
+        tester.widget<FadeTransition>(fade).opacity.value,
+        closeTo(1, 0.001),
+      );
+      expect(tester.widget<Align>(reveal).heightFactor, inExclusiveRange(0, 1));
+
+      await tester.pump(const Duration(milliseconds: 75));
+      expect(
+        tester.widget<FadeTransition>(firstOptionFade).opacity.value,
+        closeTo(0.5, 0.001),
+      );
+      expect(
+        tester.widget<FadeTransition>(middleOptionFade).opacity.value,
+        closeTo(0, 0.001),
+      );
+      expect(
+        tester.widget<FadeTransition>(lastOptionFade).opacity.value,
+        closeTo(0, 0.001),
+      );
+
+      await tester.pump(const Duration(milliseconds: 125));
+      expect(
+        tester.widget<FadeTransition>(firstOptionFade).opacity.value,
+        closeTo(1, 0.001),
+      );
+      expect(
+        tester.widget<FadeTransition>(middleOptionFade).opacity.value,
+        closeTo(0.5, 0.001),
+      );
+      expect(
+        tester.widget<FadeTransition>(lastOptionFade).opacity.value,
+        closeTo(0, 0.001),
+      );
+
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(
+        tester.widget<FadeTransition>(fade).opacity.value,
+        closeTo(1, 0.001),
+      );
+      expect(tester.widget<Align>(reveal).heightFactor, closeTo(1, 0.001));
+      expect(
+        tester.widget<FadeTransition>(lastOptionFade).opacity.value,
+        closeTo(1, 0.001),
+      );
+      final leftPanelRect = tester.getRect(panel);
+      expect(leftPanelRect.width, closeTo(initialPanelRect.width, 0.01));
+      expect(leftPanelRect.top, closeTo(initialPanelRect.top, 0.01));
+      expect(leftPanelRect.left, greaterThanOrEqualTo(leftTouch.dx));
+      expect(leftPanelRect.width, lessThanOrEqualTo(184.01));
+
+      await tester.tapAt(const Offset(420, 880));
+      await tester.pumpAndSettle();
+      expect(panel, findsNothing);
+
+      final rightTouch = Offset(anchorRect.right - 12, anchorRect.center.dy);
+      await tester.tapAt(rightTouch);
+      await tester.pumpAndSettle();
+      final rightPanelRect = tester.getRect(panel);
+      expect(rightPanelRect.right, lessThanOrEqualTo(rightTouch.dx));
+      await tester.tap(
+        find.byKey(const ValueKey('network-adapter-menu-option-io')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        container.read(settingsProvider).networkAdapterMode,
+        NetworkAdapterMode.io,
+      );
+      expect(panel, findsNothing);
+      await tester.pump(const Duration(seconds: 4));
+
+      final qualityAnchor = find.byKey(
+        const ValueKey('online-quality-menu-anchor'),
+      );
+      await tester.tap(qualityAnchor);
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      final qualityPanel = find.byKey(
+        const ValueKey('online-quality-menu-panel'),
+      );
+      expect(qualityPanel, findsOneWidget);
+      expect(tester.getSize(qualityPanel).width, lessThanOrEqualTo(184.01));
+      await tester.tap(
+        find.byKey(const ValueKey('online-quality-menu-option-flac')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        container.read(settingsProvider).onlinePlaybackQuality,
+        OnlinePlaybackQuality.lossless,
+      );
+      expect(qualityPanel, findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 4));
+    },
+  );
 
   testWidgets('search source management stays open for multi-selection', (
     tester,
@@ -785,11 +998,7 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: MaterialApp(
-          builder: buildPrismTestEnvironment,
-          theme: AppTheme.light(),
-          home: const SettingsPage(section: SettingsSection.playback),
-        ),
+        child: MaterialApp(theme: AppTheme.light(), home: const SettingsPage()),
       ),
     );
     await tester.pumpAndSettle();
@@ -797,10 +1006,13 @@ void main() {
     final anchor = find.byKey(const ValueKey('search-source-menu-anchor'));
     await tester.tap(anchor);
     await tester.pumpAndSettle();
-    final panel = find.byType(prism.PopupMenu);
-    final miguOption = find.text('咪咕');
+    final panel = find.byKey(const ValueKey('search-source-menu-panel'));
+    final miguOption = find.byKey(
+      const ValueKey('search-source-menu-option-mg'),
+    );
     expect(panel, findsOneWidget);
-    expect(tester.getSize(panel).width, lessThanOrEqualTo(280));
+    expect(tester.getSize(panel).width, lessThanOrEqualTo(184.01));
+    expect(tester.getSize(miguOption).height, closeTo(48, 0.01));
     await tester.tap(miguOption);
     await tester.pumpAndSettle();
 
@@ -810,13 +1022,13 @@ void main() {
     );
     expect(panel, findsOneWidget);
     expect(miguOption, findsOneWidget);
-    await tester.tap(miguOption);
-    await tester.pumpAndSettle();
     expect(
-      container.read(settingsProvider).enabledSearchSources,
-      isNot(contains(MusicSource.mg)),
+      find.descendant(
+        of: miguOption,
+        matching: find.byIcon(Icons.check_box_rounded),
+      ),
+      findsOneWidget,
     );
-    expect(panel, findsOneWidget);
     expect(await tester.binding.handlePopRoute(), isTrue);
     await tester.pumpAndSettle();
     expect(panel, findsNothing);

@@ -2,15 +2,12 @@ import 'package:bass_player/bass_player.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:cy_shine_music/core/storage/settings_store.dart';
 import 'package:cy_shine_music/features/equalizer/equalizer_store.dart';
 import 'package:cy_shine_music/features/equalizer/equalizer_page.dart';
 import 'package:cy_shine_music/features/shell/shell_toolbar_visibility.dart';
-
-import 'helpers/prism_test_environment.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -132,24 +129,15 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [sharedPreferencesProvider.overrideWithValue(preferences)],
-        child: const MaterialApp(
-          builder: buildPrismTestEnvironment,
-          home: Scaffold(body: EqualizerPage()),
-        ),
+        child: const MaterialApp(home: Scaffold(body: EqualizerPage())),
       ),
     );
 
-    expect(find.text('启用均衡器'), findsOneWidget);
-    expect(
-      tester.widget<prism.Switch>(find.byType(prism.Switch)).value,
-      isFalse,
-    );
-    await tester.tap(find.byType(prism.Switch));
+    expect(find.text('均衡器已关闭'), findsOneWidget);
+    expect(find.byType(Switch), findsOneWidget);
+    await tester.tap(find.byType(Switch));
     await tester.pump();
-    expect(
-      tester.widget<prism.Switch>(find.byType(prism.Switch)).value,
-      isTrue,
-    );
+    expect(find.text('均衡器已开启'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -169,21 +157,14 @@ void main() {
       addTearDown(container.dispose);
 
       container.read(equalizerProvider.notifier).setEnabled(true);
-      container
-          .read(equalizerProvider.notifier)
-          .applyPreset(
-            equalizerPresets.firstWhere(
-              (p) => p.id == 'builtin.studio_reference',
-            ),
-          );
+      container.read(equalizerProvider.notifier).applyPreset(
+        equalizerPresets.firstWhere((p) => p.id == 'builtin.studio_reference'),
+      );
 
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
-          child: const MaterialApp(
-            builder: buildPrismTestEnvironment,
-            home: Scaffold(body: EqualizerPage()),
-          ),
+          child: const MaterialApp(home: Scaffold(body: EqualizerPage())),
         ),
       );
       await tester.pumpAndSettle();
@@ -198,10 +179,8 @@ void main() {
       await tester.drag(find.byType(CustomScrollView), const Offset(0, -500));
       await tester.pumpAndSettle();
 
-      final editButton = find.byTooltip(RegExp(r'^编辑 .+ 频段$')).first;
+      final editButton = find.byTooltip('编辑频段').first;
       expect(editButton, findsOneWidget);
-      await tester.ensureVisible(editButton);
-      await tester.pumpAndSettle();
       await tester.tap(editButton);
       await tester.pumpAndSettle();
 
@@ -215,7 +194,7 @@ void main() {
       expect(find.text('删除此频段'), findsOneWidget);
 
       // Close the sheet
-      expect(await tester.binding.handlePopRoute(), isTrue);
+      await tester.tap(find.byTooltip('关闭'));
       await tester.pumpAndSettle();
 
       // Toolbar should be restored!

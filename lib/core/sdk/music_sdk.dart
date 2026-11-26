@@ -1,13 +1,13 @@
+import 'dart:async';
+
 import '../models/enums.dart';
 import '../models/lyric_info.dart';
 import '../models/music_info.dart';
 import '../services/app_logger.dart';
 import 'internal/builders.dart';
-import 'catalog/qs_catalog.dart';
 import 'kg_sdk.dart';
 import 'kw_sdk.dart';
 import 'mg_sdk.dart';
-import 'qs_sdk.dart';
 import 'tx_sdk.dart';
 import 'wy_sdk.dart';
 
@@ -31,10 +31,6 @@ class MusicSdkAggregator {
         return TxSdk.search(keyword, page: page, limit: limit);
       case MusicSource.wy:
         return WySdk.search(keyword, page: page, limit: limit);
-      case MusicSource.qs:
-        return qishuiCatalog
-            .searchTracks(keyword, page: page, limit: limit)
-            .then((result) => result.list);
       case MusicSource.all:
         throw ArgumentError('use search() for source=all');
     }
@@ -52,16 +48,12 @@ class MusicSdkAggregator {
         return TxSdk.tip(keyword);
       case MusicSource.wy:
         return WySdk.tip(keyword);
-      case MusicSource.qs:
-        return qishuiCatalog.tip(keyword);
       case MusicSource.all:
         throw ArgumentError('use tip() for source=all');
     }
   }
 
-  // Mirrors musicSdk/index.ts:searchMusic. For "all" sources, every platform is
-  // queried in parallel and per-source failures are swallowed (so one dead
-  // platform doesn't blank the whole result list).
+  // Query all enabled platforms in parallel and preserve successful responses.
   static Future<SearchResult> search({
     required String keyword,
     required MusicSource source,
@@ -85,17 +77,6 @@ class MusicSdkAggregator {
           allPage: page,
         );
       }
-      if (source == MusicSource.qs) {
-        final result = await qishuiCatalog.searchTracks(trimmed, page: page);
-        return SearchResult(
-          list: sortByKeyword(result.list, trimmed),
-          page: page,
-          source: source,
-          allPage: result.hasMore ? page + 1 : page,
-          total: result.list.length,
-          limit: qsSearchPageSize,
-        );
-      }
       final list = await _searchSingle(source, trimmed, page, limit);
       return SearchResult(
         list: sortByKeyword(dedupeMusic(list), trimmed),
@@ -106,24 +87,33 @@ class MusicSdkAggregator {
       );
     }
 
+    AsyncError? firstFailure;
     final results = await Future.wait(
       targets.map((s) async {
         try {
           return await _searchSingle(s, trimmed, page, limit);
-        } catch (e) {
-          await AppLogger.write('search', '${s.name} failed: $e');
-          return <MusicInfo>[];
+        } catch (error, stackTrace) {
+          firstFailure ??= AsyncError(error, stackTrace);
+          await AppLogger.write('search', '${s.name} failed: $error');
+          return null;
         }
       }),
-      eagerError: false,
     );
-    final merged = dedupeMusic(results.expand((e) => e).toList());
+    final successfulResults = results.nonNulls;
+    final failure = firstFailure;
+    if (failure != null && successfulResults.isEmpty) {
+      Error.throwWithStackTrace(failure.error, failure.stackTrace);
+    }
+    final merged = dedupeMusic(
+      successfulResults.expand((list) => list).toList(),
+    );
     return SearchResult(
       list: sortByKeyword(merged, trimmed),
       page: page,
       source: MusicSource.all,
       allPage: page + 1,
       total: merged.length,
+      hasFailedSources: failure != null,
     );
   }
 
@@ -210,8 +200,6 @@ class MusicSdkAggregator {
         return TxSdk.getLyric(info);
       case MusicSource.wy:
         return WySdk.getLyric(info);
-      case MusicSource.qs:
-        return qishuiSdk.getLyric(info);
       case MusicSource.all:
         throw ArgumentError('lyric requires a concrete source');
     }
@@ -245,8 +233,6 @@ class MusicSdkAggregator {
           return await TxSdk.getPicUrl(info);
         case MusicSource.wy:
           return await WySdk.getPicUrl(info);
-        case MusicSource.qs:
-          return cached;
         case MusicSource.all:
           return null;
       }
@@ -264,6 +250,7 @@ class SearchResult {
     this.allPage = 1,
     this.total = 0,
     this.limit = 30,
+    this.hasFailedSources = false,
   });
 
   final List<MusicInfo> list;
@@ -272,4 +259,5 @@ class SearchResult {
   final int allPage;
   final int total;
   final MusicSource source;
+  final bool hasFailedSources;
 }

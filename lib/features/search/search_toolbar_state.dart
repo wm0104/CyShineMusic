@@ -11,7 +11,6 @@ class SearchToolbarState {
     this.loading = false,
     this.onPrev,
     this.onNext,
-    this.onCloseSearch,
   });
 
   final bool visible;
@@ -21,7 +20,6 @@ class SearchToolbarState {
   final bool loading;
   final VoidCallback? onPrev;
   final VoidCallback? onNext;
-  final VoidCallback? onCloseSearch;
 }
 
 final searchToolbarStateProvider = StateProvider<SearchToolbarState>(

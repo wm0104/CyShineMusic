@@ -27,7 +27,6 @@ void main() {
         duration: const Duration(minutes: 4),
         queue: [_queueEntry('queue-1'), _queueEntry('queue-2')],
         queueIndex: 1,
-        queuePlaylistId: 'source-playlist',
         playbackModeCode: PlayerSessionSnapshot.shufflePlaybackModeCode,
       );
 
@@ -46,12 +45,6 @@ void main() {
       expect(restored.duration, const Duration(minutes: 4));
       expect(restored.queue.map((entry) => entry.id), ['queue-1', 'queue-2']);
       expect(restored.queueIndex, 1);
-      expect(restored.queuePlaylistId, 'source-playlist');
-      expect(
-        restored.copyWith(position: Duration.zero).queuePlaylistId,
-        'source-playlist',
-      );
-      expect(restored.copyWith(queuePlaylistId: null).queuePlaylistId, isNull);
       expect(
         restored.playbackModeCode,
         PlayerSessionSnapshot.shufflePlaybackModeCode,
@@ -106,7 +99,6 @@ void main() {
       expect(restored.duration, const Duration(seconds: 1));
       expect(restored.queue.map((entry) => entry.id), ['valid']);
       expect(restored.queueIndex, -1);
-      expect(restored.queuePlaylistId, isNull);
       expect(
         restored.playbackModeCode,
         PlayerSessionSnapshot.sequencePlaybackModeCode,

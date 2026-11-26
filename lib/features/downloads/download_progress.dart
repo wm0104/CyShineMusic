@@ -21,7 +21,6 @@ class DownloadTask {
     required this.musicId,
     required this.name,
     required this.singer,
-    this.batchTaskId,
     this.stage = DownloadStage.idle,
     this.received = 0,
     this.total,
@@ -33,7 +32,6 @@ class DownloadTask {
   final String musicId;
   final String name;
   final String singer;
-  final String? batchTaskId;
   final DownloadStage stage;
   final int received;
   final int? total;
@@ -64,7 +62,6 @@ class DownloadTask {
       musicId: musicId,
       name: name,
       singer: singer,
-      batchTaskId: batchTaskId,
       stage: stage ?? this.stage,
       received: received ?? this.received,
       total: identical(total, _sentinel) ? this.total : total as int?,
@@ -133,7 +130,7 @@ class DownloadProgressNotifier extends Notifier<DownloadProgress> {
     return const DownloadProgress();
   }
 
-  String start(MusicInfo music, {String? batchTaskId}) {
+  String start(MusicInfo music) {
     final taskId =
         '${music.id}-${DateTime.now().microsecondsSinceEpoch}-${_sequence++}';
     final task = DownloadTask(
@@ -141,7 +138,6 @@ class DownloadProgressNotifier extends Notifier<DownloadProgress> {
       musicId: music.id,
       name: music.name,
       singer: music.singer,
-      batchTaskId: batchTaskId,
       stage: DownloadStage.resolvingUrl,
     );
     state = DownloadProgress(tasks: [...state.tasks, task]);
@@ -203,13 +199,6 @@ class DownloadProgressNotifier extends Notifier<DownloadProgress> {
     _update(
       id,
       (task) => task.copyWith(stage: DownloadStage.failed, message: message),
-    );
-  }
-
-  void cancel(String id) {
-    _pendingBytes.remove(id);
-    state = DownloadProgress(
-      tasks: state.tasks.where((task) => task.id != id).toList(growable: false),
     );
   }
 

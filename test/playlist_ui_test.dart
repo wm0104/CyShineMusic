@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,9 +12,9 @@ import 'package:cy_shine_music/core/models/download_capabilities.dart';
 import 'package:cy_shine_music/core/models/enums.dart';
 import 'package:cy_shine_music/core/models/music_info.dart';
 import 'package:cy_shine_music/core/models/playlist_info.dart';
+import 'package:cy_shine_music/core/models/search_response.dart';
 import 'package:cy_shine_music/core/music_sources/music_source_controller.dart';
 import 'package:cy_shine_music/core/services/download_service.dart';
-import 'package:cy_shine_music/core/services/batch_download_controller.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
 import 'package:cy_shine_music/features/downloads/download_history_store.dart';
 import 'package:cy_shine_music/features/playlists/online_playlist_import_page.dart';
@@ -26,16 +25,86 @@ import 'package:cy_shine_music/features/playlists/playlist_detail_toolbar_state.
 import 'package:cy_shine_music/features/playlists/playlist_management_page.dart';
 import 'package:cy_shine_music/features/playlists/playlist_models.dart';
 import 'package:cy_shine_music/features/playlists/playlist_store.dart';
-import 'package:cy_shine_music/features/playlists/widgets/playlist_management_menu.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
-
-import 'helpers/prism_test_environment.dart';
+import 'package:cy_shine_music/features/playlists/widgets/playlist_track_tile.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
+  });
+
+  testWidgets('management saves the outer card order only on completion', (
+    tester,
+  ) async {
+    await _useCompactViewport(tester, size: const Size(390, 844));
+    final playlists = [
+      _playlist(id: 'a', name: '通勤'),
+      _playlist(id: 'b', name: '夜晚'),
+      _playlist(id: 'c', name: '现场'),
+    ];
+    final prefs = await _prefsWith(playlists);
+    final container = ProviderContainer(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      _testAppWithContainer(container, const PlaylistManagementPage()),
+    );
+    await tester.pumpAndSettle();
+
+    List<String> savedIds() => [
+      for (final playlist in container.read(localPlaylistsProvider))
+        playlist.id,
+    ];
+    double cardY(String name) => tester.getCenter(find.text(name)).dy;
+
+    Future<void> moveFirstCardToEnd() async {
+      await tester.pumpAndSettle();
+      expect(find.text('整理顺序'), findsOneWidget);
+      expect(find.byTooltip('歌单选项'), findsNothing);
+      final handles = find.byType(ReorderableDragStartListener);
+      expect(handles, findsNWidgets(3));
+      final rowExtent =
+          tester.getCenter(handles.at(1)).dy -
+          tester.getCenter(handles.first).dy;
+      final start = tester.getCenter(handles.first);
+      final gesture = await tester.startGesture(start);
+      await tester.pump();
+      for (var step = 1; step <= 12; step++) {
+        await gesture.moveTo(start + Offset(0, rowExtent * 3 * step / 12));
+        await tester.pump(const Duration(milliseconds: 40));
+      }
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(cardY('夜晚'), lessThan(cardY('现场')));
+      expect(cardY('现场'), lessThan(cardY('通勤')));
+      expect(savedIds(), ['a', 'b', 'c']);
+    }
+
+    await tester.tap(find.byTooltip('自定义排序'));
+    await moveFirstCardToEnd();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(cardY('通勤'), lessThan(cardY('夜晚')));
+    expect(find.byTooltip('歌单选项'), findsNWidgets(3));
+    expect(savedIds(), ['a', 'b', 'c']);
+
+    await tester.longPress(find.text('通勤'));
+    await moveFirstCardToEnd();
+    await tester.tap(find.text('完成'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ReorderableDragStartListener), findsNothing);
+    expect(cardY('现场'), lessThan(cardY('通勤')));
+    expect(savedIds(), ['b', 'c', 'a']);
+    final reloaded = ProviderContainer(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+    );
+    addTearDown(reloaded.dispose);
+    expect(
+      reloaded.read(localPlaylistsProvider).map((playlist) => playlist.id),
+      ['b', 'c', 'a'],
+    );
   });
 
   testWidgets('playlist browser keeps management first and lists playlists', (
@@ -70,10 +139,7 @@ void main() {
     expect(find.text('歌单管理'), findsOneWidget);
     expect(find.text('通勤'), findsOneWidget);
     expect(find.text('0 首歌曲'), findsWidgets);
-    await tester.drag(
-      find.byType(prism.PrismListView).last,
-      const Offset(0, -420),
-    );
+    await tester.drag(find.byType(ListView).last, const Offset(0, -420));
     await tester.pumpAndSettle();
     expect(find.text('歌单管理'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -144,11 +210,10 @@ void main() {
     await tester.tap(find.text('打开歌单'));
     await tester.pumpAndSettle();
 
-    expect(find.text('我的歌单').hitTestable(), findsOneWidget);
-    expect(find.byTooltip('关闭').hitTestable(), findsOneWidget);
-    final headerRect = tester.getRect(find.text('我的歌单'));
-    expect(headerRect.top, greaterThanOrEqualTo(0));
-    expect(headerRect.bottom, lessThanOrEqualTo(320));
+    final sheet = tester.widget<DraggableScrollableSheet>(
+      find.byType(DraggableScrollableSheet),
+    );
+    expect(sheet.minChildSize, greaterThanOrEqualTo(0.55));
     expect(tester.takeException(), isNull);
   });
 
@@ -178,6 +243,7 @@ void main() {
       find.byType(TextField),
       'https://music.163.com/playlist?id=1',
     );
+    await tester.ensureVisible(find.text('解析歌单'));
     await tester.tap(find.text('解析歌单'));
     await tester.pumpAndSettle();
     expect(find.text('已解析歌单'), findsOneWidget);
@@ -190,6 +256,7 @@ void main() {
     await tester.pump();
     expect(find.text('已解析歌单'), findsNothing);
 
+    await tester.ensureVisible(find.text('解析歌单'));
     await tester.tap(find.text('解析歌单'));
     await tester.pumpAndSettle();
     expect(find.text('已解析歌单'), findsOneWidget);
@@ -229,7 +296,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final sourceControl = tester.widget<SegmentedButton<MusicSource>>(
-      find.byType(SegmentedButton<MusicSource>),
+      find.byKey(const ValueKey('playlist-source-selector')),
     );
     expect(sourceControl.direction, Axis.vertical);
     expect(tester.takeException(), isNull);
@@ -244,7 +311,7 @@ void main() {
     await tester.pumpWidget(_testApp(prefs, const OnlinePlaylistImportPage()));
     await tester.pumpAndSettle();
 
-    final sourceFinder = find.byType(SegmentedButton<MusicSource>);
+    final sourceFinder = find.byKey(const ValueKey('playlist-source-selector'));
     final sourceControl = tester.widget<SegmentedButton<MusicSource>>(
       sourceFinder,
     );
@@ -265,26 +332,31 @@ void main() {
     await _useCompactViewport(tester);
     final prefs = await _prefsWith([_playlist(id: 'night', name: '夜晚循环')]);
 
-    await tester.pumpWidget(_testApp(prefs, _managementPage()));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('歌单管理操作'));
+    await tester.pumpWidget(_testApp(prefs, const PlaylistManagementPage()));
     await tester.pumpAndSettle();
     expect(find.text('新建歌单'), findsOneWidget);
     expect(find.text('在线导入'), findsOneWidget);
     expect(find.text('洛雪导入'), findsOneWidget);
     expect(find.text('夜晚循环'), findsOneWidget);
-    expect(await tester.binding.handlePopRoute(), isTrue);
-    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(_testApp(prefs, const OnlinePlaylistImportPage()));
     await tester.pumpAndSettle();
-    expect(find.text('自动'), findsOneWidget);
-    expect(find.text('酷我'), findsOneWidget);
-    expect(find.text('酷狗'), findsOneWidget);
-    expect(find.text('网易云'), findsOneWidget);
-    expect(find.text('QQ'), findsOneWidget);
-    expect(find.text('咪咕'), findsOneWidget);
+    final sourceControl = find.byKey(
+      const ValueKey('playlist-source-selector'),
+    );
+    for (final name in ['自动', '酷我', '酷狗', '网易云', 'QQ', '咪咕']) {
+      expect(
+        find.descendant(of: sourceControl, matching: find.text(name)),
+        findsOneWidget,
+      );
+    }
+    final matchControl = find.byKey(
+      const ValueKey('spotify-match-source-selector'),
+    );
+    expect(tester.widget<SegmentedButton<MusicSource>>(matchControl).selected, {
+      MusicSource.wy,
+    });
     expect(find.text('解析歌单'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -331,20 +403,15 @@ void main() {
     addTearDown(container.dispose);
 
     await tester.pumpWidget(
-      _testAppWithContainer(container, _managementPage()),
+      _testAppWithContainer(container, const PlaylistManagementPage()),
     );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('歌单管理操作'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('洛雪导入'));
     await tester.pump();
     await tester.pump();
 
     expect(api.coverRequests, 1);
-    expect(
-      container.read(playlistManagementMenuProvider).importLabel,
-      '封面 0/1',
-    );
+    expect(find.text('封面 0/1'), findsOneWidget);
     expect(container.read(localPlaylistsProvider), isEmpty);
 
     api.complete('https://img.test/imported-cover.jpg');
@@ -381,15 +448,10 @@ void main() {
       findsOneWidget,
     );
     expect(find.byKey(const ValueKey('playlist-detail-info')), findsOneWidget);
-    expect(find.byType(BackdropFilter), findsWidgets);
+    expect(find.byType(BackdropFilter), findsNothing);
     expect(find.byTooltip('搜索歌单歌曲'), findsOneWidget);
     expect(find.byIcon(Icons.arrow_drop_down_rounded), findsNothing);
-    expect(
-      tester
-          .widget<Text>(find.byKey(const ValueKey('playlist-detail-title')))
-          .data,
-      '空歌单',
-    );
+    expect(find.text('空歌单'), findsOneWidget);
     expect(find.text('歌单还是空的'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -452,7 +514,7 @@ void main() {
     await _useCompactViewport(tester);
     final prefs = await _prefsWith([_playlist(id: 'rename', name: '原歌单名')]);
 
-    await tester.pumpWidget(_testApp(prefs, _managementPage()));
+    await tester.pumpWidget(_testApp(prefs, const PlaylistManagementPage()));
     await tester.pumpAndSettle();
 
     Future<void> openRenameDialog() async {
@@ -509,7 +571,7 @@ void main() {
     addTearDown(container.dispose);
 
     await tester.pumpWidget(
-      _testAppWithContainer(container, _managementPage()),
+      _testAppWithContainer(container, const PlaylistManagementPage()),
     );
     await tester.pumpAndSettle();
 
@@ -580,7 +642,7 @@ void main() {
     expect(toolbar.hasDownloadable, isTrue);
     toolbar.onToggleBatch!();
     await tester.pumpAndSettle();
-    expect(find.byType(prism.Checkbox), findsNWidgets(2));
+    expect(find.byType(Checkbox), findsNWidgets(2));
 
     container.read(playlistDetailToolbarStateProvider).onToggleSelectAll!();
     await tester.pump();
@@ -590,15 +652,15 @@ void main() {
     await tester.pump();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
-    expect(service.calls, 2);
+    expect(service.calls, 1);
     expect(service.musics.map((music) => music.id), ['track-1', 'track-2']);
     expect(
       container.read(playlistDetailToolbarStateProvider).batchMode,
       isFalse,
     );
-    expect(find.byType(prism.Checkbox), findsNothing);
+    expect(find.byType(Checkbox), findsNothing);
     expect(find.text('下载 2 首'), findsNothing);
-    expect(service.calls, 2);
+    expect(service.calls, 1);
 
     service.completeSuccessfully();
     await tester.pumpAndSettle();
@@ -607,7 +669,7 @@ void main() {
       isFalse,
     );
     expect(find.text('下载 2 首'), findsNothing);
-    expect(service.calls, 2);
+    expect(service.calls, 1);
     expect(tester.takeException(), isNull);
     await tester.pump(const Duration(seconds: 5));
   });
@@ -682,10 +744,7 @@ void main() {
     await tester.pump();
     expect(service.calls, 1);
     expect(service.musics.map((music) => music.id), ['online-track']);
-    expect(
-      container.read(batchDownloadProvider).single.quality,
-      OnlinePlaybackQuality.high,
-    );
+    expect(service.qualityPreference, OnlinePlaybackQuality.high);
     expect(
       container.read(playlistDetailToolbarStateProvider).batchMode,
       isFalse,
@@ -697,7 +756,160 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   });
 
-  testWidgets('menu removes a playlist track without confirmation', (
+  testWidgets(
+    'manually match a saved Spotify row and replace another occurrence',
+    (tester) async {
+      await _useCompactViewport(tester, size: const Size(390, 900));
+      PlaylistTrack occurrence(int index, MusicInfo? match) =>
+          PlaylistTrack.fromSpotify(
+            SpotifyTrackMetadata(
+              uri: 'spotify:track:same',
+              title: '原始曲名',
+              artist: '原始歌手',
+              occurrence: index,
+            ),
+            match,
+          );
+      final pending = occurrence(0, null);
+      final matched = occurrence(1, _playlistMusic('previous', '旧匹配'));
+      final tracks = [pending, matched];
+      final prefs = await _prefsWith([
+        _playlist(
+          id: 'spotify',
+          name: '测试歌单',
+          tracks: tracks,
+          originPlaylistId: 'spotify-id',
+          originSourceCode: 'spotify',
+        ).copyWith(customTrackOrder: [matched.id, pending.id]),
+      ]);
+      final container = ProviderContainer(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          musicApiProvider.overrideWithValue(_ManualMatchMusicApi()),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _testAppWithContainer(
+          container,
+          const PlaylistDetailPage(playlistId: 'spotify'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Finder row(PlaylistTrack track) => find.byWidgetPredicate(
+        (widget) =>
+            widget is PlaylistTrackTile && widget.item.track.id == track.id,
+      );
+      LocalPlaylist saved() => container.read(localPlaylistsProvider).single;
+
+      await tester.tap(find.byTooltip('批量操作'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(row(pending));
+      await tester.tap(row(pending));
+      await tester.pumpAndSettle();
+      expect(find.text('已选中 1 项'), findsOneWidget);
+      await tester.tap(find.byTooltip('退出批量管理'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(row(pending));
+      await tester.tap(row(pending));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('第一候选'));
+      await tester.pumpAndSettle();
+      expect(saved().tracks.map((track) => track.musicId), [
+        'candidate-1',
+        'previous',
+      ]);
+
+      await tester.ensureVisible(row(matched));
+      await tester.drag(row(matched), const Offset(-240, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('更换匹配').hitTestable());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('第二候选'));
+      await tester.pumpAndSettle();
+      expect(saved().tracks.map((track) => track.musicId), [
+        'candidate-1',
+        'candidate-2',
+      ]);
+      expect(saved().tracks.map((track) => track.id), [pending.id, matched.id]);
+      expect(saved().customOrderedTracks.map((track) => track.id), [
+        matched.id,
+        pending.id,
+      ]);
+      expect(saved().tracks.map((track) => track.name), ['原始曲名', '原始曲名']);
+      await tester.pump(const Duration(seconds: 5));
+    },
+  );
+
+  testWidgets('playlist detail copies one song and moves the batch', (
+    tester,
+  ) async {
+    await _useCompactViewport(tester, size: const Size(390, 900));
+    final first = PlaylistTrack.fromMusicInfo(_playlistMusic('first', '第一首'));
+    final second = PlaylistTrack.fromMusicInfo(_playlistMusic('second', '第二首'));
+    final prefs = await _prefsWith([
+      _playlist(id: 'source', name: '原歌单', tracks: [first, second]),
+      _playlist(id: 'destination', name: '目标歌单'),
+    ]);
+    final container = ProviderContainer(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      _testAppWithContainer(
+        container,
+        const PlaylistDetailPage(playlistId: 'source'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final store = container.read(localPlaylistsProvider.notifier);
+    final firstRow = find.text('第一首');
+    await tester.ensureVisible(firstRow);
+    await tester.drag(firstRow, const Offset(-270, 0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('添加到歌单').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.text('添加歌曲到'), findsOneWidget);
+    expect(find.text('1 个歌单'), findsOneWidget);
+    await tester.tap(find.text('目标歌单'));
+    await tester.pumpAndSettle();
+    expect(store.byId('source')!.tracks.map((track) => track.id), [
+      first.id,
+      second.id,
+    ]);
+    expect(store.byId('destination')!.tracks.single.id, first.id);
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.byTooltip('批量操作'));
+    await tester.tap(find.byTooltip('批量操作'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('全选'));
+    await tester.pumpAndSettle();
+    final batchBar = find.byKey(const ValueKey('playlist-batch-bottom-bar'));
+    final moveAction = find.descendant(
+      of: batchBar,
+      matching: find.text('移动到歌单'),
+    );
+    expect(moveAction, findsOneWidget);
+    await tester.tap(moveAction);
+    await tester.pumpAndSettle();
+    expect(find.text('移动歌曲到'), findsOneWidget);
+    await tester.tap(find.text('目标歌单'));
+    await tester.pumpAndSettle();
+    expect(store.byId('source')!.tracks, isEmpty);
+    expect(store.byId('destination')!.tracks.map((track) => track.id), [
+      second.id,
+      first.id,
+    ]);
+    expect(
+      find.byKey(const ValueKey('playlist-batch-bottom-bar')),
+      findsNothing,
+    );
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('swipe to remove a playlist track without confirmation', (
     tester,
   ) async {
     await _useCompactViewport(tester);
@@ -714,9 +926,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('第一首'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('歌曲操作'));
+    await tester.drag(find.text('第一首'), const Offset(-260, 0));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('移出歌单'));
+    expect(find.text('更换匹配'), findsNothing);
+    await tester.tap(find.text('移除'));
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.text('从歌单中移除？'), findsNothing);
@@ -725,11 +938,6 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   });
 }
-
-Widget _managementPage() => Scaffold(
-  appBar: AppBar(actions: const [PlaylistManagementMenu()]),
-  body: const PlaylistManagementPage(),
-);
 
 Future<void> _useCompactViewport(
   WidgetTester tester, {
@@ -756,7 +964,6 @@ Widget _testApp(SharedPreferences prefs, Widget home) {
   return ProviderScope(
     overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
     child: MaterialApp(
-      builder: buildPrismTestEnvironment,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
@@ -770,7 +977,6 @@ Widget _testAppWithContainer(ProviderContainer container, Widget home) {
   return UncontrolledProviderScope(
     container: container,
     child: MaterialApp(
-      builder: buildPrismTestEnvironment,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
@@ -783,26 +989,33 @@ Widget _testAppWithContainer(ProviderContainer container, Widget home) {
 class _BlockingBatchDownloadService extends DownloadService {
   _BlockingBatchDownloadService(super.ref);
 
-  final Completer<void> _completer = Completer();
+  final Completer<List<BatchDownloadResult>> _completer = Completer();
   List<MusicInfo> musics = const [];
   int calls = 0;
 
   @override
-  Future<DownloadResult> downloadOne({
-    required MusicInfo music,
-    Quality? quality,
-    required EmbedRequest embed,
-    CancelToken? cancelToken,
-    String? batchTaskId,
-  }) async {
+  Future<List<BatchDownloadResult>> downloadMany({
+    required List<MusicInfo> musics,
+    EmbedRequest embed = const EmbedRequest.richest(),
+    int concurrency = DownloadService.batchConcurrency,
+    OnlinePlaybackQuality qualityPreference = OnlinePlaybackQuality.highest,
+  }) {
     calls += 1;
-    musics = [...musics, music];
-    await _completer.future;
-    return DownloadResult(path: 'D:/Music/${music.id}.mp3');
+    this.musics = List.of(musics);
+    this.qualityPreference = qualityPreference;
+    return _completer.future;
   }
 
+  OnlinePlaybackQuality qualityPreference = OnlinePlaybackQuality.highest;
+
   void completeSuccessfully() {
-    _completer.complete();
+    _completer.complete([
+      for (final music in musics)
+        BatchDownloadResult(
+          music: music,
+          result: DownloadResult(path: 'D:/Music/${music.id}.mp3'),
+        ),
+    ]);
   }
 }
 
@@ -819,6 +1032,32 @@ class _FakeMusicApi extends MusicApi {
   }) async {
     return playlist;
   }
+}
+
+class _ManualMatchMusicApi extends MusicApi {
+  @override
+  Future<SearchResponse> searchMusic({
+    required String keyword,
+    required MusicSource source,
+    int page = 1,
+    int limit = 30,
+  }) async => SearchResponse(
+    list: [
+      _playlistMusic('candidate-1', '第一候选'),
+      _playlistMusic('candidate-2', '第二候选'),
+    ],
+    page: page,
+    limit: limit,
+    allPage: 1,
+    total: 2,
+    source: source,
+  );
+
+  @override
+  Future<String?> getPicUrl({
+    required MusicInfo musicInfo,
+    bool preferCached = true,
+  }) async => null;
 }
 
 class _CoverResolvingMusicApi extends MusicApi {

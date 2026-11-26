@@ -1,22 +1,19 @@
+import 'dart:io';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 
-import '../../core/services/saf_storage.dart';
-import '../../core/services/local_audio_source.dart';
 import '../../core/ui/app_toast.dart';
-import '../../core/ui/animated_empty_state.dart';
 import '../../core/ui/configurable_m3e_progress.dart';
 import '../../core/ui/cover_image_source.dart';
 import '../../theme/app_motion.dart';
 import '../player/player_controller.dart';
 import '../playlists/playlist_store.dart';
-import '../songs/local_song_scan_cache.dart';
 import 'download_history_store.dart';
 import 'download_progress.dart';
-import 'widgets/batch_download_tasks_sheet.dart';
-import '../shell/widgets/scrolling_page_header.dart';
+import '../shell/shell_navigation.dart';
 
 class DownloadHistoryPage extends ConsumerStatefulWidget {
   const DownloadHistoryPage({super.key});
@@ -49,16 +46,6 @@ class _DownloadHistoryPageState extends ConsumerState<DownloadHistoryPage> {
           parent: AlwaysScrollableScrollPhysics(),
         ),
         slivers: [
-          const SliverToBoxAdapter(child: ScrollHeaderSpacer()),
-          const SliverPadding(
-            padding: EdgeInsets.fromLTRB(16, 4, 16, 0),
-            sliver: SliverToBoxAdapter(
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: BatchDownloadTasksButton(),
-              ),
-            ),
-          ),
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
             sliver: SliverToBoxAdapter(
@@ -140,10 +127,11 @@ class _DownloadHistoryPageState extends ConsumerState<DownloadHistoryPage> {
 
   Future<void> _play(DownloadHistoryEntry entry) async {
     final path = entry.savedPath;
-    if (path == null || path.isEmpty || !isLocalAudioSourceAvailable(path)) {
+    if (path == null || path.isEmpty || !File(path).existsSync()) {
       showAppToast(context, '文件不存在', type: AppToastType.warning);
       return;
     }
+    openPlayer(context, returnLocation: '/downloads');
     await ref.read(playerControllerProvider.notifier).playFromHistory(entry);
   }
 
@@ -179,7 +167,7 @@ class _DownloadHistoryPageState extends ConsumerState<DownloadHistoryPage> {
         entry.isCompleted &&
         path != null &&
         path.isNotEmpty &&
-        isLocalAudioSourceAvailable(path);
+        File(path).existsSync();
     final choice = await showDialog<_RemoveChoice>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -211,36 +199,27 @@ class _DownloadHistoryPageState extends ConsumerState<DownloadHistoryPage> {
     );
     if (choice == null) return;
 
-    if (!mounted) return;
-    final history = ref.read(downloadHistoryProvider.notifier);
-    final playlists = ref.read(localPlaylistsProvider.notifier);
-    final index = ref.read(localSongScanCacheProvider);
     var fileDeleted = false;
     if (choice == _RemoveChoice.recordAndFile &&
         path != null &&
         path.isNotEmpty) {
       try {
-        final result = await SafStorage.deleteFiles([path]);
-        if (!result.deletedPaths.contains(path)) {
-          if (!mounted) return;
-          showAppToast(
-            context,
-            result.cancelled
-                ? '已取消删除'
-                : result.failed.values.firstOrNull ?? '文件未删除',
-            type: result.cancelled ? AppToastType.info : AppToastType.error,
-          );
-          return;
+        final file = File(path);
+        if (await file.exists()) {
+          await file.delete();
+          fileDeleted = true;
+          await ref
+              .read(localPlaylistsProvider.notifier)
+              .removeLocalPathFromAll(path);
         }
-        fileDeleted = true;
-        await playlists.removeLocalPathFromAll(path, pathKey: index.pathKey);
       } catch (e) {
         if (!mounted) return;
         showAppToast(context, '文件删除失败：$e', type: AppToastType.error);
         return;
       }
     }
-    await history.remove(entry.id);
+
+    await ref.read(downloadHistoryProvider.notifier).remove(entry.id);
     if (!mounted) return;
     showAppToast(
       context,
@@ -642,24 +621,73 @@ class _EmptyDownloads extends StatelessWidget {
   const _EmptyDownloads();
 
   @override
-  Widget build(BuildContext context) => const AnimatedEmptyState(
-    kind: EmptyStateKind.downloads,
-    title: '暂无进行中的下载',
-    message: '歌曲开始下载后，可在这里查看进度',
-    compact: true,
-  );
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.download_done_rounded, color: scheme.onSurfaceVariant),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '暂无进行中的下载',
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _EmptyHistory extends StatelessWidget {
   const _EmptyHistory();
 
   @override
-  Widget build(BuildContext context) => const AnimatedEmptyState(
-    kind: EmptyStateKind.history,
-    title: '暂无下载历史',
-    message: '下载完成的歌曲会留在这里',
-    compact: true,
-  );
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    const label = '暂无下载历史';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 28),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      child: Column(
+        children: [
+          Icon(
+            Icons.history_toggle_off_rounded,
+            size: 42,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(height: 10),
+          Text(
+            label,
+            style: TextStyle(
+              color: scheme.onSurface,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '下载完成后会自动出现在这里',
+            style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _AnimatedListItem extends StatefulWidget {

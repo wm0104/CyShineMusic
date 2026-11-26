@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:toastification/toastification.dart';
 
 enum AppToastType { info, success, warning, error }
@@ -90,25 +89,17 @@ void dismissAppToast(
 }) {
   if (handle == null || handle._dismissed) return;
   handle._dismissed = true;
-  _dismissToast(handle._item, showRemoveAnimation: showRemoveAnimation);
-}
-
-void _dismissToast(
-  ToastificationItem item, {
-  required bool showRemoveAnimation,
-}) {
-  // Route updates can dismiss a toast from didUpdateWidget/dispose. Its
-  // AnimatedList lives in another overlay, so it must not rebuild mid-frame.
-  if (SchedulerBinding.instance.schedulerPhase !=
-      SchedulerPhase.persistentCallbacks) {
-    toastification.dismiss(item, showRemoveAnimation: showRemoveAnimation);
-  }
-  // Toastification inserts items after a frame. While the app is backgrounded,
-  // a toast can expire before insertion, so also remove it after that frame.
+  toastification.dismiss(
+    handle._item,
+    showRemoveAnimation: showRemoveAnimation,
+  );
   WidgetsBinding.instance.addPostFrameCallback((_) {
-    toastification.dismiss(item, showRemoveAnimation: showRemoveAnimation);
+    toastification.dismiss(
+      handle._item,
+      showRemoveAnimation: showRemoveAnimation,
+    );
   });
-  if (identical(_currentToast, item)) _currentToast = null;
+  if (identical(_currentToast, handle._item)) _currentToast = null;
 }
 
 AppToastHandle _showToast({
@@ -121,13 +112,14 @@ AppToastHandle _showToast({
 }) {
   final previous = _currentToast;
   if (previous != null) {
-    _dismissToast(previous, showRemoveAnimation: false);
+    toastification.dismiss(previous, showRemoveAnimation: false);
   }
 
   final stableOverlay = _appToastOverlayKey.currentState;
   final effectiveOverlay = stableOverlay ?? overlayState;
 
-  final item = toastification.showCustom(
+  late final ToastificationItem item;
+  item = toastification.showCustom(
     context: effectiveOverlay == null ? context : null,
     overlayState: effectiveOverlay,
     alignment: position.alignment,
@@ -135,8 +127,9 @@ AppToastHandle _showToast({
     autoCloseDuration: duration,
     animationBuilder: _toastAnimationBuilder,
     callbacks: ToastificationCallbacks(
-      onAutoCompleteCompleted: (item) =>
-          _dismissToast(item, showRemoveAnimation: false),
+      onAutoCompleteCompleted: (_) {
+        if (identical(_currentToast, item)) _currentToast = null;
+      },
     ),
     builder: (context, _) =>
         _ToastViewport(message: message, type: type, position: position),

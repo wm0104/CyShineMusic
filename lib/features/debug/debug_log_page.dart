@@ -1,4 +1,3 @@
-import '../settings/widgets/settings_sheet.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -7,8 +6,6 @@ import 'package:flutter/services.dart';
 import '../../core/services/app_logger.dart';
 import '../../core/ui/app_toast.dart';
 import '../../theme/app_motion.dart';
-import '../shell/widgets/scrolling_page_header.dart';
-import 'widgets/log_recording_menu.dart';
 
 class DebugLogPage extends StatefulWidget {
   const DebugLogPage({super.key});
@@ -25,7 +22,6 @@ class _DebugLogPageState extends State<DebugLogPage> {
   List<String> _lines = const [];
   var _loading = true;
   var _followTail = true;
-  var _exporting = false;
 
   @override
   void initState() {
@@ -72,40 +68,6 @@ class _DebugLogPageState extends State<DebugLogPage> {
     showAppToast(context, '日志已复制', type: AppToastType.success);
   }
 
-  Future<void> _export() async {
-    setState(() => _exporting = true);
-    try {
-      final path = await AppLogger.exportFile();
-      if (!mounted) return;
-      await showSettingsDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('日志已导出'),
-          content: SelectableText(path),
-          actions: [
-            TextButton(
-              onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: path));
-                if (context.mounted) Navigator.pop(context);
-              },
-              child: const Text('复制路径'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('完成'),
-            ),
-          ],
-        ),
-      );
-    } catch (error) {
-      if (mounted) {
-        showAppToast(context, '日志导出失败：$error', type: AppToastType.error);
-      }
-    } finally {
-      if (mounted) setState(() => _exporting = false);
-    }
-  }
-
   Future<void> _clear() async {
     await AppLogger.clear();
     if (!mounted) return;
@@ -136,16 +98,10 @@ class _DebugLogPageState extends State<DebugLogPage> {
     return Scaffold(
       backgroundColor: scheme.surface,
       body: Padding(
-        padding: EdgeInsets.fromLTRB(
-          16,
-          ScrollHeaderInset.of(context) + 8,
-          16,
-          0,
-        ),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const LogRecordingMenu(menuId: 'debug-log-recording-menu'),
             _DebugToolbar(
               lineCount: _lines.length,
               followTail: _followTail,
@@ -153,7 +109,6 @@ class _DebugLogPageState extends State<DebugLogPage> {
                 setState(() => _followTail = !_followTail);
                 _scrollToTail(immediate: true);
               },
-              onExport: _exporting ? null : _export,
               onRefresh: _refresh,
               onCopy: _lines.isEmpty ? null : _copyAll,
               onClear: _lines.isEmpty ? null : _clear,
@@ -182,7 +137,6 @@ class _DebugToolbar extends StatelessWidget {
     required this.onRefresh,
     required this.onCopy,
     required this.onClear,
-    required this.onExport,
   });
 
   final int lineCount;
@@ -191,14 +145,11 @@ class _DebugToolbar extends StatelessWidget {
   final VoidCallback onRefresh;
   final VoidCallback? onCopy;
   final VoidCallback? onClear;
-  final VoidCallback? onExport;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Wrap(
-      spacing: 2,
-      crossAxisAlignment: WrapCrossAlignment.center,
+    return Row(
       children: [
         Container(
           height: 40,
@@ -220,6 +171,7 @@ class _DebugToolbar extends StatelessWidget {
             ),
           ),
         ),
+        const Spacer(),
         IconButton(
           tooltip: followTail ? '暂停尾随' : '继续尾随',
           onPressed: onToggleFollow,
@@ -233,11 +185,6 @@ class _DebugToolbar extends StatelessWidget {
           tooltip: '刷新',
           onPressed: onRefresh,
           icon: const Icon(Icons.refresh_rounded),
-        ),
-        IconButton(
-          tooltip: '导出日志文件',
-          onPressed: onExport,
-          icon: const Icon(Icons.file_download_outlined),
         ),
         IconButton(
           tooltip: '复制',

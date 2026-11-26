@@ -87,7 +87,6 @@ class PlayerSessionSnapshot {
     Duration duration = Duration.zero,
     List<DownloadHistoryEntry> queue = const [],
     int queueIndex = -1,
-    String? queuePlaylistId,
     String playbackModeCode = sequencePlaybackModeCode,
   }) {
     final normalizedDuration = _nonNegativeDuration(duration);
@@ -101,7 +100,6 @@ class PlayerSessionSnapshot {
       duration: normalizedDuration,
       queue: normalizedQueue,
       queueIndex: _normalizedQueueIndex(queueIndex, normalizedQueue.length),
-      queuePlaylistId: _optionalNonEmptyString(queuePlaylistId),
       playbackModeCode: _normalizedPlaybackModeCode(playbackModeCode),
     );
   }
@@ -115,7 +113,6 @@ class PlayerSessionSnapshot {
     required this.duration,
     required this.queue,
     required this.queueIndex,
-    required this.queuePlaylistId,
     required this.playbackModeCode,
   });
 
@@ -132,7 +129,6 @@ class PlayerSessionSnapshot {
   final Duration duration;
   final List<DownloadHistoryEntry> queue;
   final int queueIndex;
-  final String? queuePlaylistId;
   final String playbackModeCode;
 
   PlayerSessionSnapshot copyWith({
@@ -143,7 +139,6 @@ class PlayerSessionSnapshot {
     Duration? duration,
     List<DownloadHistoryEntry>? queue,
     int? queueIndex,
-    Object? queuePlaylistId = _unsetPlayerSessionValue,
     String? playbackModeCode,
   }) {
     return PlayerSessionSnapshot(
@@ -158,9 +153,6 @@ class PlayerSessionSnapshot {
       duration: duration ?? this.duration,
       queue: queue ?? this.queue,
       queueIndex: queueIndex ?? this.queueIndex,
-      queuePlaylistId: identical(queuePlaylistId, _unsetPlayerSessionValue)
-          ? this.queuePlaylistId
-          : queuePlaylistId as String?,
       playbackModeCode: playbackModeCode ?? this.playbackModeCode,
     );
   }
@@ -182,7 +174,6 @@ class PlayerSessionSnapshot {
     'durationMs': duration.inMilliseconds,
     'queue': _queueToJson(queue),
     'queueIndex': queueIndex,
-    if (queuePlaylistId != null) 'queuePlaylistId': queuePlaylistId,
     'playbackModeCode': playbackModeCode,
   };
 
@@ -223,7 +214,6 @@ class PlayerSessionSnapshot {
       ),
       duration: duration,
       queue: List<DownloadHistoryEntry>.unmodifiable(queue),
-      queuePlaylistId: _optionalNonEmptyString(json['queuePlaylistId']),
       queueIndex: _normalizedQueueIndex(
         _intFromJson(json['queueIndex'], fallback: -1),
         queue.length,

@@ -4,8 +4,7 @@ enum MusicSource {
   kg('kg', '酷狗'),
   tx('tx', 'QQ'),
   wy('wy', '网易云'),
-  mg('mg', '咪咕'),
-  qs('qs', '汽水');
+  mg('mg', '咪咕');
 
   const MusicSource(this.code, this.label);
   final String code;
@@ -22,42 +21,20 @@ enum MusicSource {
   }
 }
 
-const List<MusicSource> kSearchSources = [
-  MusicSource.all,
-  ...kManageableSearchSources,
-];
+const List<MusicSource> kSearchSources = MusicSource.values;
 const List<MusicSource> kManageableSearchSources = [
   MusicSource.kw,
   MusicSource.kg,
   MusicSource.tx,
   MusicSource.wy,
   MusicSource.mg,
-  MusicSource.qs,
 ];
 const Set<MusicSource> kDefaultEnabledSearchSources = {
   MusicSource.kw,
   MusicSource.kg,
   MusicSource.tx,
   MusicSource.wy,
-  MusicSource.qs,
 };
-
-enum DownloadFileNameFormat {
-  artistTitle('artist_title', '歌手 - 歌名'),
-  titleArtist('title_artist', '歌名 - 歌手');
-
-  const DownloadFileNameFormat(this.code, this.label);
-
-  final String code;
-  final String label;
-
-  static DownloadFileNameFormat fromCode(String? code) {
-    for (final format in values) {
-      if (format.code == code) return format;
-    }
-    return artistTitle;
-  }
-}
 
 enum Quality {
   master('master'),

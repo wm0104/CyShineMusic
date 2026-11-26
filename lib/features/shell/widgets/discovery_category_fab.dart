@@ -1,12 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
 
 import '../../../core/models/playlist_category.dart';
 import '../../../core/storage/settings_store.dart';
 import '../../../theme/app_motion.dart';
 import '../../discovery/discovery_controller.dart';
-import '../../search/search_controller.dart';
 import '../../search/search_toolbar_state.dart';
 import '../shell_bottom_area.dart';
 import 'shell_fab_menu_action.dart';
@@ -33,7 +31,7 @@ class _DiscoveryCategoryFabLayerState
   Widget build(BuildContext context) {
     final bottomArea = ShellBottomArea.maybeOf(context);
     if ((bottomArea?.nativeNavigation == true ||
-            bottomArea?.navigationMode == AppNavigationMode.floatingCapsule) &&
+            bottomArea?.navigationMode == AppNavigationMode.dualCapsule) &&
         bottomArea!.extent == 0) {
       return const SizedBox.shrink();
     }
@@ -42,10 +40,7 @@ class _DiscoveryCategoryFabLayerState
     final searchVisible = ref.watch(
       searchToolbarStateProvider.select((state) => state.visible),
     );
-    final searchActive = ref.watch(
-      searchControllerProvider.select((state) => state.isSearchActive),
-    );
-    if (categories.length <= 1 || searchActive || searchVisible) {
+    if (categories.length <= 1 || searchVisible) {
       if (_expanded) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _setExpanded(false);
@@ -59,39 +54,18 @@ class _DiscoveryCategoryFabLayerState
       (category) => category.id == selectedId,
       orElse: () => categories.first,
     );
-    final scheme = Theme.of(context).colorScheme;
     final wideLayout = toolbarUsesWideMetrics(MediaQuery.sizeOf(context));
     final fabPadding = EdgeInsets.only(
       right: wideLayout ? 104 : 18,
       bottom: switch (bottomArea?.navigationMode) {
         AppNavigationMode.native =>
           bottomArea!.extent - MediaQuery.paddingOf(context).bottom + 24,
-        AppNavigationMode.floatingCapsule =>
+        AppNavigationMode.dualCapsule =>
           bottomArea!.extent - MediaQuery.paddingOf(context).bottom + 16,
         _ => 82,
       },
     );
-    final categoryFab = FloatingActionButton.extended(
-      key: const ValueKey('discovery-category-fab'),
-      heroTag: 'discovery-category-fab',
-      tooltip: _expanded ? '收起分类菜单' : '切换歌单分类',
-      elevation: 3,
-      highlightElevation: 4,
-      backgroundColor: scheme.secondaryContainer,
-      foregroundColor: scheme.onSecondaryContainer,
-      icon: AnimatedSwitcher(
-        duration: AppMotion.short,
-        child: Icon(
-          _expanded ? Icons.close_rounded : Icons.filter_list_rounded,
-          key: ValueKey(_expanded),
-        ),
-      ),
-      label: Text(
-        selected.label,
-        style: const TextStyle(fontWeight: FontWeight.w600),
-      ),
-      onPressed: () => _setExpanded(!_expanded),
-    );
+
     return Stack(
       children: [
         if (_expanded)
@@ -127,54 +101,67 @@ class _DiscoveryCategoryFabLayerState
                       );
                     },
                     child: _expanded
-                        ? prism.LiquidGlassScope(
+                        ? Column(
                             key: const ValueKey('discovery-category-menu-open'),
-                            enabled: false,
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                for (
-                                  var index = 0;
-                                  index < categories.length;
-                                  index++
-                                ) ...[
-                                  if (index > 0) const SizedBox(height: 10),
-                                  ShellFabMenuAction(
-                                    key: ValueKey(
-                                      'discovery-category-${categories[index].id}',
-                                    ),
-                                    icon: categories[index].id == selected.id
-                                        ? Icons.check_rounded
-                                        : _categoryIcon(
-                                            categories[index].label,
-                                          ),
-                                    label: categories[index].label,
-                                    enabled:
-                                        categories[index].id != selected.id,
-                                    selected:
-                                        categories[index].id == selected.id,
-                                    onPressed: () {
-                                      ref
-                                          .read(
-                                            selectedDiscoveryCategoryProvider(
-                                              source,
-                                            ).notifier,
-                                          )
-                                          .select(categories[index].id);
-                                      _setExpanded(false);
-                                    },
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              for (
+                                var index = 0;
+                                index < categories.length;
+                                index++
+                              ) ...[
+                                if (index > 0) const SizedBox(height: 10),
+                                ShellFabMenuAction(
+                                  key: ValueKey(
+                                    'discovery-category-${categories[index].id}',
                                   ),
-                                ],
+                                  icon: categories[index].id == selected.id
+                                      ? Icons.check_rounded
+                                      : _categoryIcon(categories[index].label),
+                                  label: categories[index].label,
+                                  enabled: categories[index].id != selected.id,
+                                  onPressed: () {
+                                    ref
+                                            .read(
+                                              selectedDiscoveryCategoryProvider(
+                                                source,
+                                              ).notifier,
+                                            )
+                                            .state =
+                                        categories[index].id;
+                                    _setExpanded(false);
+                                  },
+                                ),
                               ],
-                            ),
+                            ],
                           )
                         : const SizedBox.shrink(
                             key: ValueKey('discovery-category-menu-closed'),
                           ),
                   ),
                   const SizedBox(height: 10),
-                  categoryFab,
+                  FloatingActionButton.extended(
+                    key: const ValueKey('discovery-category-fab'),
+                    heroTag: 'discovery-category-fab',
+                    tooltip: _expanded ? '收起分类菜单' : '切换歌单分类',
+                    elevation: 3,
+                    highlightElevation: 4,
+                    icon: AnimatedSwitcher(
+                      duration: AppMotion.short,
+                      child: Icon(
+                        _expanded
+                            ? Icons.close_rounded
+                            : Icons.filter_list_rounded,
+                        key: ValueKey(_expanded),
+                      ),
+                    ),
+                    label: Text(
+                      selected.label,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    onPressed: () => _setExpanded(!_expanded),
+                  ),
                 ],
               ),
             ),

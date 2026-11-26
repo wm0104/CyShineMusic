@@ -11,7 +11,6 @@ import '../../../core/storage/settings_store.dart';
 import '../../../theme/app_motion.dart';
 import '../lyric_parser.dart';
 import 'karaoke_line_text.dart';
-import 'lyric_typography.dart';
 import 'player_control_color.dart';
 import 'player_palette.dart';
 
@@ -121,7 +120,7 @@ class _StaggeredLyricLineState extends State<StaggeredLyricLine>
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _controller,
-      child: RepaintBoundary(child: widget.child),
+      child: widget.child,
       builder: (context, child) {
         return Transform.translate(
           key: ValueKey('lyric-stagger-${widget.lineStartMs}'),
@@ -165,14 +164,19 @@ class LyricLineTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final font = ref.watch(
       settingsProvider.select(
-        (settings) =>
-            (weight: settings.lyricFontWeight, size: settings.lyricFontSize),
+        (settings) => (
+          weight: settings.lyricFontWeight,
+          size: settings.lyricFontSize,
+          translationWeight: settings.lyricTranslationFontWeight,
+          translationSize: settings.lyricTranslationFontSize,
+        ),
       ),
     );
     final blurDisabled = ref.watch(
       settingsProvider.select((settings) => settings.lyricViewBlurDisabled),
     );
-    final secondaryWeight = lyricSecondaryFontWeight(font.weight);
+    final romanWeight = lyricRomanizationFontWeight(font.weight);
+    final sizeScale = font.size / kLyricFontSizeDefault;
     final ink = Theme.of(context).brightness == Brightness.dark
         ? Colors.white
         : ref.watch(playerLyricInkProvider) ?? const Color(0xFF050F19);
@@ -190,9 +194,9 @@ class LyricLineTile extends ConsumerWidget {
     final subStyle = TextStyle(
       color: ink.withValues(alpha: active && !line.hasWordTiming ? 1 : 0.3),
       fontFamilyFallback: kPlayerFontFallback,
-      fontSize: lyricTranslationFontSize(font.size),
-      fontWeight: FontWeight(secondaryWeight.round()),
-      fontVariations: [FontVariation.weight(secondaryWeight)],
+      fontSize: font.translationSize,
+      fontWeight: FontWeight(font.translationWeight.round()),
+      fontVariations: [FontVariation.weight(font.translationWeight)],
       height: 1.30,
       letterSpacing: 0,
     );
@@ -217,11 +221,11 @@ class LyricLineTile extends ConsumerWidget {
           curve: _kLyricFocusCurve,
           style: mainStyle,
           textAlign: TextAlign.start,
-          child: RepaintBoundary(child: _mainText()),
+          child: _mainText(),
         ),
         if (hasTranslationLine)
           TweenAnimationBuilder<double>(
-            tween: Tween<double>(end: showTranslationLine ? 1 : 0),
+            tween: Tween<double>(begin: 0, end: showTranslationLine ? 1 : 0),
             duration: duration,
             curve: AppMotion.emphasized,
             child: Padding(
@@ -251,7 +255,7 @@ class LyricLineTile extends ConsumerWidget {
           ),
         if (hasRomanLine)
           TweenAnimationBuilder<double>(
-            tween: Tween<double>(end: showRomanLine ? 1 : 0),
+            tween: Tween<double>(begin: 0, end: showRomanLine ? 1 : 0),
             duration: duration,
             curve: AppMotion.emphasized,
             child: Padding(
@@ -260,7 +264,9 @@ class LyricLineTile extends ConsumerWidget {
                 duration: colorDuration,
                 curve: _kLyricFocusCurve,
                 style: subStyle.copyWith(
-                  fontSize: lyricRomanFontSize(font.size),
+                  fontSize: 12 * sizeScale,
+                  fontWeight: FontWeight(romanWeight.round()),
+                  fontVariations: [FontVariation.weight(romanWeight)],
                 ),
                 child: Text(roman, textAlign: TextAlign.start),
               ),
@@ -291,7 +297,7 @@ class LyricLineTile extends ConsumerWidget {
       lineStartMs: line.startMs,
       active: active,
       disableAnimations: MediaQuery.disableAnimationsOf(context),
-      child: RepaintBoundary(child: lineContent),
+      child: lineContent,
     );
 
     final tile = GestureDetector(
@@ -333,8 +339,8 @@ class LyricLineTile extends ConsumerWidget {
       child: tile,
       builder: (context, suppressed, child) {
         return TweenAnimationBuilder<double>(
-          tween: Tween<double>(end: blurDisabled || suppressed ? 0 : blurSigma),
-          duration: blurDisabled || suppressed ? Duration.zero : duration,
+          tween: Tween<double>(end: blurSigma),
+          duration: duration,
           curve: AppMotion.emphasized,
           child: child,
           builder: (context, sigma, child) {
@@ -426,15 +432,9 @@ class _LyricFocusScaleState extends State<_LyricFocusScale>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    value: widget.active && widget.disableAnimations ? 1 : 0,
+    value: widget.active ? 1 : 0,
   );
   Timer? _delayTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.active && !widget.disableAnimations) _driveToTarget();
-  }
 
   @override
   void didUpdateWidget(covariant _LyricFocusScale oldWidget) {

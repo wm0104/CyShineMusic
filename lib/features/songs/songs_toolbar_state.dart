@@ -10,8 +10,7 @@ const String songsLibraryPlaylistIdStorageKey = 'songs_library_playlist_id_v1';
 enum SongSortMode {
   title('title', '标题', Icons.sort_by_alpha_rounded),
   artist('artist', '歌手', Icons.person_outline_rounded),
-  added('added', '添加时间', Icons.schedule_rounded),
-  modified('modified', '修改时间', Icons.update_rounded);
+  added('added', '添加时间', Icons.schedule_rounded);
 
   const SongSortMode(this.code, this.label, this.icon);
 
@@ -23,7 +22,6 @@ enum SongSortMode {
     return switch (code) {
       'artist' => SongSortMode.artist,
       'added' => SongSortMode.added,
-      'modified' => SongSortMode.modified,
       _ => SongSortMode.title,
     };
   }
@@ -39,12 +37,6 @@ class SongsToolbarState {
     this.selectedCount = 0,
     this.allSelected = false,
     this.batchMode = false,
-    this.searchMode = false,
-    this.searchAutoFocus = true,
-    this.searchController,
-    this.searchFocusNode,
-    this.onCloseSearch,
-    this.onSearchChanged,
     this.onSelectLibraryPlaylist,
     this.onOpenPlaylists,
     this.onSearch,
@@ -63,12 +55,6 @@ class SongsToolbarState {
   final int selectedCount;
   final bool allSelected;
   final bool batchMode;
-  final bool searchMode;
-  final bool searchAutoFocus;
-  final TextEditingController? searchController;
-  final FocusNode? searchFocusNode;
-  final VoidCallback? onCloseSearch;
-  final ValueChanged<String>? onSearchChanged;
   final ValueChanged<String?>? onSelectLibraryPlaylist;
   final VoidCallback? onOpenPlaylists;
   final VoidCallback? onSearch;
@@ -92,8 +78,6 @@ class SongsToolbarState {
     required int selectedCount,
     required bool allSelected,
     required bool batchMode,
-    required bool searchMode,
-    required bool searchAutoFocus,
     required bool canUpdatePlaylist,
     required bool updatingPlaylist,
   }) {
@@ -104,15 +88,14 @@ class SongsToolbarState {
         this.selectedCount == selectedCount &&
         this.allSelected == allSelected &&
         this.batchMode == batchMode &&
-        this.searchMode == searchMode &&
-        this.searchAutoFocus == searchAutoFocus &&
         (onUpdatePlaylist != null) == canUpdatePlaylist &&
         this.updatingPlaylist == updatingPlaylist;
   }
 }
 
-/// The library selected from the Songs header. Search stays within this
-/// collection, and an App restart restores the last selected library.
+/// The library selected from the Songs header. It survives both the dedicated
+/// search route and an App restart so Songs reopens the last visible
+/// collection.
 class SongsLibraryPlaylistIdNotifier extends Notifier<String?> {
   late final _prefs = ref.read(sharedPreferencesProvider);
 
@@ -146,7 +129,7 @@ final songsToolbarStateProvider = StateProvider<SongsToolbarState>(
   (ref) => const SongsToolbarState(),
 );
 
-/// Opening search focuses the header after its animation. Playing a result
-/// releases focus; restored search routes must not focus again when the player
-/// returns, so the persistent bottom toolbar remains visible.
+/// The dedicated search route normally focuses its field on entry. Playing a
+/// result temporarily leaves that route; when the player returns, focus must
+/// stay released so the persistent bottom toolbar is not hidden again.
 final songsSearchAutoFocusProvider = StateProvider<bool>((ref) => true);

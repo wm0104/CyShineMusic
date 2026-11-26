@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:heroine/heroine.dart';
 
 import 'features/debug/debug_log_page.dart';
 import 'features/discovery/leaderboards_page.dart';
@@ -13,13 +12,12 @@ import 'core/models/online_collection_kind.dart';
 import 'core/models/playlist_summary.dart';
 import 'core/ui/container_transform.dart';
 import 'core/ui/skippable_exit_transition.dart';
-import 'core/ui/widgets/settings_route_page.dart';
+import 'features/player/player_artists_page.dart';
 import 'features/playlists/online_playlist_import_page.dart';
 import 'features/playlists/playlist_detail_page.dart';
 import 'features/playlists/playlist_management_page.dart';
 import 'features/search/search_page.dart';
 import 'features/settings/settings_page.dart';
-import 'features/settings/settings_section.dart';
 import 'features/settings/webdav_sync_page.dart';
 import 'features/music_sources/music_source_page.dart';
 import 'features/shell/app_shell.dart';
@@ -61,18 +59,12 @@ GoRouter createAppRouter({
           );
         },
         routes: [
-          StatefulShellRoute(
+          StatefulShellRoute.indexedStack(
             key: tabShellKey,
             builder: (context, state, navigationShell) => navigationShell,
-            navigatorContainerBuilder: (context, navigationShell, children) =>
-                _PrismBranchContainer(
-                  currentIndex: navigationShell.currentIndex,
-                  children: children,
-                ),
             branches: [
               StatefulShellBranch(
                 initialLocation: '/',
-                observers: [HeroineController()],
                 routes: [
                   GoRoute(
                     path: '/',
@@ -109,32 +101,11 @@ GoRouter createAppRouter({
                       );
                     },
                   ),
-                  for (final kind in [
-                    OnlineCollectionKind.artist,
-                    OnlineCollectionKind.album,
-                  ])
-                    GoRoute(
-                      path:
-                          '/discover/${kind == OnlineCollectionKind.artist ? 'artists' : 'albums'}/:source/:id',
-                      pageBuilder: (context, state) => _containerTransformPage(
-                        context,
-                        key: state.pageKey,
-                        extra: state.extra,
-                        child: _shellPageContent(
-                          state,
-                          child: OnlinePlaylistDetailPage(
-                            source: MusicSource.fromCode(
-                              state.pathParameters['source'] ?? '',
-                            ),
-                            playlistId: state.pathParameters['id'] ?? '',
-                            kind: kind,
-                            summary: _routePayload<PlaylistSummary>(
-                              state.extra,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
+                  GoRoute(
+                    path: '/discover/artists/:source/:id',
+                    pageBuilder: (context, state) =>
+                        _artistDetailPage(context, state),
+                  ),
                   GoRoute(
                     path: '/discover/leaderboards/:source',
                     pageBuilder: (context, state) {
@@ -260,84 +231,43 @@ GoRouter createAppRouter({
                 routes: [
                   GoRoute(
                     path: '/settings',
-                    pageBuilder: (context, state) => SettingsRoutePage(
-                      key: state.pageKey,
-                      origin: state.extra is SettingsContainerOrigin
-                          ? state.extra as SettingsContainerOrigin
-                          : null,
-                      isRoot: true,
+                    pageBuilder: (context, state) => NoTransitionPage(
                       child: _shellPageContent(
                         state,
                         child: const SettingsPage(),
                       ),
                     ),
-                    routes: [
-                      for (final section in SettingsSection.values)
-                        GoRoute(
-                          path: section.name,
-                          pageBuilder: (context, state) => SettingsRoutePage(
-                            key: state.pageKey,
-                            origin: state.extra is SettingsContainerOrigin
-                                ? state.extra as SettingsContainerOrigin
-                                : null,
-                            child: _shellPageContent(
-                              state,
-                              child: SettingsPage(section: section),
-                            ),
-                          ),
-                        ),
-                      GoRoute(
-                        path: 'localMusic',
-                        redirect: (_, _) => SettingsSection.downloads.location,
+                  ),
+                  GoRoute(
+                    path: '/settings/sources',
+                    pageBuilder: (context, state) => NoTransitionPage(
+                      child: _shellPageContent(
+                        state,
+                        child: const MusicSourcePage(),
                       ),
-                      GoRoute(
-                        path: 'sources',
-                        pageBuilder: (context, state) => SettingsRoutePage(
-                          key: state.pageKey,
-                          origin: state.extra is SettingsContainerOrigin
-                              ? state.extra as SettingsContainerOrigin
-                              : null,
-                          child: _shellPageContent(
-                            state,
-                            child: const MusicSourcePage(),
-                          ),
-                        ),
+                    ),
+                  ),
+                  GoRoute(
+                    path: '/settings/webdav',
+                    pageBuilder: (context, state) => NoTransitionPage(
+                      child: _shellPageContent(
+                        state,
+                        child: const WebDavSyncPage(),
                       ),
-                      GoRoute(
-                        path: 'webdav',
-                        pageBuilder: (context, state) => SettingsRoutePage(
-                          key: state.pageKey,
-                          origin: state.extra is SettingsContainerOrigin
-                              ? state.extra as SettingsContainerOrigin
-                              : null,
-                          child: _shellPageContent(
-                            state,
-                            child: const WebDavSyncPage(),
-                          ),
-                        ),
+                    ),
+                  ),
+                  GoRoute(
+                    path: '/settings/equalizer',
+                    pageBuilder: (context, state) => NoTransitionPage(
+                      child: _shellPageContent(
+                        state,
+                        child: const EqualizerPage(),
                       ),
-                      GoRoute(
-                        path: 'equalizer',
-                        pageBuilder: (context, state) => SettingsRoutePage(
-                          key: state.pageKey,
-                          origin: state.extra is SettingsContainerOrigin
-                              ? state.extra as SettingsContainerOrigin
-                              : null,
-                          child: _shellPageContent(
-                            state,
-                            child: const EqualizerPage(),
-                          ),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                   GoRoute(
                     path: '/debug',
-                    pageBuilder: (context, state) => SettingsRoutePage(
-                      key: state.pageKey,
-                      origin: state.extra is SettingsContainerOrigin
-                          ? state.extra as SettingsContainerOrigin
-                          : null,
+                    pageBuilder: (context, state) => NoTransitionPage(
                       child: _shellPageContent(
                         state,
                         child: const DebugLogPage(),
@@ -360,9 +290,48 @@ GoRouter createAppRouter({
               child: const _PlayerRouteBackdrop(),
             ),
           ),
+          GoRoute(
+            path: '/player/track-artists',
+            pageBuilder: (context, state) => _fadeThroughPage(
+              context,
+              key: state.pageKey,
+              extra: state.extra,
+              skipExit: _leavesPlaybackArtistStack,
+              child: _shellPageContent(state, child: const PlayerArtistsPage()),
+            ),
+          ),
+          GoRoute(
+            path: '/player/artists/:source/:id',
+            pageBuilder: (context, state) =>
+                _artistDetailPage(context, state, fromPlayback: true),
+          ),
         ],
       ),
     ],
+  );
+}
+
+Page<void> _artistDetailPage(
+  BuildContext context,
+  GoRouterState state, {
+  bool fromPlayback = false,
+}) {
+  return _containerTransformPage(
+    context,
+    key: state.pageKey,
+    extra: state.extra,
+    skipExit: fromPlayback ? _leavesPlaybackArtistStack : _leavesDiscovery,
+    child: _shellPageContent(
+      state,
+      child: OnlinePlaylistDetailPage(
+        source: MusicSource.fromCode(state.pathParameters['source'] ?? ''),
+        playlistId: state.pathParameters['id'] ?? '',
+        kind: OnlineCollectionKind.artist,
+        summary: _routePayload<PlaylistSummary>(state.extra),
+        onBack: fromPlayback ? () => closePlaybackArtistPage(context) : null,
+        fromPlayback: fromPlayback,
+      ),
+    ),
   );
 }
 
@@ -372,48 +341,6 @@ Widget _shellPageContent(GoRouterState state, {required Widget child}) {
     playlistBackLocation: _playlistBackLocationFromUri(state.uri),
     child: ShellPageStorage(child: child),
   );
-}
-
-/// Keeps branch navigators alive while giving bottom-tab changes Prism UI's
-/// restrained fade and scale handoff. Scroll positions, nested routes and
-/// editor state therefore survive a tab switch.
-class _PrismBranchContainer extends StatelessWidget {
-  const _PrismBranchContainer({
-    required this.currentIndex,
-    required this.children,
-  });
-
-  final int currentIndex;
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final duration = reduceMotion ? Duration.zero : AppMotion.medium;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        for (var index = 0; index < children.length; index++)
-          AnimatedOpacity(
-            opacity: index == currentIndex ? 1 : 0,
-            duration: duration,
-            curve: AppMotion.emphasized,
-            child: AnimatedScale(
-              scale: index == currentIndex ? 1 : 0.985,
-              duration: duration,
-              curve: AppMotion.emphasized,
-              child: IgnorePointer(
-                ignoring: index != currentIndex,
-                child: TickerMode(
-                  enabled: index == currentIndex,
-                  child: children[index],
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
 }
 
 class _PlayerRouteBackdrop extends StatelessWidget {
@@ -428,13 +355,19 @@ class _PlayerRouteBackdrop extends StatelessWidget {
   );
 }
 
-/// 发现详情：Heroine 的单层封面弹簧飞行，页面只做淡入/淡出。
-/// 起点继续用于识别卡片入口、重置首次滚动；切回 tab 时不触发飞行。
+/// 发现页卡片 → 歌单/榜单详情：页面从被点击的卡片矩形展开（M3 container
+/// transform），封面 Hero 沿同一条曲线飞到头图；返回时原路收回。起点随
+/// extra 传入，没有起点（深链、预览弹窗）时退化为整页淡入；从别的 tab
+/// 切回（[ShellTabSwitch]）时直接出现。
+///
+/// 路由时长同时驱动页面容器与封面 Hero，两者共用 [AppMotion.long] /
+/// [AppMotion.medium]。
 CustomTransitionPage<void> _containerTransformPage(
   BuildContext context, {
   required LocalKey key,
   required Object? extra,
   required Widget child,
+  bool Function(BuildContext) skipExit = _leavesDiscovery,
 }) {
   final reduceMotion = MediaQuery.disableAnimationsOf(context);
   final origin = extra is ContainerTransformExtra ? extra.origin : null;
@@ -442,18 +375,14 @@ CustomTransitionPage<void> _containerTransformPage(
     key: key,
     transitionDuration: reduceMotion || extra is ShellTabSwitch
         ? Duration.zero
-        : AppMotion.containerTransformDuration,
-    reverseTransitionDuration: reduceMotion
-        ? Duration.zero
-        : AppMotion.containerTransformDuration,
+        : AppMotion.long,
+    reverseTransitionDuration: reduceMotion ? Duration.zero : AppMotion.medium,
     transitionsBuilder: (_, animation, _, child) => SkippableExitTransition(
       animation: animation,
-      skipExit: _leavesDiscovery,
+      skipExit: skipExit,
       child: ContainerTransformTransition(
         animation: animation,
         origin: origin,
-        springHero: true,
-        enableFlight: !reduceMotion && extra is! ShellTabSwitch,
         child: child,
       ),
     ),
@@ -469,6 +398,7 @@ CustomTransitionPage<void> _fadeThroughPage(
   required LocalKey key,
   required Object? extra,
   required Widget child,
+  bool Function(BuildContext) skipExit = _leavesDiscovery,
 }) {
   final reduceMotion = MediaQuery.disableAnimationsOf(context);
   return CustomTransitionPage<void>(
@@ -481,7 +411,7 @@ CustomTransitionPage<void> _fadeThroughPage(
       final eased = animation.drive(CurveTween(curve: AppMotion.emphasized));
       return SkippableExitTransition(
         animation: animation,
-        skipExit: _leavesDiscovery,
+        skipExit: skipExit,
         child: FadeTransition(
           opacity: eased,
           child: SlideTransition(
@@ -503,6 +433,11 @@ CustomTransitionPage<void> _fadeThroughPage(
 bool _leavesDiscovery(BuildContext context) {
   final location = GoRouter.of(context).routerDelegate.currentConfiguration;
   return !isDiscoveryLocation(location.uri.path);
+}
+
+bool _leavesPlaybackArtistStack(BuildContext context) {
+  final location = GoRouter.of(context).routeInformationProvider.value.uri.path;
+  return location != '/player' && !isPlaybackArtistLocation(location);
 }
 
 /// 路由 extra 既可能是裸的业务对象，也可能包在 [ContainerTransformExtra] 里。

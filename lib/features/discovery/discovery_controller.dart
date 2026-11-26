@@ -1,8 +1,7 @@
-import 'dart:async';
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/api/music_api.dart';
+import '../../core/models/artist_info.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/leaderboard_info.dart';
 import '../../core/models/music_info.dart';
@@ -12,18 +11,13 @@ import '../../core/models/playlist_info.dart';
 import '../../core/models/playlist_summary.dart';
 import '../../core/storage/settings_store.dart';
 import '../../core/ui/cover_image_source.dart';
-import 'discovery_browse_cache.dart';
 
 const int discoveryPlaylistArtworkSize = 640;
 const int discoveryPlaylistPageSize = 30;
 const int onlinePlaylistDetailInitialTrackLimit = 40;
 const int onlinePlaylistDetailTrackPageSize = 40;
-final discoveryBrowseCacheProvider = Provider<DiscoveryBrowseCache>(
-  (ref) => DiscoveryBrowseCache(),
-);
-
 final discoverySourcesProvider = Provider<List<MusicSource>>(
-  (ref) => ref.watch(settingsProvider.select((s) => s.discoverySourceOrder)),
+  (ref) => ref.watch(settingsProvider).discoverySourceOrder,
 );
 
 typedef OnlinePlaylistIdentity = ({
@@ -49,56 +43,14 @@ String onlinePlaylistArtworkHeroTag(
   return 'online-${kind.name}-artwork:${source.code}:$playlistId';
 }
 
-final selectedDiscoverySourceProvider = StateProvider<MusicSource>((ref) {
-  const storageKey = 'selected_discovery_source_v1';
-  final sources = ref.watch(discoverySourcesProvider);
-  final prefs = ref.read(sharedPreferencesProvider);
-  final saved = MusicSource.tryFromCode(prefs.getString(storageKey) ?? '');
-  // Preserve the existing StateController API while persisting every selection,
-  // including programmatic changes, in Riverpod 2.x.
-  // ignore: deprecated_member_use
-  ref.listenSelf((previous, next) {
-    if (sources.contains(next) && prefs.getString(storageKey) != next.code) {
-      unawaited(prefs.setString(storageKey, next.code));
-    }
-  });
-  return sources.contains(saved) ? saved! : sources.first;
-});
+final selectedDiscoverySourceProvider = StateProvider<MusicSource>(
+  (ref) => ref.watch(discoverySourcesProvider).first,
+);
 
 final selectedDiscoveryCategoryProvider =
-    NotifierProvider.family<
-      SelectedDiscoveryCategoryNotifier,
-      String,
-      MusicSource
-    >(SelectedDiscoveryCategoryNotifier.new);
-
-class SelectedDiscoveryCategoryNotifier
-    extends FamilyNotifier<String, MusicSource> {
-  late final _prefs = ref.read(sharedPreferencesProvider);
-
-  String get _storageKey => 'discovery_category_${arg.code}_v1';
-
-  @override
-  String build(MusicSource source) {
-    final savedId = _prefs.getString(_storageKey);
-    return playlistCatalogCategoriesFor(
-          source,
-        ).any((category) => category.id == savedId)
-        ? savedId!
-        : defaultPlaylistCatalogCategoryFor(source).id;
-  }
-
-  Future<void> select(String categoryId) async {
-    if (state == categoryId ||
-        !playlistCatalogCategoriesFor(
-          arg,
-        ).any((category) => category.id == categoryId)) {
-      return;
-    }
-    state = categoryId;
-    await _prefs.setString(_storageKey, categoryId);
-  }
-}
+    StateProvider.family<String, MusicSource>(
+      (ref, source) => defaultPlaylistCatalogCategoryFor(source).id,
+    );
 
 final featuredPlaylistsProvider =
     FutureProvider.family<List<PlaylistSummary>, MusicSource>((ref, source) {
@@ -158,15 +110,93 @@ class OnlinePlaylistKey {
   int get hashCode => Object.hash(source, id, kind, maxTracks);
 }
 
+typedef ArtistPageKey = ({MusicSource source, String id, int offset});
+
+final artistArtworkProvider = FutureProvider.autoDispose
+    .family<String?, ({MusicSource source, String id, String name})>((
+      ref,
+      key,
+    ) async {
+      final result = await ref
+          .watch(musicApiProvider)
+          .searchArtists(keyword: key.name, source: key.source);
+      for (final artist in result.artists) {
+        if (artist.id != key.id || artist.source != key.source) continue;
+        final cover = CoverImageSource.normalizeArtistUrl(artist.coverUrl);
+        if (cover != null) return cover;
+      }
+      return null;
+    });
+
+final artistTrackPageProvider =
+    FutureProvider.family<ArtistTrackPage, ArtistPageKey>((ref, key) {
+      return ref
+          .watch(musicApiProvider)
+          .artistSongs(
+            artistId: key.id,
+            source: key.source,
+            offset: key.offset,
+            limit: onlinePlaylistDetailTrackPageSize,
+          );
+    });
+
 final onlinePlaylistDetailProvider =
     FutureProvider.family<PlaylistInfo, OnlinePlaylistKey>((ref, key) {
       final api = ref.watch(musicApiProvider);
-      return api.getCollection(
-        source: key.source,
-        id: key.id,
-        kind: key.kind,
-        maxTracks: key.maxTracks,
-      );
+      return switch (key.kind) {
+        OnlineCollectionKind.artist =>
+          Future.wait([
+            for (
+              int offset = 0;
+              offset < (key.maxTracks ?? onlinePlaylistDetailInitialTrackLimit);
+              offset += onlinePlaylistDetailTrackPageSize
+            )
+              ref.watch(
+                artistTrackPageProvider((
+                  source: key.source,
+                  id: key.id,
+                  offset: offset,
+                )).future,
+              ),
+          ]).then((pages) {
+            final seen = <String>{};
+            final tracks = [
+              for (final page in pages)
+                for (final track in page.tracks)
+                  if (seen.add(track.id)) track,
+            ];
+            final first = pages.first;
+            final last = pages.last;
+            final total = pages.reversed
+                .firstWhere(
+                  (page) => page.tracks.isNotEmpty,
+                  orElse: () => first,
+                )
+                .total;
+            final exhausted =
+                last.tracks.isEmpty ||
+                last.offset + onlinePlaylistDetailTrackPageSize >= total;
+            return PlaylistInfo(
+              id: key.id,
+              source: key.source,
+              name: first.artistName ?? '歌手详情',
+              coverUrl: first.coverUrl,
+              tracks: tracks,
+              trackCount: total,
+              hasMoreTracks: !exhausted,
+            );
+          }),
+        OnlineCollectionKind.playlist => api.parsePlaylist(
+          input: key.id,
+          source: key.source,
+          maxTracks: key.maxTracks,
+        ),
+        OnlineCollectionKind.leaderboard => api.getLeaderboard(
+          source: key.source,
+          boardId: key.id,
+          maxTracks: key.maxTracks,
+        ),
+      };
     });
 
 class OnlineTrackCoverKey {

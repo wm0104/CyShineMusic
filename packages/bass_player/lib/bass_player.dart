@@ -186,56 +186,12 @@ class BassPlayer {
       StreamController<Duration?>.broadcast(sync: true);
   final StreamController<BassPlayerException> _errorController =
       StreamController<BassPlayerException>.broadcast(sync: true);
-  final StreamController<bool> _networkController =
-      StreamController<bool>.broadcast(sync: true);
 
   BassPlaybackSnapshot _snapshot = const BassPlaybackSnapshot.idle();
-  bool? _networkAvailable;
-  String? _networkError;
   Duration _anchorPosition = Duration.zero;
   Duration _anchorElapsed = Duration.zero;
   StreamSubscription<Object?>? _eventSubscription;
   Timer? _positionTimer;
-  Duration _allowPositionRewindUntil = Duration.zero;
-  String? _lastNativeSource;
-  int? _lastNativeSequence;
-  final _traceTimes = <String, Duration>{};
-  final _traceOmitted = <String, int>{};
-  bool _playbackDiagnosticsEnabled = false;
-  bool _smartTransitionDiagnosticsEnabled = false;
-  final _diagnosticController =
-      StreamController<Map<Object?, Object?>>.broadcast(sync: true);
-  Stream<Map<Object?, Object?>> get diagnosticStream =>
-      _diagnosticController.stream;
-
-  void _trace(
-    String action,
-    Map<Object?, Object?> fields, {
-    bool limited = false,
-    bool smartTransition = false,
-  }) {
-    if (!(smartTransition
-        ? _smartTransitionDiagnosticsEnabled
-        : _playbackDiagnosticsEnabled)) {
-      return;
-    }
-    final now = _clock.elapsed;
-    final last = _traceTimes[action];
-    if (limited && last != null && now - last < const Duration(seconds: 1)) {
-      _traceOmitted[action] = (_traceOmitted[action] ?? 0) + 1;
-      return;
-    }
-    _traceTimes[action] = now;
-    _diagnosticController.add({
-      'action': action,
-      'scope': smartTransition ? 'groove-shift-trace' : 'player-trace',
-      'dartMonoMs': now.inMilliseconds,
-      ...fields,
-      if (_traceOmitted.containsKey(action))
-        'omitted': _traceOmitted.remove(action),
-    });
-  }
-
   Future<BassEngineInfo>? _initialization;
   BassEqualizerConfiguration? _pendingEqualizer;
   bool _equalizerPumpRunning = false;
@@ -246,44 +202,13 @@ class BassPlayer {
   Stream<Duration> get positionStream => _positionController.stream;
   Stream<Duration?> get durationStream => _durationController.stream;
   Stream<BassPlayerException> get errorStream => _errorController.stream;
-
-  /// Emits whenever [networkUsable] flips.
-  Stream<bool> get networkUsableStream => _networkController.stream;
   BassPlaybackSnapshot get snapshot => _snapshot;
-
-  /// False when Android reports no default network; null until it is known.
-  bool? get networkAvailable => _networkAvailable;
-
-  /// Why the active remote stream is reconnecting; null while its data flows.
-  String? get networkError => _networkError;
-
-  /// Whether nothing currently indicates a network problem.
-  bool get networkUsable => _networkAvailable != false && _networkError == null;
   Duration get position => _interpolatedPosition();
   Duration? get duration => _snapshot.duration;
   Duration get bufferedPosition => _snapshot.bufferedPosition;
   bool get playing => _snapshot.playing;
   BassProcessingState get processingState => _snapshot.processingState;
   double get speed => 1;
-
-  Future<void> setDiagnosticRecording({
-    required bool playback,
-    required bool smartTransition,
-  }) async {
-    _playbackDiagnosticsEnabled = playback;
-    _smartTransitionDiagnosticsEnabled = smartTransition;
-    _traceTimes.clear();
-    _traceOmitted.clear();
-    if (_initialization == null || _disposed) return;
-    await _sendDiagnosticRecording();
-  }
-
-  Future<void> _sendDiagnosticRecording() async {
-    await _invokeMap('setDiagnosticRecording', {
-      'playback': _playbackDiagnosticsEnabled,
-      'smartTransition': _smartTransitionDiagnosticsEnabled,
-    });
-  }
 
   Future<BassEngineInfo> initialize() async {
     _throwIfDisposed();
@@ -301,14 +226,19 @@ class BassPlayer {
   }
 
   Future<BassEngineInfo> _initialize() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
-      throw UnsupportedError('BASS playback is available on Android only');
+    // iOS 走 packages/bass_player/ios 的实现（BASS + 自研 biquad 均衡器），
+    // 通道名、方法名、事件字段与 Android 完全一致，所以这里只需要放开平台判断。
+    const supported = {
+      TargetPlatform.android,
+      TargetPlatform.iOS,
+    };
+    if (kIsWeb || !supported.contains(defaultTargetPlatform)) {
+      throw UnsupportedError('BASS playback is available on Android and iOS only');
     }
     _eventSubscription ??= _events.receiveBroadcastStream().listen(
       _handleEvent,
       onError: _handleStreamError,
     );
-    await _sendDiagnosticRecording();
     final raw = await _invokeMap('initialize');
     if (_disposed) throw StateError('BassPlayer was disposed during startup');
     return BassEngineInfo.fromMap(raw);
@@ -340,10 +270,6 @@ class BassPlayer {
 
   Future<void> play() async {
     await initialize();
-    if (_snapshot.processingState == BassProcessingState.completed) {
-      _allowPositionRewindUntil =
-          _clock.elapsed + const Duration(milliseconds: 800);
-    }
     _updateFromMap(await _invokeMap('play'), notifyPlayback: true);
   }
 
@@ -359,8 +285,6 @@ class BassPlayer {
 
   Future<void> seek(Duration position) async {
     if (_initialization == null) return;
-    _allowPositionRewindUntil =
-        _clock.elapsed + const Duration(milliseconds: 800);
     _updateFromMap(
       await _invokeMap('seek', {'positionMs': position.inMilliseconds}),
       notifyPlayback: true,
@@ -418,9 +342,6 @@ class BassPlayer {
     await _positionController.close();
     await _durationController.close();
     await _errorController.close();
-    await _networkController.close();
-    await _grooveShiftController.close();
-    await _diagnosticController.close();
   }
 
   Future<Map<Object?, Object?>> _invokeMap(
@@ -437,53 +358,10 @@ class BassPlayer {
     }
   }
 
-  final _grooveShiftController =
-      StreamController<Map<Object?, Object?>>.broadcast(sync: true);
-  Stream<Map<Object?, Object?>> get grooveShiftStream =>
-      _grooveShiftController.stream;
-  Future<void> setGrooveShiftEnabled(bool enabled) async {
-    if (!enabled && _initialization == null) return;
-    await initialize();
-    await _invokeMap('setGrooveShift', {'enabled': enabled});
-  }
-
-  Future<void> setGrooveShiftNext({String? id, Uri? uri}) async {
-    await _invokeMap('setGrooveShiftNext', {'id': id, 'uri': uri?.toString()});
-  }
-
-  Future<void> confirmGrooveShift(String id) async {
-    await _invokeMap('confirmGrooveShift', {'id': id});
-  }
-
-  Future<void> cancelGrooveShift() async {
-    if (_initialization == null || _disposed) return;
-    await _invokeMap('cancelGrooveShift');
-  }
-
   void _handleEvent(Object? event) {
     if (_disposed || event is! Map) return;
     final map = Map<Object?, Object?>.from(event);
-    if (map['event'] == 'diagnostic') {
-      final record = map['record'];
-      if (record is Map) {
-        final enabled = record['scope'] == 'player-trace'
-            ? _playbackDiagnosticsEnabled
-            : _smartTransitionDiagnosticsEnabled;
-        if (enabled) {
-          _diagnosticController.add(Map<Object?, Object?>.from(record));
-        }
-      }
-      return;
-    }
-    if (map['event'] == 'network') {
-      _updateNetwork(
-        available: map['available'] as bool?,
-        error: _networkError,
-      );
-      return;
-    }
     _updateFromMap(map);
-    if (map['event'] == 'groove-shift') _grooveShiftController.add(map);
     if (map['event'] == 'error') {
       _errorController.add(
         BassPlayerException(
@@ -503,95 +381,17 @@ class BassPlayer {
     _errorController.add(exception);
   }
 
-  void _updateNetwork({required bool? available, required String? error}) {
-    final wasUsable = networkUsable;
-    _networkAvailable = available ?? _networkAvailable;
-    _networkError = error;
-    if (wasUsable != networkUsable) _networkController.add(networkUsable);
-  }
-
   void _updateFromMap(
     Map<Object?, Object?> map, {
     bool notifyPlayback = false,
   }) {
     if (_disposed || !map.containsKey('processingState')) return;
-    _updateNetwork(
-      available: map['networkAvailable'] as bool?,
-      error: map['networkError']?.toString(),
-    );
-    final processingState = _processingState(
-      map['processingState']?.toString(),
-    );
-    var position = _duration(map['positionMs']) ?? Duration.zero;
-    final reportedDuration = _duration(map['durationMs']);
-    final previousDuration = _snapshot.duration;
-    final source = map['sourceId']?.toString();
-    final sequence = (map['snapshotSeq'] as num?)?.toInt();
-    final changedSource = source != null && source != _lastNativeSource;
-    final oldSequence =
-        sequence != null &&
-        _lastNativeSequence != null &&
-        sequence < _lastNativeSequence!;
-    final jump =
-        (position - _interpolatedPosition()).inMilliseconds.abs() > 700;
-    if (changedSource ||
-        oldSequence ||
-        jump ||
-        map['event'] == 'groove-shift') {
-      _trace(
-        'dart_frame',
-        {
-          'event': map['event'],
-          'phase': map['phase'],
-          'transition': map['transitionId'],
-          'seq': sequence,
-          'previousSeq': _lastNativeSequence,
-          'source': source,
-          'previousSource': _lastNativeSource,
-          'stale': oldSequence,
-          'previousMs': _snapshot.position.inMilliseconds,
-          'rawMs': position.inMilliseconds,
-          'durationMs': reportedDuration?.inMilliseconds,
-          'previousDurationMs': previousDuration?.inMilliseconds,
-        },
-        limited: map['event'] != 'groove-shift',
-        smartTransition:
-            map['event'] == 'groove-shift' ||
-            (source?.startsWith('local-') ?? false),
-      );
-    }
-    _lastNativeSource = source;
-    _lastNativeSequence = sequence;
-    // At EOF a mixer source can briefly expose its reset cursor after the
-    // final PCM block has already been heard. Keep the UI clock at the end;
-    // loading/seek paths still publish their explicit zero position.
-    if ((processingState == BassProcessingState.ready ||
-            processingState == BassProcessingState.completed) &&
-        previousDuration != null &&
-        reportedDuration == previousDuration &&
-        _clock.elapsed > _allowPositionRewindUntil &&
-        _snapshot.position >=
-            previousDuration - const Duration(milliseconds: 1500) &&
-        position <= const Duration(milliseconds: 1000)) {
-      _trace(
-        'dart_eof_guard',
-        {
-          'source': source,
-          'seq': sequence,
-          'rawMs': position.inMilliseconds,
-          'publishedMs': previousDuration.inMilliseconds,
-        },
-        limited: true,
-        smartTransition: source?.startsWith('local-') ?? false,
-      );
-      position = previousDuration;
-    }
     final next = BassPlaybackSnapshot(
       playing: map['playing'] as bool? ?? false,
-      processingState: processingState,
-      position: position,
+      processingState: _processingState(map['processingState']?.toString()),
+      position: _duration(map['positionMs']) ?? Duration.zero,
       bufferedPosition: _duration(map['bufferedPositionMs']) ?? Duration.zero,
-      duration: reportedDuration,
+      duration: _duration(map['durationMs']),
     );
     _applySnapshot(next, notifyPlayback: notifyPlayback);
   }

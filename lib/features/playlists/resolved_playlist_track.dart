@@ -1,4 +1,4 @@
-import '../../core/services/local_audio_source.dart';
+import 'dart:io';
 
 import '../../core/models/enums.dart';
 import '../downloads/download_history_store.dart';
@@ -53,10 +53,7 @@ class LocalHistoryIndex {
 
   bool _pathExists(String path) {
     final key = normalizePlaylistPath(path);
-    return _pathExistence.putIfAbsent(
-      key,
-      () => isLocalAudioSourceAvailable(path),
-    );
+    return _pathExistence.putIfAbsent(key, () => File(path).existsSync());
   }
 
   static String? _musicKey(String sourceCode, String musicId) {

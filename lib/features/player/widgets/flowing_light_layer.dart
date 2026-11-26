@@ -3,8 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
-import '../../../core/ui/artwork_colors.dart';
-import '../../../core/ui/flow_palette.dart';
+import '../flow_palette.dart';
 
 /// Radius of each color body, in short-side units, passed through the shader's
 /// `w` component. Ordered to match [FlowPalette.accentsArgb].
@@ -90,6 +89,8 @@ class _FlowingLightLayerState extends State<FlowingLightLayer>
   );
   ui.FragmentShader? _shader;
   FlowPalette? _palette;
+  ImageStream? _imageStream;
+  ImageStreamListener? _imageListener;
   int _paletteGeneration = 0;
 
   @override
@@ -139,23 +140,48 @@ class _FlowingLightLayerState extends State<FlowingLightLayer>
   }
 
   void _subscribeToArtwork() {
+    final stream = widget.imageProvider.resolve(
+      createLocalImageConfiguration(context),
+    );
+    if (_imageStream?.key == stream.key) return;
+
+    final previous = _imageListener;
+    if (previous != null) _imageStream?.removeListener(previous);
+
     final generation = ++_paletteGeneration;
-    unawaited(_derivePalette(generation));
+    final listener = ImageStreamListener(
+      (imageInfo, synchronousCall) {
+        if (!mounted || generation != _paletteGeneration) return;
+        unawaited(_derivePalette(imageInfo.image.clone(), generation));
+      },
+      onError: (Object error, StackTrace? stackTrace) {},
+    );
+    _imageStream = stream;
+    _imageListener = listener;
+    stream.addListener(listener);
   }
 
-  Future<void> _derivePalette(int generation) async {
-    final colors = await loadArtworkColors(
-      widget.imageProvider,
-      requestGroup: 'player',
-    );
-    if (!mounted || generation != _paletteGeneration || colors == null) return;
-    if (colors.palette == _palette) return;
-    setState(() => _palette = colors.palette);
+  Future<void> _derivePalette(ui.Image image, int generation) async {
+    try {
+      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (!mounted || generation != _paletteGeneration || data == null) return;
+      final palette = extractFlowPalette(
+        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+        image.width,
+        image.height,
+      );
+      if (palette == _palette) return;
+      setState(() => _palette = palette);
+    } finally {
+      image.dispose();
+    }
   }
 
   @override
   void dispose() {
     _paletteGeneration++;
+    final listener = _imageListener;
+    if (listener != null) _imageStream?.removeListener(listener);
     _flow.dispose();
     _fade.dispose();
     _shader?.dispose();

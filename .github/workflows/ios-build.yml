@@ -1,0 +1,306 @@
+name: iOS Build (unsigned IPA)
+
+# 在 macOS runner 上编译 iOS 产物。产出的 IPA 是**未签名**的，
+# 需要用 AltStore / SideStore / 自签工具在设备上安装。
+# 详见 ios/README-IOS.md。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要构建的分支或 tag'
+        required: false
+        default: ''
+  push:
+    branches: [ ios ]
+    # 文档改动没必要跑 10 分钟的 macOS 构建。
+    paths-ignore:
+      - '**/*.md'
+      - 'screenshots/**'
+      - 'recon/**'
+
+env:
+  # 项目要求 Flutter >= 3.41.0（pubspec: sdk ^3.11.4）。
+  FLUTTER_VERSION: '3.47.7'
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+
+jobs:
+  build-ios:
+    name: Build iOS
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.sha }}
+
+      - run: python3 -B -m unittest discover -s tool -p test_ios_update_manifest.py -v
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter doctor / version
+        run: |
+          flutter --version
+          flutter doctor -v
+
+      # BASS 的二进制按官方要求不入库，构建前从 un4seen 取。
+      # 没有这一步，pod install 会直接报「未找到 BASS iOS 二进制」。
+      - name: Fetch BASS iOS binaries
+        run: bash tool/fetch_bass_ios.sh
+
+      # preload.js 在 Android 与 iOS 各有一份，必须是同一份内容。
+      # 这里做硬校验，防止只改一侧导致两端音源行为不一致。
+      - name: Verify preload.js parity
+        run: |
+          set -e
+          a=android/app/src/main/assets/music_source_preload.js
+          b=packages/music_source_runtime/ios/Resources/music_source_preload.js
+          if ! diff -q "$a" "$b"; then
+            echo "::error::music_source_preload.js 两端不一致。请同步："
+            echo "  cp $a $b"
+            diff -u "$a" "$b" || true
+            exit 1
+          fi
+          echo "preload.js md5: $(md5 -q "$a")"
+
+      # preload.js 的协议与「preload -> music_source_setup -> 音源脚本」这个顺序
+      # 是 iOS/Android 两端共用的硬约束。顺序写反过一次（表现为「初始化超时」），
+      # 这里跑成回归测试，避免再犯。
+      - name: Verify preload protocol & call order
+        run: node tool/verify_preload_protocol.mjs
+
+      - run: node --test test/music_source_runtime_policy_test.cjs
+
+      # 自定义播放实时活动已停用：保留旧活动清理和桌面 Widget 同步。
+      - name: Verify widget playback bridge
+        run: node tool/verify_live_activity_auth.mjs
+
+      # Swift 只能靠 macOS runner 编译（一次 ~10 分钟）。这条检查在编译之前
+      # 抓「私有方法改了参数但调用点漏改」这类签名不匹配 —— ios-v2.0.5 就因为
+      # 漏改一处 `apply(...)` 白跑了一次构建。
+      - name: Verify Swift call sites
+        run: node tool/verify_swift_call_sites.mjs
+
+      - name: Prepare iOS alternate icons
+        run: bash tool/fetch_app_icons.sh
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # iOS 有独立的版本号体系（tool/ios_version.txt 是唯一来源）：
+      #   CFBundleShortVersionString <- tool/ios_version.txt（手工维护）
+      #   CFBundleVersion             <- workflow run number（自动单调递增）
+      # 不再跟着上游 Android 的 1.0.8 走，每一次出包都是一个新 build。
+      - name: Resolve iOS version
+        id: version
+        run: |
+          set -e
+          VERSION="$(tr -d '[:space:]' < tool/ios_version.txt)"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){0,2}$'; then
+            echo "::error::tool/ios_version.txt 内容 '$VERSION' 不是 x.y.z 形式"
+            exit 1
+          fi
+          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "number=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "iOS 版本: $VERSION (${{ github.run_number }})"
+
+      # 幂等：把新增的 Swift 文件接进 Runner 的 Compile Sources，把部署目标
+      # 对齐到 16.2（实时活动的最低要求），并写入备用图标的资产目录构建设置。
+      # 正常情况仓库里的 pbxproj 已经注入好了，这一步是防止漏提交导致 CI 与本地不一致。
+      - name: Ensure Xcode project wiring
+        run: python3 tool/patch_xcodeproj.py
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: Update and widget regression tests
+        run: >-
+          flutter test --timeout 2m test/app_update*_test.dart
+          test/player_source_fallback_test.dart test/player_audio_handler_test.dart
+          test/transport_bar_test.dart
+
+      - name: Playlist and search regression tests
+        run: >-
+          flutter test --timeout 2m test/playlist*_test.dart
+          test/spotify*_test.dart test/player_artist*_test.dart
+          test/track_artist_sdk_test.dart test/track_metadata_fixture_test.dart
+          test/artist_search_test.dart test/music_url_resolver_fallback_test.dart
+          test/search_controller_test.dart test/search_ui_test.dart
+          test/music_source_runtime_policy_test.dart test/settings_preferences_test.dart
+          test/settings_icon_entry_test.dart
+
+      - name: Unit tests
+        # 上游测试里有若干依赖真机/网络的诊断用例，失败不阻断出包。
+        continue-on-error: true
+        run: flutter test
+
+      - name: Pod install
+        working-directory: ios
+        run: |
+          pod repo update || true
+          pod install --verbose
+
+      # 链接失败时最难查的就是「pod 到底有没有把 BASS 链进来」。
+      # 这里把关键产物一次性打出来，失败时不用再来回试。
+      - name: Dump pod link settings (diagnostics)
+        run: |
+          set +e
+          echo "::group::BASS frameworks on disk"
+          ls -la packages/bass_player/ios/Frameworks/ 2>&1
+          find packages/bass_player/ios/Frameworks -maxdepth 2 -name 'Info.plist' 2>&1 | head -20
+          echo "::endgroup::"
+          echo "::group::Generated Podfile"
+          cat ios/Podfile 2>&1
+          echo "::endgroup::"
+          echo "::group::bass_player xcconfig (Release)"
+          cat "ios/Pods/Target Support Files/bass_player/bass_player.release.xcconfig" 2>&1
+          echo "::endgroup::"
+          echo "::group::Pods-Runner xcconfig (Release)"
+          cat "ios/Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig" 2>&1
+          echo "::endgroup::"
+          echo "::group::xcframeworks CocoaPods knows about"
+          grep -o "bass[a-z]*\.xcframework" ios/Pods/Pods.xcodeproj/project.pbxproj 2>&1 | sort -u
+          grep -c "vendored_frameworks\|XCFramework" ios/Pods/Pods.xcodeproj/project.pbxproj 2>&1
+          echo "::endgroup::"
+
+      - name: Build iOS (no codesign)
+        run: |
+          flutter build ios --release --no-codesign \
+            --build-name="${{ steps.version.outputs.name }}" \
+            --build-number="${{ steps.version.outputs.number }}"
+
+      # Widget Extension（灵动岛实时活动 + 桌面小组件）。
+      # 独立编译再塞进 PlugIns/，等价于 Xcode 的 Embed App Extensions 阶段，
+      # 但不需要往 Flutter 生成的 Runner.xcodeproj 里加 target。
+      - name: Build & embed widget extension
+        env:
+          # 扩展的 CFBundleVersion 必须与主 App 一致，否则 iOS 拒绝加载扩展。
+          IOS_BUILD_NAME: ${{ steps.version.outputs.name }}
+          IOS_BUILD_NUMBER: ${{ steps.version.outputs.number }}
+        run: bash tool/build_widget_extension.sh build/ios/iphoneos/Runner.app
+
+      - name: Verify embedded extension
+        run: |
+          set -e
+          APP=build/ios/iphoneos/Runner.app
+          test -d "$APP/PlugIns/CyShineMusicWidget.appex" \
+            || { echo "::error::扩展没有被嵌入 $APP/PlugIns/"; exit 1; }
+          test -f "$APP/PlugIns/CyShineMusicWidget.appex/CyShineMusicWidget" \
+            || { echo "::error::扩展主二进制缺失"; exit 1; }
+          grep -q "com.apple.widgetkit-extension" \
+            "$APP/PlugIns/CyShineMusicWidget.appex/Info.plist" \
+            || { echo "::error::扩展 Info.plist 缺少 widgetkit NSExtensionPointIdentifier"; exit 1; }
+          grep -q "NSSupportsLiveActivities" \
+            "$APP/PlugIns/CyShineMusicWidget.appex/Info.plist" \
+            || { echo "::error::扩展 Info.plist 缺少 NSSupportsLiveActivities"; exit 1; }
+          # ★ UIDeviceFamily：手工组装的 .appex 不会由 Xcode 自动注入这个键，
+          #   缺失时 iOS 可能直接不加载扩展 —— 小组件与灵动岛一起消失且无报错。
+          #   2.0.2 的包里就实测到过这个缺失，所以在这里硬拦。
+          grep -q "UIDeviceFamily" \
+            "$APP/PlugIns/CyShineMusicWidget.appex/Info.plist" \
+            || { echo "::error::扩展 Info.plist 缺少 UIDeviceFamily（会导致扩展不被加载）"; exit 1; }
+          #必须恰好是 [1, 2]。构建脚本曾把它无条件Add 拼成 [1,2,1,2]，
+          # 所以这里校验条目数而不是只校验「键存在」。
+          FAM_COUNT=$(/usr/libexec/PlistBuddy -c "Print :UIDeviceFamily" \
+            "$APP/PlugIns/CyShineMusicWidget.appex/Info.plist" | grep -c '^[[:space:]]*[0-9]' || true)
+          echo "扩展 UIDeviceFamily: $(/usr/libexec/PlistBuddy -c "Print :UIDeviceFamily" \
+            "$APP/PlugIns/CyShineMusicWidget.appex/Info.plist" | tr '\n' ' ')（$FAM_COUNT 项）"
+          test "$FAM_COUNT" = "2" \
+            || { echo "::error::扩展 UIDeviceFamily 应恰好 2 项(1,2)，实际 $FAM_COUNT 项"; exit 1; }
+          APP_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          EXT_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" \
+            "$APP/PlugIns/CyShineMusicWidget.appex/Info.plist")
+          echo "主 App CFBundleVersion=$APP_VER / 扩展=$EXT_VER"
+          test "$APP_VER" = "$EXT_VER" \
+            || { echo "::error::扩展与主 App 的 CFBundleVersion 不一致"; exit 1; }
+          echo "扩展已就位："
+          ls -la "$APP/PlugIns/CyShineMusicWidget.appex"
+
+      # 备用图标必须真的进到 Info.plist 与 Assets.car，否则 setAlternateIconName
+      # 会在真机上直接失败。这里只做**告警级**校验并打印全量信息 ——
+      # 图标不可用不该拦掉出包（实时活动等其它能力不受影响），
+      # 但日志要能一眼看出是「Xcode 没采纳资产目录」还是别的。
+      - name: Verify alternate app icons
+        run: |
+          set +e
+          APP=build/ios/iphoneos/Runner.app
+          echo "::group::资产目录里的图标集"
+          ls -d ios/Runner/Assets.xcassets/AppIcon*.appiconset
+          echo "::endgroup::"
+          echo "::group::Info.plist 的 CFBundleIcons"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons" "$APP/Info.plist"
+          echo "::endgroup::"
+          MISSING=0
+          for name in AppIconMidnight AppIconSky AppIconLavender AppIconMint AppIconPeach; do
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundleAlternateIcons:$name" "$APP/Info.plist" >/dev/null 2>&1 \
+              || { echo "::warning::Info.plist 缺少备用图标 $name"; MISSING=$((MISSING+1)); }
+          done
+          echo "::group::Assets.car 中的图标相关条目"
+          xcrun --sdk iphoneos assetutil --info "$APP/Assets.car" 2>/dev/null \
+            | grep -oE '"Name" *: *"[^"]*"' | sort -u | head -40
+          echo "::endgroup::"
+          if [ "$MISSING" -gt 0 ]; then
+            echo "::warning::$MISSING 个备用图标没有出现在 Info.plist —— 图标切换多半仍然会失败"
+          else
+            echo "备用图标 5 个已在 Info.plist 中声明"
+          fi
+          exit 0
+
+      - name: Package unsigned IPA
+        run: |
+          set -e
+          APP_PATH=build/ios/iphoneos/Runner.app
+          test -d "$APP_PATH" || { echo "::error::$APP_PATH 不存在，构建没有产出 app"; exit 1; }
+          rm -rf build/ipa
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/
+          cd build/ipa
+          zip -qry ../CyShineMusic-unsigned.ipa Payload
+          cd ../..
+          ls -lh build/CyShineMusic-unsigned.ipa
+          echo "### 产物" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "未签名 IPA: build/CyShineMusic-unsigned.ipa" >> "$GITHUB_STEP_SUMMARY"
+          echo "版本: ${{ steps.version.outputs.name }} (${{ steps.version.outputs.number }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "App 大小: $(du -sh "$APP_PATH" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "安装方式：用 AltStore / SideStore 侧载（免费证书 7 天有效，需定期重签）。" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: CyShineMusic-unsigned-ipa
+          path: build/CyShineMusic-unsigned.ipa
+          retention-days: 14
+
+      - name: Record release source
+        if: github.ref == 'refs/heads/ios'
+        run: git rev-parse HEAD > build/source-commit.txt
+
+      - name: Upload release source
+        if: github.ref == 'refs/heads/ios'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-release-source
+          path: build/source-commit.txt
+          retention-days: 14
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-logs
+          path: |
+            ios/Pods/Target Support Files/**/*.log
+            build/ios/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7

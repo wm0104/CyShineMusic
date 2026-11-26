@@ -1,23 +1,21 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:audio_service/audio_service.dart';
+import 'package:audio_service_platform_interface/audio_service_platform_interface.dart';
+import 'package:audio_service_platform_interface/method_channel_audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:bass_player/bass_player.dart';
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/services/app_logger.dart';
-import '../../core/services/log_category.dart';
+import '../../core/ui/cover_image_source.dart';
 import 'media_item_copy.dart';
-import 'player_models.dart' show PlayerPlaybackMode;
-import 'vivo_music_metadata.dart';
-import 'vivo_queue_browser.dart';
 
 typedef PlayerTransportCallback = Future<void> Function();
 typedef PlayerQueueItemCallback = Future<void> Function(int index);
@@ -25,13 +23,12 @@ typedef PlayerRepeatModeCallback =
     Future<void> Function(AudioServiceRepeatMode mode);
 typedef PlayerShuffleModeCallback =
     Future<void> Function(AudioServiceShuffleMode mode);
-typedef PlayerVivoLoopModeCallback = Future<void> Function(int mode);
 
 const playerAudioServiceConfig = AudioServiceConfig(
   androidNotificationChannelId: 'com.cyshine.music.channel.audio_playback',
   androidNotificationChannelName: '音乐播放',
   androidNotificationChannelDescription: '显示正在播放的歌曲和媒体控制',
-  androidNotificationIcon: 'drawable/ic_stat_app',
+  androidNotificationIcon: 'drawable/ic_stat_music_note',
   androidShowNotificationBadge: false,
   androidNotificationOngoing: false,
   // Keep the MediaSession and notification alive while a track is paused or
@@ -45,11 +42,6 @@ const playerAudioServiceConfig = AudioServiceConfig(
 
 /// Upper bound for a single [PlayerAudioHandler.load] attempt.
 const playerLoadTimeout = Duration(seconds: 40);
-
-/// Guards a hung native remote load. The native stream already fails over a
-/// URL that gets no response within 8 seconds, then allows 10 more for reading
-/// the file headers, which a weak network legitimately needs.
-const playerRemoteLoadTimeout = Duration(seconds: 30);
 
 class PlayerLoadTimeoutException implements Exception {
   const PlayerLoadTimeoutException(this.timeout);
@@ -86,8 +78,13 @@ bool shouldActivatePlayerAudioSession({
 Future<PlayerAudioHandler> initializePlayerAudioHandler({
   bool allowMixWithOthers = false,
 }) async {
-  final handler = await AudioService.init<PlayerAudioHandler>(
-    builder: () => PlayerAudioHandler(allowMixWithOthers: allowMixWithOthers),
+  late PlayerAudioHandler handler;
+  if (Platform.isIOS) {
+    AudioServicePlatform.instance = IosAudioServiceAdapter(() => handler);
+  }
+  await AudioService.init<PlayerAudioHandler>(
+    builder: () =>
+        handler = PlayerAudioHandler(allowMixWithOthers: allowMixWithOthers),
     config: playerAudioServiceConfig,
   );
 
@@ -95,43 +92,121 @@ Future<PlayerAudioHandler> initializePlayerAudioHandler({
   return handler;
 }
 
+/// Keeps the iOS Now Playing clock current when audio_service sends metadata.
+class IosAudioServiceAdapter extends MethodChannelAudioService {
+  IosAudioServiceAdapter(this._handler);
+
+  final PlayerAudioHandler Function() _handler;
+  Future<void> _pending = Future<void>.value();
+  String? _lastStateTrackId;
+
+  @override
+  Future<void> setState(SetStateRequest request) {
+    final handler = _handler();
+    final trackId = handler._stateTracks[request.state.updateTime];
+    return _enqueue(() async {
+      final processing = request.state.processingState;
+      final hasPosition =
+          processing == AudioProcessingStateMessage.ready ||
+          processing == AudioProcessingStateMessage.buffering;
+      if (hasPosition &&
+          trackId != null &&
+          trackId != handler.currentMediaItem?.id) {
+        return;
+      }
+      // A queued position sample must not undo an anchor already sent with metadata.
+      final current = hasPosition ? _currentState(trackId) : null;
+      await super.setState(current ?? request);
+      _lastStateTrackId = trackId;
+    });
+  }
+
+  @override
+  Future<void> setMediaItem(SetMediaItemRequest request) {
+    return _enqueue(() async {
+      final trackId = request.mediaItem.id;
+      if (_lastStateTrackId == trackId) {
+        final anchor = _currentState(trackId);
+        if (anchor != null) await super.setState(anchor);
+      }
+      // This also covers audio_service's second publication after fetching art.
+      await super.setMediaItem(request);
+    });
+  }
+
+  Future<void> _enqueue(Future<void> Function() send) {
+    final result = _pending.then((_) => send());
+    _pending = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return result;
+  }
+
+  SetStateRequest? _currentState(String? trackId) {
+    final handler = _handler();
+    final playback = handler.playbackState.value;
+    if (trackId == null ||
+        trackId != handler.currentMediaItem?.id ||
+        handler._trackTransitionActive ||
+        (playback.processingState != AudioProcessingState.ready &&
+            playback.processingState != AudioProcessingState.buffering)) {
+      return null;
+    }
+    return SetStateRequest(
+      state: PlaybackStateMessage(
+        processingState:
+            AudioProcessingStateMessage.values[playback.processingState.index],
+        playing: playback.playing,
+        controls: playback.controls.map((control) {
+          final custom = control.customAction;
+          return MediaControlMessage(
+            androidIcon: control.androidIcon,
+            label: control.label,
+            action: MediaActionMessage.values[control.action.index],
+            customAction: custom == null
+                ? null
+                : CustomMediaActionMessage(
+                    name: custom.name,
+                    extras: custom.extras,
+                  ),
+          );
+        }).toList(),
+        androidCompactActionIndices: playback.androidCompactActionIndices,
+        systemActions: playback.systemActions
+            .map((action) => MediaActionMessage.values[action.index])
+            .toSet(),
+        updatePosition: handler.position,
+        bufferedPosition: handler._player.bufferedPosition,
+        speed: playback.speed,
+        errorCode: playback.errorCode,
+        errorMessage: playback.errorMessage,
+        repeatMode:
+            AudioServiceRepeatModeMessage.values[playback.repeatMode.index],
+        shuffleMode:
+            AudioServiceShuffleModeMessage.values[playback.shuffleMode.index],
+        captioningEnabled: playback.captioningEnabled,
+        queueIndex: playback.queueIndex,
+      ),
+    );
+  }
+}
+
 class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
-  PlayerAudioHandler({
-    bool allowMixWithOthers = false,
-    BassPlayer? player,
-    Duration remoteLoadTimeout = playerRemoteLoadTimeout,
-  }) : _player = player ?? BassPlayer(),
-       _allowMixWithOthers = allowMixWithOthers,
-       _remoteLoadTimeout = remoteLoadTimeout {
+  PlayerAudioHandler({bool allowMixWithOthers = false, BassPlayer? player})
+    : _player = player ?? BassPlayer(),
+      _allowMixWithOthers = allowMixWithOthers {
     _playbackSubscription = _player.playbackEventStream.listen(_broadcastState);
     _durationSubscription = _player.durationStream.listen(_updateDuration);
     _errorSubscription = _player.errorStream.listen((error) {
       _broadcastError(error, StackTrace.current);
     });
-    _diagnosticSubscription = _player.diagnosticStream.listen((record) {
-      final scope = record['scope'] == 'player-trace'
-          ? 'player-trace'
-          : 'groove-shift-trace';
-      if (AppLogger.isRecordingScope(scope)) {
-        unawaited(AppLogger.write(scope, jsonEncode(record)));
-      }
-    });
-    AppLogger.recordingCategories.addListener(_syncDiagnosticRecording);
-    _syncDiagnosticRecording();
     _broadcastState(_player.snapshot);
   }
 
   final BassPlayer _player;
-  final Duration _remoteLoadTimeout;
-  // Notification and home-widget updates often request the same byte buffer.
-  // Weak keys share that work without retaining artwork from old tracks.
-  final _artworkFiles = Expando<Future<Uri>>('player-artwork-files');
   bool _allowMixWithOthers;
   bool _audioSessionConfigured = false;
   bool _engineInitialized = false;
   BassEqualizerConfiguration? _pendingEqualizer;
   StreamSubscription<BassPlaybackSnapshot>? _playbackSubscription;
-  StreamSubscription<Map<Object?, Object?>>? _diagnosticSubscription;
   StreamSubscription<Duration?>? _durationSubscription;
   StreamSubscription<BassPlayerException>? _errorSubscription;
   StreamSubscription<AudioInterruptionEvent>? _interruptionSubscription;
@@ -140,91 +215,32 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _ducked = false;
   int _pauseGeneration = 0;
 
-  Duration _loadTimeoutFor(Uri sourceUri) {
-    return switch (sourceUri.scheme.toLowerCase()) {
-      'http' || 'https' || 'ftp' => _remoteLoadTimeout,
-      _ => playerLoadTimeout,
-    };
-  }
-
-  void _syncDiagnosticRecording() {
-    unawaited(
-      _player
-          .setDiagnosticRecording(
-            playback: AppLogger.isRecording(AppLogCategory.playback),
-            smartTransition: AppLogger.isRecording(
-              AppLogCategory.smartTransition,
-            ),
-          )
-          .catchError((Object error) {
-            return AppLogger.write(
-              'player-engine',
-              'diagnostic settings failed: $error',
-            );
-          }),
-    );
-  }
-
   Object? _callbackOwner;
   PlayerTransportCallback? _onPrevious;
   PlayerTransportCallback? _onNext;
   PlayerQueueItemCallback? _onQueueItem;
   PlayerRepeatModeCallback? _onRepeatMode;
   PlayerShuffleModeCallback? _onShuffleMode;
-  PlayerVivoLoopModeCallback? _onVivoLoopMode;
   int? _queueIndex;
   AudioServiceRepeatMode _repeatMode = AudioServiceRepeatMode.all;
   AudioServiceShuffleMode _shuffleMode = AudioServiceShuffleMode.none;
   MediaItem? _currentMediaItem;
+  final _stateTracks = Expando<String>();
   MediaItem? _mediaItemBeforeTransition;
   int? _queueIndexBeforeTransition;
   bool _trackTransitionActive = false;
-  PlayerTransportCallback? _retryAfterSourceFailure;
-  // BASS owns one stream at a time. A load can outlive its Dart timeout, so
-  // keep a generation to prevent an old timeout from stopping a newer load.
-  int _loadGeneration = 0;
-
-  Stream<Map<Object?, Object?>> get grooveShiftStream =>
-      _player.grooveShiftStream;
-  Future<void> setGrooveShiftEnabled(bool enabled) =>
-      _player.setGrooveShiftEnabled(enabled);
-  Future<void> setGrooveShiftNext({String? id, Uri? uri}) =>
-      _player.setGrooveShiftNext(id: id, uri: uri);
-  Future<void> confirmGrooveShift(String id) => _player.confirmGrooveShift(id);
-  Future<void> cancelGrooveShift() => _player.cancelGrooveShift();
-
-  void adoptGrooveShiftTrack(MediaItem item, int index) {
-    ++_loadGeneration;
-    _queueIndex = index;
-    _trackTransitionActive = false;
-    _clearTransitionSnapshot();
-    _publishMediaItem(item);
-  }
 
   Stream<Duration> get positionStream => _player.positionStream;
   Stream<Duration?> get durationStream => _player.durationStream;
   Stream<BassPlaybackSnapshot> get playerStateStream =>
       _player.playbackEventStream;
   Stream<BassPlayerException> get errorStream => _player.errorStream;
-
-  /// Emits whenever [hasNetworkTrouble] flips.
-  Stream<bool> get networkUsableStream => _player.networkUsableStream;
   MediaItem? get currentMediaItem => _currentMediaItem;
-
-  /// The system has no network, so any remote request would fail.
-  bool get isOffline => _player.networkAvailable == false;
-
-  /// Offline, or the active stream cannot reach its server. Buffering is then
-  /// no fault of the source, and the stream resumes once the network returns.
-  bool get hasNetworkTrouble => !_player.networkUsable;
 
   Duration get position => _player.position;
   Duration? get duration => _player.duration;
-  bool get hasPendingSourceRetry => _retryAfterSourceFailure != null;
-  bool get playing => !hasPendingSourceRetry && _player.playing;
-  BassProcessingState get processingState => hasPendingSourceRetry
-      ? BassProcessingState.ready
-      : _player.processingState;
+  bool get playing => _player.playing;
+  BassProcessingState get processingState => _player.processingState;
 
   Future<void> initializeEngine() async {
     final info = await _player.initialize();
@@ -314,7 +330,6 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     required PlayerQueueItemCallback onQueueItem,
     required PlayerRepeatModeCallback onRepeatMode,
     required PlayerShuffleModeCallback onShuffleMode,
-    PlayerVivoLoopModeCallback? onVivoLoopMode,
   }) {
     _callbackOwner = owner;
     _onPrevious = onPrevious;
@@ -322,7 +337,6 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     _onQueueItem = onQueueItem;
     _onRepeatMode = onRepeatMode;
     _onShuffleMode = onShuffleMode;
-    _onVivoLoopMode = onVivoLoopMode;
     _broadcastState(_player.snapshot);
   }
 
@@ -334,22 +348,20 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     _onQueueItem = null;
     _onRepeatMode = null;
     _onShuffleMode = null;
-    _onVivoLoopMode = null;
   }
 
   Future<void> beginTrackTransition({
     required MediaItem item,
     int? queueIndex,
   }) async {
-    _loadGeneration++;
-    _retryAfterSourceFailure = null;
     if (!_trackTransitionActive) {
       _mediaItemBeforeTransition = _currentMediaItem;
       _queueIndexBeforeTransition = _queueIndex;
     }
     _trackTransitionActive = true;
     _queueIndex = queueIndex;
-    _publishMediaItem(item);
+    _currentMediaItem = item;
+    mediaItem.add(item);
     _broadcastState(_player.snapshot);
     if (_player.playing) {
       _logTransport('pause', reason: 'track_transition');
@@ -362,12 +374,13 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     final previousItem = _mediaItemBeforeTransition;
     _queueIndex = _queueIndexBeforeTransition;
     if (previousItem != null) {
-      _publishMediaItem(previousItem);
+      _currentMediaItem = previousItem;
+      mediaItem.add(previousItem);
     }
     _trackTransitionActive = false;
     _clearTransitionSnapshot();
     final restoredState = _transformEvent(_player.snapshot);
-    playbackState.add(
+    _publishPlaybackState(
       restoredState.copyWith(
         processingState:
             restoredState.processingState == AudioProcessingState.idle
@@ -380,34 +393,18 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
-  void pauseAfterSourceFailure({
-    required MediaItem item,
-    required PlayerTransportCallback onRetry,
-    int? queueIndex,
-  }) {
-    _retryAfterSourceFailure = onRetry;
-    _trackTransitionActive = false;
-    _clearTransitionSnapshot();
-    _queueIndex = queueIndex;
-    _publishMediaItem(item);
-    _broadcastState(_player.snapshot);
-  }
-
   Future<Duration?> load({
     required MediaItem item,
     required Uri sourceUri,
     int? queueIndex,
   }) async {
-    final loadGeneration = ++_loadGeneration;
-    _retryAfterSourceFailure = null;
     _queueIndex = queueIndex;
-    _publishMediaItem(item);
+    _currentMediaItem = item;
+    mediaItem.add(item);
     final resolvedDuration = await _loadSourceBounded(
       sourceUri,
       formatHint: item.extras?['quality']?.toString(),
-      loadGeneration: loadGeneration,
     );
-    if (loadGeneration != _loadGeneration) return resolvedDuration;
     _trackTransitionActive = false;
     _clearTransitionSnapshot();
     _updateDuration(resolvedDuration);
@@ -418,14 +415,9 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<Duration?> _loadSourceBounded(
     Uri sourceUri, {
     String? formatHint,
-    required int loadGeneration,
   }) async {
     if (!_engineInitialized) await initializeEngine();
-    // A newer transition may have started while the BASS engine was
-    // initializing. Do not let this stale request become the active stream.
-    if (loadGeneration != _loadGeneration) return null;
     final stopwatch = Stopwatch()..start();
-    final timeout = _loadTimeoutFor(sourceUri);
     unawaited(
       AppLogger.write(
         'player-load',
@@ -435,7 +427,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     );
     final loading = _player.load(sourceUri, formatHint: formatHint);
     try {
-      final resolvedDuration = await loading.timeout(timeout);
+      final resolvedDuration = await loading.timeout(playerLoadTimeout);
       stopwatch.stop();
       unawaited(
         AppLogger.write(
@@ -450,12 +442,10 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     } on TimeoutException {
       stopwatch.stop();
       unawaited(loading.then((_) {}, onError: (Object _) {}));
-      if (loadGeneration == _loadGeneration) {
-        try {
-          await _player.stop();
-        } catch (_) {
-          // Best effort: the load already failed, keep the original reason.
-        }
+      try {
+        await _player.stop();
+      } catch (_) {
+        // Best effort: the load already failed, keep the original reason.
       }
       await AppLogger.write(
         'player-load',
@@ -463,7 +453,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
             'format=${formatHint ?? 'unknown'} '
             'after=${stopwatch.elapsedMilliseconds}ms',
       );
-      throw PlayerLoadTimeoutException(timeout);
+      throw const PlayerLoadTimeoutException(playerLoadTimeout);
     } catch (error) {
       stopwatch.stop();
       await AppLogger.write(
@@ -478,47 +468,18 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
 
   void updateMediaMetadata(MediaItem item) {
     final resolvedDuration = item.duration ?? _player.duration;
-    final resolved = resolvedDuration == null
+    _currentMediaItem = resolvedDuration == null
         ? item
         : preserveMediaItemArtHeaders(
             item,
             item.copyWith(duration: resolvedDuration),
           );
-    _publishMediaItem(resolved);
-  }
-
-  MediaItem _withVivoPlaybackMode(MediaItem item) {
-    final mode = _shuffleMode != AudioServiceShuffleMode.none
-        ? PlayerPlaybackMode.shuffle
-        : _repeatMode == AudioServiceRepeatMode.one
-        ? PlayerPlaybackMode.repeatOne
-        : PlayerPlaybackMode.sequence;
-    final loopMode = VivoMusicMetadata.loopModeFor(mode);
-    if (item.extras?[VivoMusicMetadata.supportEventsKey] ==
-            VivoMusicMetadata.supportEvents &&
-        item.extras?[VivoMusicMetadata.loopModeKey] == loopMode) {
-      return item;
-    }
-    return preserveMediaItemArtHeaders(
-      item,
-      item.copyWith(
-        extras: {
-          ...?item.extras,
-          VivoMusicMetadata.supportEventsKey: VivoMusicMetadata.supportEvents,
-          VivoMusicMetadata.loopModeKey: loopMode,
-        },
-      ),
-    );
-  }
-
-  void _publishMediaItem(MediaItem item) {
-    _currentMediaItem = _withVivoPlaybackMode(item);
     mediaItem.add(_currentMediaItem);
   }
 
   void publishQueue(List<MediaItem> items, {int? currentIndex}) {
     _queueIndex = currentIndex;
-    queue.add(List<MediaItem>.unmodifiable(items.map(_withVivoPlaybackMode)));
+    queue.add(List<MediaItem>.unmodifiable(items));
     _broadcastState(_player.snapshot);
   }
 
@@ -528,57 +489,151 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   }) {
     _repeatMode = repeatMode;
     _shuffleMode = shuffleMode;
-    final item = _currentMediaItem;
-    if (item != null) _publishMediaItem(item);
     _broadcastState(_player.snapshot);
   }
 
-  Future<Uri?> cacheArtwork(Uint8List? bytes) async {
-    if (bytes == null || bytes.isEmpty) return null;
-    final cached = _artworkFiles[bytes];
-    if (cached != null) return cached;
-    final pending = _cacheArtwork(bytes);
-    _artworkFiles[bytes] = pending;
-    try {
-      return await pending;
-    } catch (_) {
-      _artworkFiles[bytes] = null;
-      rethrow;
+  /// 把封面落成**本地文件**并返回其 [Uri]。
+  ///
+  /// ★ 为什么必须是本地文件：iOS 的锁屏 / 控制中心卡片由
+  /// `MPNowPlayingInfoCenter` 驱动，而 `audio_service` 的 darwin 实现
+  /// （`AudioServicePlugin.m` 的 `setMediaItem`）**只**从
+  /// `extras['artCacheFile']` 读本地路径来构造 `MPMediaItemArtwork`。
+  /// 传一个 http(s) 的 `artUri` 而没有本地文件时，`artwork` 直接是 nil，
+  /// 锁屏卡片就没有缩略图 —— 而且整个过程**不报任何错**。
+  ///
+  /// [bytes] 为内嵌封面（本地音乐）；为 null 时回落到 [fallbackUrl] 下载。
+  /// 返回 null 表示拿不到封面，调用方应让 UI 用占位图。
+  Future<Uri?> cacheArtwork(Uint8List? bytes, {String? fallbackUrl}) async {
+    Uint8List? data = bytes;
+    if (data == null || data.isEmpty) {
+      data = await _downloadArtwork(fallbackUrl);
     }
-  }
-
-  Future<Uri> _cacheArtwork(Uint8List bytes) async {
+    if (data == null || data.isEmpty) return null;
     final cacheRoot = await getTemporaryDirectory();
-    final digest = await compute(
-      _artworkDigest,
-      bytes,
-      debugLabel: 'player-artwork-hash',
-    );
     final artDirectory = Directory(
       '${cacheRoot.path}${Platform.pathSeparator}media_art',
     );
-    if (!await artDirectory.exists()) {
+    if (!artDirectory.existsSync()) {
       await artDirectory.create(recursive: true);
     }
-    final extension = _artworkExtension(bytes);
+    final extension = _artworkExtension(data);
     final file = File(
       '${artDirectory.path}${Platform.pathSeparator}'
-      '$digest.$extension',
+      '${sha256.convert(data)}.$extension',
     );
-    if (!await file.exists()) {
-      await file.writeAsBytes(bytes, flush: true);
+    if (!file.existsSync()) {
+      await file.writeAsBytes(data, flush: true);
     }
     return file.uri;
+  }
+
+  /// 下载网络封面。失败一律走日志页而不是静默 —— 锁屏没封面最难查，
+  /// 必须留下痕迹。`music.126.net` 需要 Referer，见 CoverImageSource.headersFor。
+  Future<Uint8List?> _downloadArtwork(String? url) async {
+    final normalized = url?.trim();
+    if (normalized == null || normalized.isEmpty) return null;
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || !uri.hasScheme || !uri.isScheme('http')) return null;
+    try {
+      final client = HttpClient();
+      try {
+        final request = await client
+            .getUrl(uri)
+            .timeout(const Duration(seconds: 8));
+        CoverImageSource.headersFor(normalized)?.forEach(request.headers.set);
+        final response = await request.close().timeout(
+          const Duration(seconds: 8),
+        );
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          unawaited(
+            AppLogger.write(
+              'artwork',
+              '下载失败 http=${response.statusCode} url=${_logSafeUrl(normalized)}',
+            ),
+          );
+          return null;
+        }
+        final bytes = await _collectResponseBytes(
+          response,
+        ).timeout(const Duration(seconds: 12));
+        // 只接受真正的图片，避免把错误页 HTML 当封面存进去。
+        if (!_looksLikeImage(bytes)) {
+          unawaited(
+            AppLogger.write(
+              'artwork',
+              '响应不是图片 bytes=${bytes.length} url=${_logSafeUrl(normalized)}',
+            ),
+          );
+          return null;
+        }
+        return bytes;
+      } finally {
+        client.close(force: true);
+      }
+    } catch (error) {
+      unawaited(
+        AppLogger.write(
+          'artwork',
+          '下载异常 url=${_logSafeUrl(normalized)} error=$error',
+        ),
+      );
+      return null;
+    }
+  }
+
+  /// 手动收集响应体。
+  ///
+  /// `consolidateHttpClientResponseBytes` 在 `package:http` 里而不是 `dart:io`，
+  /// 为一个封面下载多引一个包不值得，这里自己按块收集并加上限 ——
+  /// 封面正常只有几十 KB，设 8 MB 上限防止异常响应把内存吃满。
+  static Future<Uint8List> _collectResponseBytes(
+    HttpClientResponse response,
+  ) async {
+    final builder = BytesBuilder(copy: false);
+    var total = 0;
+    await for (final chunk in response) {
+      total += chunk.length;
+      if (total > 8 * 1024 * 1024) {
+        throw StateError('封面响应超过 8MB 上限');
+      }
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
+  /// 锁屏封面常见格式：PNG / JPEG / GIF / WebP。
+  static bool _looksLikeImage(Uint8List bytes) {
+    if (bytes.length < 4) return false;
+    final b = bytes;
+    // PNG: 89 50 4E 47   JPEG: FF D8 FF   GIF: 47 49 46   WEBP: RIFF....WEBP
+    if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47)
+      return true;
+    if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return true;
+    if (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46) return true;
+    if (b.length >= 12 &&
+        b[0] == 0x52 &&
+        b[1] == 0x49 &&
+        b[2] == 0x46 &&
+        b[3] == 0x46 &&
+        b[8] == 0x57 &&
+        b[9] == 0x45 &&
+        b[10] == 0x42 &&
+        b[11] == 0x50) {
+      return true;
+    }
+    return false;
+  }
+
+  /// 去掉查询串再记日志，避免把带签名的 URL 整条写进日志。
+  static String _logSafeUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return '(无法解析)';
+    return '${uri.scheme}://${uri.host}${uri.path}';
   }
 
   @override
   Future<void> play() async {
     if (_trackTransitionActive) return;
-    final retry = _retryAfterSourceFailure;
-    if (retry != null) {
-      await retry();
-      return;
-    }
     final pauseGeneration = _pauseGeneration;
     _logTransport('play');
     if (_player.processingState == BassProcessingState.completed) {
@@ -618,7 +673,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     unawaited(AppLogger.write('player-control', 'media_button=${button.name}'));
     switch (button) {
       case MediaButton.media:
-        if (playing) {
+        if (_player.playing) {
           await _pausePlayer(reason: 'media_button');
         } else {
           await play();
@@ -635,9 +690,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> seek(Duration position) {
-    if (_trackTransitionActive || hasPendingSourceRetry) {
-      return Future<void>.value();
-    }
+    if (_trackTransitionActive) return Future<void>.value();
     _logTransport('seek', target: position);
     return _player.seek(position);
   }
@@ -666,47 +719,6 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<List<MediaItem>> getChildren(
-    String parentMediaId, [
-    Map<String, dynamic>? options,
-  ]) async {
-    if (parentMediaId != VivoMusicMetadata.currentListId) {
-      return super.getChildren(parentMediaId, options);
-    }
-    return VivoQueueBrowser.page(
-      VivoQueueBrowser.snapshot(
-        queue: queue.value,
-        current: _currentMediaItem,
-        currentIndex: _queueIndex,
-      ),
-      options,
-    );
-  }
-
-  @override
-  Future<void> playFromMediaId(
-    String mediaId, [
-    Map<String, dynamic>? extras,
-  ]) async {
-    if (mediaId == VivoQueueBrowser.emptyItemId) return;
-    // Resolve against the live queue, including the local-to-online fallback
-    // ID of its active row. Old pages must not dispatch a now-unrelated index.
-    final index = queue.value.indexWhere((item) => item.id == mediaId);
-    if (index >= 0) {
-      await skipToQueueItem(index);
-    } else if (_currentMediaItem?.id == mediaId) {
-      final currentIndex = _queueIndex;
-      if (currentIndex != null &&
-          currentIndex >= 0 &&
-          currentIndex < queue.value.length) {
-        await skipToQueueItem(currentIndex);
-      } else {
-        await play();
-      }
-    }
-  }
-
-  @override
   Future<void> setRepeatMode(AudioServiceRepeatMode repeatMode) async {
     _repeatMode = repeatMode;
     _broadcastState(_player.snapshot);
@@ -721,24 +733,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<dynamic> customAction(
-    String name, [
-    Map<String, dynamic>? extras,
-  ]) async {
-    if (name != VivoMusicMetadata.playModeAction) {
-      return super.customAction(name, extras);
-    }
-    final value = extras?[VivoMusicMetadata.loopModeKey];
-    if (value is! num || (value != 1 && value != 2 && value != 3)) return null;
-    final mode = value.toInt();
-    _logTransport('vivo_play_mode_$mode');
-    await _onVivoLoopMode?.call(mode);
-    return null;
-  }
-
-  @override
   Future<void> stop() async {
-    _retryAfterSourceFailure = null;
     _logTransport('stop');
     await _player.stop();
     await super.stop();
@@ -759,9 +754,7 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> disposeHandler() async {
-    AppLogger.recordingCategories.removeListener(_syncDiagnosticRecording);
     await _playbackSubscription?.cancel();
-    await _diagnosticSubscription?.cancel();
     await _durationSubscription?.cancel();
     await _errorSubscription?.cancel();
     await _interruptionSubscription?.cancel();
@@ -778,9 +771,11 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
     if (duration == null) return;
     final item = _currentMediaItem;
     if (item == null || item.duration == duration) return;
-    _publishMediaItem(
-      preserveMediaItemArtHeaders(item, item.copyWith(duration: duration)),
+    _currentMediaItem = preserveMediaItemArtHeaders(
+      item,
+      item.copyWith(duration: duration),
     );
+    mediaItem.add(_currentMediaItem);
   }
 
   void _broadcastError(Object error, StackTrace stackTrace) {
@@ -793,15 +788,11 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
             'error=$error',
       ),
     );
-    if (hasPendingSourceRetry) {
-      _broadcastState(_player.snapshot);
-      return;
-    }
     if (_trackTransitionActive) {
-      playbackState.add(_transitionState(_player.snapshot));
+      _publishPlaybackState(_transitionState(_player.snapshot));
       return;
     }
-    playbackState.add(
+    _publishPlaybackState(
       _transformEvent(_player.snapshot).copyWith(
         processingState: AudioProcessingState.error,
         errorCode: 1,
@@ -811,9 +802,15 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   void _broadcastState(BassPlaybackSnapshot event) {
-    playbackState.add(
+    _publishPlaybackState(
       _trackTransitionActive ? _transitionState(event) : _transformEvent(event),
     );
+  }
+
+  void _publishPlaybackState(PlaybackState state) {
+    // audio_service passes this DateTime object through to PlaybackStateMessage.
+    _stateTracks[state.updateTime] = _currentMediaItem?.id;
+    playbackState.add(state);
   }
 
   PlaybackState _transitionState(BassPlaybackSnapshot event) {
@@ -828,10 +825,14 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
 
   PlaybackState _transformEvent(BassPlaybackSnapshot event) {
     final hasItem = _currentMediaItem != null;
+    final processingState = _player.processingState;
+    final bufferingOnIos =
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        processingState == BassProcessingState.buffering;
     final controls = hasItem
         ? <MediaControl>[
             MediaControl.skipToPrevious,
-            if (playing) MediaControl.pause else MediaControl.play,
+            if (_player.playing) MediaControl.pause else MediaControl.play,
             MediaControl.skipToNext,
           ]
         : const <MediaControl>[];
@@ -855,10 +856,10 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
         BassProcessingState.completed => AudioProcessingState.completed,
         BassProcessingState.error => AudioProcessingState.error,
       },
-      playing: playing,
+      playing: _player.playing,
       updatePosition: _player.position,
       bufferedPosition: _player.bufferedPosition,
-      speed: _player.speed,
+      speed: bufferingOnIos ? 0 : _player.speed,
       queueIndex: _queueIndex,
       repeatMode: _repeatMode,
       shuffleMode: _shuffleMode,
@@ -909,5 +910,3 @@ class PlayerAudioHandler extends BaseAudioHandler with SeekHandler {
 final playerAudioHandlerProvider = Provider<PlayerAudioHandler>((ref) {
   throw StateError('playerAudioHandlerProvider must be overridden at startup');
 });
-
-String _artworkDigest(Uint8List bytes) => sha256.convert(bytes).toString();

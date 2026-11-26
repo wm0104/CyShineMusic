@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/ui/animated_empty_state.dart';
-
 class DiscoveryLoading extends StatelessWidget {
   const DiscoveryLoading({super.key});
 
@@ -27,12 +25,23 @@ class DiscoveryError extends StatelessWidget {
       physics: const AlwaysScrollableScrollPhysics(),
       children: [
         SizedBox(height: MediaQuery.sizeOf(context).height * 0.18),
-        AnimatedEmptyState(
-          kind: EmptyStateKind.cloud,
-          title: '暂时无法加载',
-          message: message,
-          actionLabel: '重试',
-          onAction: onRetry,
+        Icon(
+          Icons.cloud_off_rounded,
+          size: 38,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+        const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 30),
+          child: Text(message, textAlign: TextAlign.center),
+        ),
+        const SizedBox(height: 14),
+        Center(
+          child: IconButton.filledTonal(
+            tooltip: '重试',
+            onPressed: onRetry,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
         ),
       ],
     );
@@ -66,14 +75,26 @@ class DiscoverySectionError extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedEmptyState(
+    return Padding(
       key: const ValueKey('discovery-featured-error'),
-      kind: EmptyStateKind.cloud,
-      title: '暂时无法加载歌单',
-      message: message,
-      actionLabel: '重试',
-      onAction: onRetry,
-      compact: true,
+      padding: const EdgeInsets.fromLTRB(30, 40, 30, 24),
+      child: Column(
+        children: [
+          Icon(
+            Icons.cloud_off_rounded,
+            size: 38,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(height: 12),
+          Text(message, textAlign: TextAlign.center),
+          const SizedBox(height: 14),
+          IconButton.filledTonal(
+            tooltip: '重试',
+            onPressed: onRetry,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -83,12 +104,16 @@ class DiscoverySectionEmpty extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const AnimatedEmptyState(
+    return const Padding(
       key: ValueKey('discovery-featured-empty'),
-      kind: EmptyStateKind.playlist,
-      title: '暂时没有精选歌单',
-      message: '换个分类，或稍后再来',
-      compact: true,
+      padding: EdgeInsets.symmetric(vertical: 48),
+      child: Column(
+        children: [
+          Icon(Icons.library_music_outlined, size: 40),
+          SizedBox(height: 12),
+          Text('暂时没有精选歌单', textAlign: TextAlign.center),
+        ],
+      ),
     );
   }
 }

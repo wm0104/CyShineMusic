@@ -3,32 +3,102 @@ import 'dart:async';
 import 'package:flutter/material.dart' hide SearchController;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_symbols_icons/symbols.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:cy_shine_music/core/api/music_api.dart';
 import 'package:cy_shine_music/core/models/enums.dart';
 import 'package:cy_shine_music/core/models/music_info.dart';
 import 'package:cy_shine_music/core/models/search_response.dart';
-import 'package:cy_shine_music/core/models/search_category.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
 import 'package:cy_shine_music/core/ui/app_toast.dart';
+import 'package:cy_shine_music/core/ui/expressive_download_button.dart';
 import 'package:cy_shine_music/features/player/player_audio_handler.dart';
+import 'package:cy_shine_music/features/playlists/playlist_models.dart';
 import 'package:cy_shine_music/features/playlists/playlist_store.dart';
+import 'package:cy_shine_music/features/playlists/spotify_track_match_picker.dart';
 import 'package:cy_shine_music/features/search/search_controller.dart';
 import 'package:cy_shine_music/features/search/search_page.dart';
 import 'package:cy_shine_music/features/search/search_toolbar_state.dart';
 import 'package:cy_shine_music/features/search/widgets/search_result_tile.dart';
-import 'package:cy_shine_music/features/songs/widgets/song_actions_menu.dart';
+import 'package:cy_shine_music/features/shell/widgets/search_paging_fab.dart';
 import 'package:cy_shine_music/router.dart';
 import 'package:cy_shine_music/theme/app_theme.dart';
-
-import 'helpers/prism_test_environment.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
-    SharedPreferences.setMockInitialValues({'use_native_navigation': true});
+    SharedPreferences.setMockInitialValues({});
   });
+
+  testWidgets(
+    'Spotify picker reuses search and returns only the selected song',
+    (tester) async {
+      await _usePhoneViewport(tester);
+      final prefs = await SharedPreferences.getInstance();
+      final api = _PickerSearchApi();
+      final container = ProviderContainer(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          musicApiProvider.overrideWithValue(api),
+          searchControllerProvider.overrideWith(_TestSearchController.new),
+        ],
+      );
+      addTearDown(container.dispose);
+      MusicInfo? result;
+      final track = PlaylistTrack.fromSpotify(
+        const SpotifyTrackMetadata(
+          uri: 'spotify:track:original',
+          title: '原曲',
+          artist: '歌手',
+          occurrence: 0,
+        ),
+        null,
+      );
+      await tester.pumpWidget(
+        _testAppWithContainer(
+          container,
+          Builder(
+            builder: (context) => TextButton(
+              onPressed: () async {
+                result = await pickSpotifyTrackMatch(
+                  context,
+                  track,
+                  initialSource: MusicSource.wy,
+                );
+              },
+              child: const Text('手动匹配'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('手动匹配'));
+      await tester.pumpAndSettle();
+      expect(api.searches, [('原曲 歌手', MusicSource.wy, 1)]);
+      expect(find.byTooltip('选择音质下载'), findsNothing);
+      expect(find.byTooltip('添加到歌单'), findsNothing);
+      final switchingSource = api.nextSearch = Completer<void>();
+      await tester.tap(find.byKey(const ValueKey('search-source-tx')));
+      await tester.pump();
+      expect(find.byType(SearchResultTile), findsNothing);
+      switchingSource.complete();
+      await tester.pumpAndSettle();
+      expect(api.searches.last, ('原曲 歌手', MusicSource.tx, 1));
+      await tester.tap(find.byTooltip('展开翻页菜单'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('下一页'));
+      await tester.pumpAndSettle();
+      expect(api.searches.last, ('原曲 歌手', MusicSource.tx, 2));
+      await tester.tap(find.byTooltip('收起翻页菜单'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('第 2 页歌曲 01'));
+      await tester.pumpAndSettle();
+      expect(result?.id, 'page-2-song-01');
+      expect(find.text('手动匹配'), findsOneWidget);
+      expect(container.read(searchControllerProvider).keyword, '搜索测试');
+    },
+  );
 
   test('app theme uses the platform system font', () {
     for (final theme in [AppTheme.light(), AppTheme.dark()]) {
@@ -65,7 +135,6 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp.router(
-            builder: buildPrismTestEnvironment,
             debugShowCheckedModeBanner: false,
             theme: _testTheme(),
             routerConfig: router,
@@ -74,7 +143,7 @@ void main() {
       );
       await _pumpUi(tester);
 
-      final toolbarActionTop = tester.getTopLeft(find.byType(NavigationBar)).dy;
+      final toolbarActionTop = tester.getTopLeft(find.byTooltip('发现')).dy;
       final fullyVisibleRows = find
           .byType(SearchResultTile)
           .evaluate()
@@ -85,17 +154,71 @@ void main() {
 
       final firstTile = find.byType(SearchResultTile).first;
       expect(tester.getSize(firstTile).height, 62);
-      final actionsMenu = find.byKey(
-        const ValueKey('search-result-menu-page-1-song-01'),
+      final addToPlaylistButton = find.byKey(
+        const ValueKey('search-result-add-to-playlist-page-1-song-01'),
       );
-      expect(actionsMenu, findsOneWidget);
-      expect(tester.getSize(actionsMenu), const Size.square(48));
-      await tester.tap(actionsMenu);
-      await _pumpUi(tester);
-      expect(find.text('下载'), findsOneWidget);
-      expect(find.text('添加到歌单'), findsOneWidget);
-      await tester.tapAt(const Offset(4, 4));
-      await _pumpUi(tester);
+      final downloadButton = find.byKey(
+        const ValueKey('search-result-download-page-1-song-01'),
+      );
+      expect(addToPlaylistButton, findsOneWidget);
+      expect(downloadButton, findsOneWidget);
+      expect(tester.getSize(addToPlaylistButton), const Size.square(40));
+      expect(tester.getSize(downloadButton), const Size.square(40));
+      final addAction = tester.widget<ExpressiveDownloadButton>(
+        addToPlaylistButton,
+      );
+      final downloadAction = tester.widget<ExpressiveDownloadButton>(
+        downloadButton,
+      );
+      expect(addAction.size, downloadAction.size);
+      expect(addAction.tapTargetSize, downloadAction.tapTargetSize);
+      expect(addAction.tonal, downloadAction.tonal);
+      expect(addAction.idleIcon, Icons.playlist_add_rounded);
+      expect(
+        find.descendant(
+          of: addToPlaylistButton,
+          matching: find.byIcon(Icons.playlist_add_rounded),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('添加到歌单'), findsWidgets);
+      expect(downloadAction.size, 36);
+      expect(downloadAction.tapTargetSize, 40);
+      final addIcon = tester.widget<Icon>(
+        find.descendant(
+          of: addToPlaylistButton,
+          matching: find.byIcon(Icons.playlist_add_rounded),
+        ),
+      );
+      final downloadIcon = tester.widget<Icon>(
+        find.descendant(
+          of: downloadButton,
+          matching: find.byIcon(Symbols.download_rounded),
+        ),
+      );
+      expect(addIcon.size, downloadIcon.size);
+      expect(addIcon.icon?.fontFamily, 'MaterialIcons');
+      expect(
+        find.descendant(
+          of: downloadButton,
+          matching: find.byIcon(Symbols.download_rounded),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: downloadButton,
+          matching: find.byIcon(Icons.arrow_downward_rounded),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: downloadButton,
+          matching: find.byIcon(Symbols.download_2_rounded),
+        ),
+        findsNothing,
+      );
       expect(tester.takeException(), isNull);
     },
   );
@@ -114,23 +237,21 @@ void main() {
       addTearDown(container.dispose);
       final playlist = await container
           .read(localPlaylistsProvider.notifier)
-          .create('Online favorites');
+          .create('在线收藏');
 
       await tester.pumpWidget(
         _testAppWithContainer(container, const SearchPage()),
       );
       await _pumpUi(tester);
 
-      final actionsMenu = find.byKey(
-        const ValueKey('search-result-menu-page-1-song-01'),
+      final addToPlaylistButton = find.byKey(
+        const ValueKey('search-result-add-to-playlist-page-1-song-01'),
       );
-      await tester.tap(actionsMenu);
-      await _pumpUi(tester);
-      await tester.tap(find.text('添加到歌单'));
+      await tester.tap(addToPlaylistButton);
       await _pumpUi(tester);
       expect(find.text('添加歌曲到'), findsOneWidget);
 
-      await tester.tap(find.text('Online favorites'));
+      await tester.tap(find.text('在线收藏'));
       await _pumpUi(tester);
 
       var stored = container
@@ -142,29 +263,27 @@ void main() {
       expect(track.source, MusicSource.wy);
       expect(track.localPath, isNull);
       expect(track.musicInfo?.id, 'page-1-song-01');
-      expect(find.text('已添加到「Online favorites」'), findsOneWidget);
+      expect(find.text('已添加到「在线收藏」'), findsOneWidget);
       await tester.pump(const Duration(seconds: 4));
 
-      await tester.tap(actionsMenu);
-      await _pumpUi(tester);
-      await tester.tap(find.text('添加到歌单'));
+      await tester.tap(addToPlaylistButton);
       await _pumpUi(tester);
       expect(find.text('添加歌曲到'), findsOneWidget);
-      await tester.tap(find.text('Online favorites'));
+      await tester.tap(find.text('在线收藏'));
       await _pumpUi(tester);
 
       stored = container
           .read(localPlaylistsProvider)
           .singleWhere((item) => item.id == playlist.id);
       expect(stored.tracks, hasLength(1));
-      expect(find.text('歌曲已在「Online favorites」中'), findsOneWidget);
+      expect(find.text('歌曲已在「在线收藏」中'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pump(const Duration(seconds: 4));
     },
   );
 
   testWidgets(
-    'tablet enlarges toolbar and moves paging FAB clear of song menus',
+    'tablet enlarges toolbar and moves paging FAB clear of downloads',
     (tester) async {
       await _usePhoneViewport(tester, size: const Size(1280, 800));
       final prefs = await SharedPreferences.getInstance();
@@ -187,7 +306,6 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp.router(
-            builder: buildPrismTestEnvironment,
             debugShowCheckedModeBanner: false,
             theme: _testTheme(),
             routerConfig: router,
@@ -196,10 +314,12 @@ void main() {
       );
       await _pumpUi(tester);
 
-      expect(tester.getSize(find.byType(NavigationBar)).width, 1280);
+      expect(tester.getSize(find.byTooltip('发现')), const Size(96, 60));
       final fabRect = tester.getRect(find.byType(FloatingActionButton));
-      final menuRect = tester.getRect(find.byType(SongActionsMenu).last);
-      expect(fabRect.right, lessThan(menuRect.left));
+      final downloadRect = tester.getRect(
+        find.byType(ExpressiveDownloadButton).last,
+      );
+      expect(fabRect.right, lessThan(downloadRect.left));
       expect(tester.takeException(), isNull);
     },
   );
@@ -229,15 +349,23 @@ void main() {
     );
     final position = tester.state<ScrollableState>(scrollableFinder).position;
 
+    final pageLabel = find.text('1 / 2');
+    expect(
+      find.descendant(of: listFinder, matching: pageLabel),
+      findsOneWidget,
+    );
+    expect(pageLabel.hitTestable(), findsOneWidget);
+
     position.jumpTo(position.maxScrollExtent);
     await tester.pump();
     expect(position.pixels, greaterThan(0));
+    expect(pageLabel.hitTestable(), findsNothing);
 
     container.read(searchToolbarStateProvider).onNext!();
     await _pumpUi(tester);
     expect(container.read(searchControllerProvider).page, 2);
     expect(position.pixels, position.minScrollExtent);
-    expect(find.text('Page 2 song 01'), findsOneWidget);
+    expect(find.text('第 2 页歌曲 01'), findsOneWidget);
 
     position.jumpTo(position.maxScrollExtent);
     await tester.pump();
@@ -247,8 +375,40 @@ void main() {
     await _pumpUi(tester);
     expect(container.read(searchControllerProvider).page, 1);
     expect(position.pixels, position.minScrollExtent);
-    expect(find.text('Page 1 song 01'), findsOneWidget);
+    expect(find.text('第 1 页歌曲 01'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an empty second page still offers the previous page', (
+    tester,
+  ) async {
+    await _usePhoneViewport(tester);
+    final prefs = await SharedPreferences.getInstance();
+    final container = ProviderContainer(
+      overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        searchControllerProvider.overrideWith(_EmptyNextSearchController.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      _testAppWithContainer(
+        container,
+        const Stack(children: [SearchPage(), SearchPagingFabLayer()]),
+      ),
+    );
+    await _pumpUi(tester);
+
+    await tester.tap(find.byTooltip('展开翻页菜单'));
+    await _pumpUi(tester);
+    await tester.tap(find.text('下一页'));
+    await _pumpUi(tester);
+
+    expect(find.text('没有找到结果'), findsOneWidget);
+    expect(find.text('上一页'), findsOneWidget);
+    await tester.tap(find.text('上一页'));
+    await _pumpUi(tester);
+    expect(find.text('第 1 页歌曲 01'), findsOneWidget);
   });
 
   testWidgets('starting another search dismisses the previous search error', (
@@ -279,10 +439,12 @@ void main() {
     controller.fail('TX 搜索暂时受限');
     expect(container.read(searchControllerProvider).error, 'TX 搜索暂时受限');
     await tester.pump();
-    await _pumpUi(tester);
+    await tester.pumpAndSettle();
     expect(container.read(searchControllerProvider).error, 'TX 搜索暂时受限');
     expect(find.text('TX 搜索暂时受限'), findsOneWidget);
     expect(find.byKey(const ValueKey('app-toast-capsule')), findsOneWidget);
+    expect(find.text('重试'), findsNothing);
+    expect(find.text('即刻开始搜索'), findsOneWidget);
 
     controller.startRetry();
     await tester.pump();
@@ -322,10 +484,8 @@ Widget _testAppWithContainer(ProviderContainer container, Widget home) {
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: _testTheme(),
-      builder: (context, child) => buildPrismTestEnvironment(
-        context,
-        AppToastOverlay(child: child ?? const SizedBox.shrink()),
-      ),
+      builder: (context, child) =>
+          AppToastOverlay(child: child ?? const SizedBox.shrink()),
       home: home,
     ),
   );
@@ -339,7 +499,7 @@ ThemeData _testTheme() => ThemeData(
 class _TestSearchController extends SearchController {
   @override
   SearchState build() =>
-      _stateForPage(keyword: 'Search test', source: MusicSource.all, page: 1);
+      _stateForPage(keyword: '搜索测试', source: MusicSource.all, page: 1);
 
   @override
   Future<void> search({
@@ -355,16 +515,67 @@ class _TestSearchController extends SearchController {
   }
 }
 
+class _PickerSearchApi extends MusicApi {
+  final searches = <(String, MusicSource, int)>[];
+  Completer<void>? nextSearch;
+
+  @override
+  Future<SearchResponse> searchMusic({
+    required String keyword,
+    required MusicSource source,
+    int page = 1,
+    int limit = 30,
+  }) async {
+    searches.add((keyword, source, page));
+    final pending = nextSearch;
+    nextSearch = null;
+    if (pending != null) await pending.future;
+    return SearchResponse(
+      list: [_music(page: page, index: 1)],
+      source: source,
+      page: page,
+      limit: limit,
+      allPage: 2,
+      total: 2,
+    );
+  }
+}
+
 class _ErrorSearchController extends SearchController {
   @override
   SearchState build() => const SearchState(source: MusicSource.tx);
 
   void fail(String message) {
-    state = state.copyWith(loading: false, error: message);
+    state = state.copyWith(searchActive: true, loading: false, error: message);
   }
 
   void startRetry() {
     state = state.copyWith(loading: true, error: null);
+  }
+}
+
+class _EmptyNextSearchController extends _TestSearchController {
+  @override
+  Future<void> search({
+    required String keyword,
+    MusicSource? source,
+    int page = 1,
+  }) async {
+    if (page == 1) {
+      await super.search(keyword: keyword, source: source);
+      return;
+    }
+    state = state.copyWith(
+      page: page,
+      response: SearchResponse(
+        list: const [],
+        page: page,
+        limit: 30,
+        allPage: page,
+        total: 0,
+        source: state.source,
+      ),
+    );
   }
 }
 
@@ -375,7 +586,6 @@ SearchState _stateForPage({
 }) {
   const limit = 30;
   return SearchState(
-    category: SearchCategory.songs,
     keyword: keyword,
     source: source,
     page: page,
@@ -398,13 +608,13 @@ MusicInfo _music({required int page, required int index}) {
   final id = 'page-$page-song-$paddedIndex';
   return MusicInfo.fromJson({
     'id': id,
-    'name': 'Page $page song $paddedIndex',
-    'singer': 'Test artist $paddedIndex',
+    'name': '第 $page 页歌曲 $paddedIndex',
+    'singer': '测试歌手 $paddedIndex',
     'source': MusicSource.wy.code,
     'interval': '03:30',
     'meta': {
       'songId': id,
-      'albumName': 'Test album',
+      'albumName': '测试专辑',
       'qualitys': [
         {'type': Quality.k320.code},
       ],

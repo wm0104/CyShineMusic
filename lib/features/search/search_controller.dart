@@ -7,16 +7,24 @@ import '../../core/api/dio_factory.dart';
 import '../../core/api/music_api.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/search_response.dart';
-import '../../core/models/search_category.dart';
 import '../../core/services/app_logger.dart';
 import '../../core/storage/settings_store.dart';
+import '../discovery/discovery_controller.dart';
+
+enum SearchCategory {
+  songs('歌曲'),
+  artists('歌手');
+
+  const SearchCategory(this.label);
+  final String label;
+}
 
 class SearchQuery {
   const SearchQuery({
     required this.keyword,
     required this.source,
     required this.page,
-    this.category = SearchCategory.all,
+    this.category = SearchCategory.songs,
   });
 
   final String keyword;
@@ -24,17 +32,13 @@ class SearchQuery {
   final int page;
   final SearchCategory category;
 
-  SearchQuery copyWith({
-    String? keyword,
-    MusicSource? source,
-    int? page,
-    SearchCategory? category,
-  }) => SearchQuery(
-    keyword: keyword ?? this.keyword,
-    source: source ?? this.source,
-    page: page ?? this.page,
-    category: category ?? this.category,
-  );
+  SearchQuery copyWith({String? keyword, MusicSource? source, int? page}) =>
+      SearchQuery(
+        keyword: keyword ?? this.keyword,
+        source: source ?? this.source,
+        page: page ?? this.page,
+        category: category,
+      );
 
   @override
   bool operator ==(Object other) =>
@@ -51,29 +55,34 @@ class SearchQuery {
 class SearchState {
   const SearchState({
     this.keyword = '',
-    this.category = SearchCategory.all,
     this.source = MusicSource.all,
     this.page = 1,
     this.loading = false,
     this.error,
     this.response,
     this.searchActive = false,
+    this.category = SearchCategory.songs,
   });
 
   final String keyword;
-  final SearchCategory category;
   final MusicSource source;
   final int page;
   final bool loading;
   final String? error;
   final SearchResponse? response;
   final bool searchActive;
+  final SearchCategory category;
+
+  int get resultCount =>
+      (category == SearchCategory.artists
+          ? response?.artists.length
+          : response?.list.length) ??
+      0;
 
   bool get isSearchActive =>
       searchActive || loading || response != null || keyword.trim().isNotEmpty;
 
   SearchState copyWith({
-    SearchCategory? category,
     String? keyword,
     MusicSource? source,
     int? page,
@@ -81,8 +90,8 @@ class SearchState {
     Object? error = _sentinel,
     Object? response = _sentinel,
     bool? searchActive,
+    SearchCategory? category,
   }) => SearchState(
-    category: category ?? this.category,
     keyword: keyword ?? this.keyword,
     source: source ?? this.source,
     page: page ?? this.page,
@@ -92,6 +101,7 @@ class SearchState {
         ? this.response
         : response as SearchResponse?,
     searchActive: searchActive ?? this.searchActive,
+    category: category ?? this.category,
   );
 
   static const _sentinel = Object();
@@ -99,10 +109,9 @@ class SearchState {
 
 class SearchController extends Notifier<SearchState> {
   Object? _activeRequest;
+  MusicSource? _songSource;
   final Map<SearchQuery, SearchResponse> _responseCache =
       <SearchQuery, SearchResponse>{};
-  int _settingsRevision = 0;
-  final Map<SearchCategory, int> _categoryPages = {};
   final Map<SearchQuery, Future<SearchResponse>> _inFlight =
       <SearchQuery, Future<SearchResponse>>{};
 
@@ -110,7 +119,6 @@ class SearchController extends Notifier<SearchState> {
   SearchState build() {
     ref.onDispose(() {
       _activeRequest = null;
-      _settingsRevision++;
       _responseCache.clear();
       _inFlight.clear();
     });
@@ -118,15 +126,13 @@ class SearchController extends Notifier<SearchState> {
       settingsProvider.select((settings) => settings.enabledSearchSources),
       (previous, next) {
         _activeRequest = Object();
-        _settingsRevision++;
-        _categoryPages.clear();
-        _inFlight.clear();
-        _responseCache.removeWhere(
-          (query, _) =>
-              query.source == MusicSource.all ||
-              (query.source != MusicSource.all && !next.contains(query.source)),
+        _invalidateQueries(
+          (query) =>
+              query.source == MusicSource.all || !next.contains(query.source),
         );
-        final activeSource = state.isSearchActive
+        final activeSource = state.category == SearchCategory.artists
+            ? _artistSource(state.source, next)
+            : state.isSearchActive
             ? _sourceEnabled(state.source, next)
                   ? state.source
                   : _defaultSearchSource(next)
@@ -139,63 +145,103 @@ class SearchController extends Notifier<SearchState> {
           error: null,
           response: null,
         );
-        if (keyword.trim().isNotEmpty) {
-          unawaited(search(keyword: keyword, source: activeSource));
+        if (keyword.trim().isNotEmpty && _canSearch(activeSource)) {
+          _restartSearchWithNewSettings(keyword, activeSource);
         }
       },
     );
-    ref.listen<MusicSource>(
-      settingsProvider.select((settings) => settings.defaultSearchSource),
-      (previous, next) {
-        if (state.isSearchActive) return;
-        final source = _defaultSearchSource();
-        if (state.source == source) return;
-        state = state.copyWith(source: source);
-      },
-    );
+    ref.listen<MusicSource>(selectedDiscoverySourceProvider, (previous, next) {
+      if (state.isSearchActive) return;
+      final source = _defaultSearchSource();
+      if (state.source == source) return;
+      state = state.copyWith(source: source);
+    });
     ref.listen<List<MusicSource>>(
       settingsProvider.select((settings) => settings.discoverySourceOrder),
       (previous, next) {
-        if (state.source == MusicSource.all) _activeRequest = Object();
-        _settingsRevision++;
-        _categoryPages.clear();
-        _inFlight.clear();
-        _responseCache.removeWhere(
-          (query, _) => query.source == MusicSource.all,
-        );
-        if (state.isSearchActive &&
+        _invalidateQueries((query) => query.source == MusicSource.all);
+        if (state.category == SearchCategory.songs &&
             state.source == MusicSource.all &&
             state.keyword.trim().isNotEmpty) {
-          unawaited(search(keyword: state.keyword, source: MusicSource.all));
+          _restartSearchWithNewSettings(state.keyword, MusicSource.all);
         }
       },
     );
     return SearchState(source: _defaultSearchSource());
   }
 
+  void _invalidateQueries(bool Function(SearchQuery) matches) {
+    _responseCache.removeWhere((query, _) => matches(query));
+    _inFlight.removeWhere((query, _) => matches(query));
+  }
+
+  void _restartSearchWithNewSettings(String keyword, MusicSource source) {
+    final request = Object();
+    _activeRequest = request;
+    // The API also watches these settings and invalidates after this listener.
+    scheduleMicrotask(() {
+      if (identical(request, _activeRequest)) {
+        unawaited(search(keyword: keyword, source: source));
+      }
+    });
+  }
+
   void setSource(MusicSource source) {
     final enabled = ref.read(settingsProvider).enabledSearchSources;
     if (source != MusicSource.all && !enabled.contains(source)) return;
+    if (!_canSearch(source)) return;
     if (source == state.source) return;
-    _categoryPages.clear();
-    state = state.copyWith(source: source);
+    state = state.copyWith(
+      source: source,
+      response: state.category == SearchCategory.artists
+          ? null
+          : state.response,
+    );
     if (state.keyword.trim().isNotEmpty) {
       search(keyword: state.keyword, source: source, page: 1);
     }
   }
 
+  bool _canSearch(MusicSource source) =>
+      state.category != SearchCategory.artists ||
+      MusicApi.artistSources.contains(source);
+
+  MusicSource _artistSource(MusicSource preferred, Set<MusicSource> enabled) {
+    if (enabled.contains(preferred) &&
+        MusicApi.artistSources.contains(preferred)) {
+      return preferred;
+    }
+    return ref
+            .read(settingsProvider)
+            .discoverySourceOrder
+            .where(
+              (s) => enabled.contains(s) && MusicApi.artistSources.contains(s),
+            )
+            .firstOrNull ??
+        MusicSource.all;
+  }
+
   void setCategory(SearchCategory category) {
-    if (category == state.category) return;
-    _categoryPages[state.category] = state.page;
-    final page = _categoryPages[category] ?? 1;
+    if (state.category == category) return;
+    final enabled = ref.read(settingsProvider).enabledSearchSources;
+    if (category == SearchCategory.artists) _songSource = state.source;
+    final previousSongSource = _songSource ?? _defaultSearchSource();
+    final source = category == SearchCategory.artists
+        ? _artistSource(state.source, enabled)
+        : _sourceEnabled(previousSongSource, enabled)
+        ? previousSongSource
+        : _defaultSearchSource();
+    _activeRequest = Object();
     state = state.copyWith(
       category: category,
-      page: page,
+      source: source,
+      page: 1,
       response: null,
       error: null,
+      loading: false,
     );
-    if (state.keyword.isNotEmpty) {
-      unawaited(search(keyword: state.keyword, page: page));
+    if (state.keyword.isNotEmpty && _canSearch(source)) {
+      unawaited(search(keyword: state.keyword, source: source));
     }
   }
 
@@ -211,10 +257,10 @@ class SearchController extends Notifier<SearchState> {
     }
 
     final activeSource = source ?? state.source;
-    if (cleaned != state.keyword || activeSource != state.source) {
-      _categoryPages.clear();
+    if (!_canSearch(activeSource)) {
+      state = state.copyWith(keyword: cleaned, page: 1, response: null);
+      return;
     }
-    final revision = _settingsRevision;
     final query = SearchQuery(
       keyword: cleaned,
       source: activeSource,
@@ -235,7 +281,6 @@ class SearchController extends Notifier<SearchState> {
       loading: false,
       error: null,
       searchActive: true,
-      response: null,
     );
 
     final cached = _responseCache[query];
@@ -248,16 +293,20 @@ class SearchController extends Notifier<SearchState> {
     final existing = _inFlight[query];
     final future =
         existing ??
-        Future<SearchResponse>.sync(
-          () => ref
-              .read(musicApiProvider)
-              .searchContent(
-                keyword: cleaned,
-                source: activeSource,
-                category: query.category,
-                page: page,
-              ),
-        );
+        Future<SearchResponse>.sync(() {
+          final api = ref.read(musicApiProvider);
+          return query.category == SearchCategory.artists
+              ? api.searchArtists(
+                  keyword: cleaned,
+                  source: activeSource,
+                  page: page,
+                )
+              : api.searchMusic(
+                  keyword: cleaned,
+                  source: activeSource,
+                  page: page,
+                );
+        });
     if (existing == null) {
       _inFlight[query] = future;
     }
@@ -271,12 +320,7 @@ class SearchController extends Notifier<SearchState> {
     );
     try {
       final result = await future;
-      // Catalog failures are returned as notices, not thrown. Keep them
-      // retryable when a user switches categories or submits the query again.
-      if (revision == _settingsRevision && result.notices.isEmpty) {
-        if (_responseCache.length >= 48) {
-          _responseCache.remove(_responseCache.keys.first);
-        }
+      if (identical(_inFlight[query], future) && !result.hasFailedSources) {
         _responseCache[query] = result;
       }
       if (!identical(request, _activeRequest)) return;
@@ -315,25 +359,13 @@ class SearchController extends Notifier<SearchState> {
     }
   }
 
-  void retry() {
-    _responseCache.remove(
-      SearchQuery(
-        keyword: state.keyword,
-        source: state.source,
-        page: state.page,
-        category: state.category,
-      ),
-    );
-    unawaited(search(keyword: state.keyword, page: state.page));
-  }
-
   void clearError() {
     if (state.error != null) state = state.copyWith(error: null);
   }
 
   void resetToDiscovery() {
-    _categoryPages.clear();
     _activeRequest = Object();
+    _songSource = null;
     state = SearchState(source: _defaultSearchSource());
   }
 
@@ -341,10 +373,11 @@ class SearchController extends Notifier<SearchState> {
       source == MusicSource.all || enabled.contains(source);
 
   MusicSource _defaultSearchSource([Set<MusicSource>? enabledSources]) {
-    final settings = ref.read(settingsProvider);
-    final enabled = enabledSources ?? settings.enabledSearchSources;
-    return _sourceEnabled(settings.defaultSearchSource, enabled)
-        ? settings.defaultSearchSource
+    final enabled =
+        enabledSources ?? ref.read(settingsProvider).enabledSearchSources;
+    final discoverySource = ref.read(selectedDiscoverySourceProvider);
+    return enabled.contains(discoverySource)
+        ? discoverySource
         : MusicSource.all;
   }
 }

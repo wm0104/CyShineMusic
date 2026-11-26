@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -103,8 +102,6 @@ class _RecordingDownloadService extends DownloadService {
     required MusicInfo music,
     Quality? quality,
     required EmbedRequest embed,
-    CancelToken? cancelToken,
-    String? batchTaskId,
   }) async {
     calls.add(music.id);
     qualities.add(quality);

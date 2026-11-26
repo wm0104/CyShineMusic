@@ -10,7 +10,6 @@ import 'internal/tx_quality.dart';
 import 'playlist_adapters/kg_playlist_adapter.dart';
 import 'playlist_adapters/kw_playlist_adapter.dart';
 import 'playlist_adapters/mg_playlist_adapter.dart';
-import 'qs_sdk.dart';
 
 class PlaylistSdk {
   const PlaylistSdk._();
@@ -20,24 +19,9 @@ class PlaylistSdk {
     MusicSource source = MusicSource.all,
     int? maxTracks,
   }) async {
-    if (source == MusicSource.qs && input.startsWith('chart:')) {
-      return qishuiSdk.leaderboard(input, maxTracks: maxTracks);
-    }
-    final directTarget = parseTarget(input, source: source);
-    if (directTarget == null &&
-        source == MusicSource.all &&
-        RegExp(r'^\d{4,}$').hasMatch(input.trim())) {
-      try {
-        return await KgPlaylistAdapter.parse(
-          'code:${input.trim()}',
-          maxTracks: maxTracks,
-        );
-      } catch (_) {
-        // Bare numeric playlist IDs remain ambiguous across platforms.
-      }
-    }
     final target =
-        directTarget ?? await _parseRedirectTarget(input, source: source);
+        parseTarget(input, source: source) ??
+        await _parseRedirectTarget(input, source: source);
     if (target == null) {
       throw Exception('无法识别歌单链接或 ID');
     }
@@ -52,8 +36,6 @@ class PlaylistSdk {
         return KgPlaylistAdapter.parse(target.id, maxTracks: maxTracks);
       case MusicSource.mg:
         return MgPlaylistAdapter.parse(target.id, maxTracks: maxTracks);
-      case MusicSource.qs:
-        return qishuiSdk.playlist(target.id, maxTracks: maxTracks);
       case MusicSource.all:
         throw Exception('无法识别歌单来源');
     }
@@ -65,10 +47,9 @@ class PlaylistSdk {
   }) {
     final text = input.trim();
     if (text.isEmpty) return null;
-    if (source == MusicSource.kg || source == MusicSource.all) {
+    if (source == MusicSource.kg) {
       final kgId = _parseKgText(text);
-      if (kgId != null &&
-          (source == MusicSource.kg || kgId.startsWith('code:'))) {
+      if (kgId != null) {
         return ParsedPlaylistTarget(id: kgId, source: MusicSource.kg);
       }
     }
@@ -110,19 +91,6 @@ class PlaylistSdk {
   }
 
   static ParsedPlaylistTarget? _parseUriTarget(Uri uri, MusicSource source) {
-    if ((source == MusicSource.qs || source == MusicSource.all) &&
-        (_isHost(uri.host, 'qishui.com') ||
-            _isHost(uri.host, 'music.douyin.com'))) {
-      final id =
-          _playlistPathId(uri.path) ??
-          _numeric(uri.queryParameters['playlist_id']) ??
-          (_hasPlaylistPath(uri.path)
-              ? _numeric(uri.queryParameters['id'])
-              : null);
-      if (id != null) {
-        return ParsedPlaylistTarget(id: id, source: MusicSource.qs);
-      }
-    }
     if ((source == MusicSource.wy || source == MusicSource.all) &&
         _isHost(uri.host, 'music.163.com')) {
       final id = _parseWyId(uri);
@@ -269,15 +237,9 @@ class PlaylistSdk {
     }
     if (text.startsWith('global:') ||
         text.startsWith('chain:') ||
-        text.startsWith('gcid:') ||
-        text.startsWith('code:')) {
+        text.startsWith('gcid:')) {
       return text;
     }
-    final shareCode = RegExp(
-      r'^(?:酷狗码|酷狗碼|kugou\s*code)\s*[:：]?\s*(\d{4,})$',
-      caseSensitive: false,
-    ).firstMatch(text);
-    if (shareCode != null) return 'code:${shareCode.group(1)}';
 
     final uri = Uri.tryParse(text);
     if (uri != null && uri.host.isNotEmpty) {
@@ -285,14 +247,11 @@ class PlaylistSdk {
         'global_specialid',
         'global_collection_id',
       });
-      final chain = _queryValue(uri, const {'chain'});
       if (global != null && global.trim().isNotEmpty) {
-        final suffix = chain != null && chain.trim().isNotEmpty
-            ? '?chain=${Uri.encodeQueryComponent(chain.trim())}'
-            : '';
-        return 'global:${global.trim()}$suffix';
+        return 'global:${global.trim()}';
       }
 
+      final chain = _queryValue(uri, const {'chain'});
       if (chain != null && chain.trim().isNotEmpty) {
         return 'chain:${chain.trim()}';
       }
@@ -323,14 +282,12 @@ class PlaylistSdk {
       r'(?:global_specialid|global_collection_id)=([A-Za-z0-9_]+)',
       caseSensitive: false,
     ).firstMatch(text);
+    if (global != null) return 'global:${global.group(1)}';
+
     final chain = RegExp(
       r'(?:^|[?&])chain=([A-Za-z0-9_]+)',
       caseSensitive: false,
     ).firstMatch(text);
-    if (global != null) {
-      final suffix = chain == null ? '' : '?chain=${chain.group(1)}';
-      return 'global:${global.group(1)}$suffix';
-    }
     if (chain != null) return 'chain:${chain.group(1)}';
 
     final gcid = RegExp(r'gcid_\w+', caseSensitive: false).firstMatch(text);
@@ -518,7 +475,11 @@ class PlaylistSdk {
     );
     return buildMusicInfo(
       name: item['name']?.toString() ?? '',
-      singer: _wySinger(item['ar'] as List? ?? item['artists'] as List?),
+      singer: _wySinger(item['ar'] is List
+          ? item['ar'] as List
+          : item['artists'] is List ? item['artists'] as List : null),
+      artists: normalizeArtistCredits(item['ar'] is List ? item['ar'] : item['artists']),
+      durationMs: positiveDurationMs(item['dt'] ?? item['duration']),
       source: MusicSource.wy,
       songId: id,
       qualitys: qualities,
@@ -629,7 +590,7 @@ class PlaylistSdk {
     final targetCount = _playlistTargetCount(expectedCount, hardLimit);
     final tracks = songs
         .take(targetCount)
-        .map(parseTxSong)
+        .map(_parseTxSong)
         .whereType<MusicInfo>()
         .toList();
     final creator = dirInfo['creator'] as Map?;
@@ -674,7 +635,7 @@ class PlaylistSdk {
     final tracks = _takePlaylistMaps(
       rawSongs,
       maxTracks,
-    ).whereType<Map>().map(parseTxSong).whereType<MusicInfo>().toList();
+    ).whereType<Map>().map(_parseTxSong).whereType<MusicInfo>().toList();
     return PlaylistInfo(
       id: id,
       name: cd['dissname']?.toString() ?? 'QQ 歌单 $id',
@@ -707,7 +668,7 @@ class PlaylistSdk {
     return values.take(maxTracks).toList();
   }
 
-  static MusicInfo? parseTxSong(Map item) {
+  static MusicInfo? _parseTxSong(Map item) {
     final file = item['file'] is Map ? item['file'] as Map : item;
     final mediaMid = file['media_mid'] ?? item['strMediaMid'];
     if (mediaMid == null) return null;

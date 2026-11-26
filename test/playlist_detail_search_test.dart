@@ -14,9 +14,6 @@ import 'package:cy_shine_music/features/playlists/playlist_models.dart';
 import 'package:cy_shine_music/features/playlists/playlist_store.dart';
 import 'package:cy_shine_music/features/shell/shell_toolbar_visibility.dart';
 import 'package:cy_shine_music/features/songs/widgets/songs_placeholders.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
-
-import 'helpers/prism_test_environment.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -34,35 +31,29 @@ void main() {
     final toolbar = container.read(playlistDetailToolbarStateProvider);
     expect(toolbar.attached, isTrue);
     expect(toolbar.searchMode, isFalse);
-    expect(find.byKey(const ValueKey('header-search-field')), findsNothing);
+    expect(find.byType(SongsSearchBar), findsNothing);
 
     toolbar.onToggleSearch!();
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('header-search-field')), findsOneWidget);
+    expect(find.byType(SongsSearchBar), findsOneWidget);
     expect(
       container.read(playlistDetailToolbarStateProvider).searchMode,
       isTrue,
     );
 
-    await tester.enterText(
-      find.byKey(const ValueKey('header-search-field')),
-      'First song',
-    );
+    await tester.enterText(find.byType(SongsSearchBar), '第一首');
     await tester.pump();
-    expect(find.text('Second song'), findsNothing);
+    expect(find.text('第二首'), findsNothing);
 
-    await tester.enterText(
-      find.byKey(const ValueKey('header-search-field')),
-      'Missing song',
-    );
+    await tester.enterText(find.byType(SongsSearchBar), '不存在的歌');
     await tester.pump();
     expect(find.byType(EmptySongSearch), findsOneWidget);
 
     container.read(playlistDetailToolbarStateProvider).onToggleSearch!();
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('header-search-field')), findsNothing);
-    expect(find.text('First song'), findsOneWidget);
-    expect(find.text('Second song'), findsOneWidget);
+    expect(find.byType(SongsSearchBar), findsNothing);
+    expect(find.text('第一首'), findsOneWidget);
+    expect(find.text('第二首'), findsOneWidget);
     expect(
       container.read(playlistDetailToolbarStateProvider).searchMode,
       isFalse,
@@ -70,52 +61,37 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'batch mode preserves the active search when entering and leaving',
-    (tester) async {
-      await _useCompactViewport(tester);
-      final container = await _pumpDetailPage(tester);
+  testWidgets('batch and search modes are mutually exclusive', (tester) async {
+    await _useCompactViewport(tester);
+    final container = await _pumpDetailPage(tester);
 
-      container.read(playlistDetailToolbarStateProvider).onToggleSearch!();
-      await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('header-search-field')), findsOneWidget);
+    container.read(playlistDetailToolbarStateProvider).onToggleSearch!();
+    await tester.pumpAndSettle();
+    expect(find.byType(SongsSearchBar), findsOneWidget);
 
-      await tester.enterText(
-        find.byKey(const ValueKey('header-search-field')),
-        'First song',
-      );
-      await tester.pump();
+    container.read(playlistDetailToolbarStateProvider).onToggleBatch!();
+    await tester.pumpAndSettle();
+    expect(
+      container.read(playlistDetailToolbarStateProvider).searchMode,
+      isFalse,
+    );
+    expect(
+      container.read(playlistDetailToolbarStateProvider).batchMode,
+      isTrue,
+    );
+    expect(find.byType(SongsSearchBar), findsNothing);
+    expect(find.byType(Checkbox), findsNWidgets(2));
 
-      container.read(playlistDetailToolbarStateProvider).onToggleBatch!();
-      await tester.pumpAndSettle();
-      expect(
-        container.read(playlistDetailToolbarStateProvider).searchMode,
-        isTrue,
-      );
-      expect(
-        container.read(playlistDetailToolbarStateProvider).batchMode,
-        isTrue,
-      );
-      expect(find.byKey(const ValueKey('header-search-field')), findsNothing);
-      expect(find.byType(prism.Checkbox), findsOneWidget);
-      expect(find.text('Second song'), findsNothing);
-
-      container.read(playlistDetailToolbarStateProvider).onToggleBatch!();
-      await tester.pumpAndSettle();
-      expect(
-        container.read(playlistDetailToolbarStateProvider).batchMode,
-        isFalse,
-      );
-      expect(find.byType(prism.Checkbox), findsNothing);
-      expect(find.byKey(const ValueKey('header-search-field')), findsOneWidget);
-      expect(find.text('Second song'), findsNothing);
-      expect(
-        container.read(playlistDetailToolbarStateProvider).searchMode,
-        isTrue,
-      );
-      expect(tester.takeException(), isNull);
-    },
-  );
+    container.read(playlistDetailToolbarStateProvider).onToggleSearch!();
+    await tester.pumpAndSettle();
+    expect(
+      container.read(playlistDetailToolbarStateProvider).batchMode,
+      isFalse,
+    );
+    expect(find.byType(Checkbox), findsNothing);
+    expect(find.byType(SongsSearchBar), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('search focus hides the bottom toolbar and restores on unfocus', (
     tester,
@@ -132,7 +108,7 @@ void main() {
     await tester.pump();
     expect(container.read(shellToolbarVisibleProvider), isTrue);
 
-    await tester.tap(find.byKey(const ValueKey('header-search-field')));
+    await tester.tap(find.byType(SongsSearchBar));
     await tester.pump();
     expect(container.read(shellToolbarVisibleProvider), isFalse);
 
@@ -145,15 +121,15 @@ void main() {
 
 Future<ProviderContainer> _pumpDetailPage(WidgetTester tester) async {
   final tracks = [
-    PlaylistTrack.fromMusicInfo(_playlistMusic('track-1', 'First song')),
-    PlaylistTrack.fromMusicInfo(_playlistMusic('track-2', 'Second song')),
+    PlaylistTrack.fromMusicInfo(_playlistMusic('track-1', '第一首')),
+    PlaylistTrack.fromMusicInfo(_playlistMusic('track-2', '第二首')),
   ];
   SharedPreferences.setMockInitialValues({
     localPlaylistsStorageKey: [
       jsonEncode(
         LocalPlaylist(
           id: 'search',
-          name: 'Search playlist',
+          name: '搜索歌单',
           tracks: tracks,
           createdAt: DateTime.utc(2026, 7, 31),
           updatedAt: DateTime.utc(2026, 7, 31),
@@ -171,7 +147,6 @@ Future<ProviderContainer> _pumpDetailPage(WidgetTester tester) async {
     UncontrolledProviderScope(
       container: container,
       child: MaterialApp(
-        builder: buildPrismTestEnvironment,
         theme: ThemeData(
           useMaterial3: true,
           colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
@@ -188,12 +163,12 @@ MusicInfo _playlistMusic(String id, String name) {
   return MusicInfo.fromJson({
     'id': id,
     'name': name,
-    'singer': 'Online artist',
+    'singer': '在线歌手',
     'source': MusicSource.wy.code,
     'interval': '03:30',
     'meta': {
       'songId': id,
-      'albumName': 'Online album',
+      'albumName': '在线专辑',
       'qualitys': [
         {'type': Quality.k320.code, 'size': '1024'},
       ],

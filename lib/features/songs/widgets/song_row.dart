@@ -4,21 +4,18 @@ import 'dart:typed_data';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
+import 'package:flutter_slidable/flutter_slidable.dart';
 
 import '../../../core/services/embedded_artwork_cache.dart';
 import '../../../core/ui/cover_image_source.dart';
 import '../../../theme/app_motion.dart';
 import '../../downloads/download_history_store.dart';
-import '../../downloads/download_progress.dart';
-import 'song_actions_menu.dart';
 
 const double _songRowCoverSize = 52;
 const double _songRowMinHeight = 68;
 const double _songCoverRadius = 10;
 
-class SongRow extends ConsumerWidget {
+class SongRow extends StatelessWidget {
   const SongRow({
     super.key,
     required this.entry,
@@ -32,12 +29,12 @@ class SongRow extends ConsumerWidget {
     required this.onAddToPlaylist,
     required this.onPlay,
     required this.onDelete,
-    this.onDownload,
     this.playlistMode = false,
+    this.onMoveToPlaylist,
   });
 
   final DownloadHistoryEntry entry;
-  final Object? artworkVersion;
+  final int? artworkVersion;
   final bool playing;
   final bool playingActive;
   final bool batchMode;
@@ -47,20 +44,12 @@ class SongRow extends ConsumerWidget {
   final VoidCallback onAddToPlaylist;
   final VoidCallback onPlay;
   final VoidCallback onDelete;
-  final VoidCallback? onDownload;
   final bool playlistMode;
+  final VoidCallback? onMoveToPlaylist;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final music = playlistMode ? entry.musicInfo : null;
-    final task = music == null
-        ? null
-        : ref.watch(
-            downloadProgressProvider.select(
-              (value) => value.latestTaskForMusic(music.id),
-            ),
-          );
     final subtitle = _subtitle(entry);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final shortDuration = reduceMotion ? Duration.zero : AppMotion.short;
@@ -81,7 +70,7 @@ class SongRow extends ConsumerWidget {
         ? scheme.primary.withValues(alpha: 0.86)
         : scheme.onSurfaceVariant;
 
-    return AnimatedContainer(
+    final row = AnimatedContainer(
       duration: shortDuration,
       curve: AppMotion.emphasized,
       constraints: const BoxConstraints(minHeight: _songRowMinHeight),
@@ -178,30 +167,22 @@ class SongRow extends ConsumerWidget {
                       child: batchMode
                           ? SizedBox.square(
                               key: const ValueKey('song-select-action'),
-                              dimension: 48,
+                              dimension: 44,
                               child: Center(
-                                child: prism.Checkbox(
+                                child: Checkbox(
                                   value: selected,
-                                  isCircle: true,
+                                  visualDensity: VisualDensity.compact,
+                                  materialTapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
                                   onChanged: (_) => onToggleSelected(),
                                 ),
                               ),
                             )
-                          : playlistMode
-                          ? SongActionsMenu.playlist(
-                              key: ValueKey('song-menu-${entry.id}'),
-                              onRemove: onDelete,
-                              onAddNext: onAddNext,
-                              onDownload: onDownload,
-                              downloadTask: task,
-                              downloaded:
-                                  entry.savedPath?.trim().isNotEmpty == true,
-                            )
-                          : SongActionsMenu.local(
-                              key: ValueKey('song-menu-${entry.id}'),
-                              onDelete: onDelete,
-                              onAddToPlaylist: onAddToPlaylist,
-                              onAddNext: onAddNext,
+                          : _SongActionButton(
+                              key: const ValueKey('song-play-actions'),
+                              tooltip: '添加到下一首播放',
+                              icon: Icons.playlist_add_rounded,
+                              onPressed: onAddNext,
                             ),
                     ),
                   ),
@@ -212,12 +193,113 @@ class SongRow extends ConsumerWidget {
         ),
       ),
     );
+
+    return Slidable(
+      key: ValueKey('song-slide-${entry.id}'),
+      groupTag: 'songs',
+      enabled: !batchMode,
+      endActionPane: ActionPane(
+        motion: const BehindMotion(),
+        extentRatio: playlistMode
+            ? (onMoveToPlaylist == null ? 0.22 : 0.66)
+            : 0.4,
+        children: [
+          if (!playlistMode || onMoveToPlaylist != null)
+            SlidableAction(
+              key: const ValueKey('song-add-playlist-action'),
+              autoClose: false,
+              onPressed: (actionContext) async {
+                await Slidable.of(actionContext)?.close();
+                onAddToPlaylist();
+              },
+              backgroundColor: scheme.secondaryContainer,
+              foregroundColor: scheme.onSecondaryContainer,
+              icon: Icons.playlist_add_rounded,
+              label: playlistMode ? '添加到歌单' : '歌单',
+            ),
+          if (onMoveToPlaylist case final move?)
+            SlidableAction(
+              key: const ValueKey('song-move-playlist-action'),
+              autoClose: false,
+              onPressed: (actionContext) async {
+                await Slidable.of(actionContext)?.close();
+                move();
+              },
+              backgroundColor: scheme.tertiaryContainer,
+              foregroundColor: scheme.onTertiaryContainer,
+              icon: Icons.drive_file_move_rounded,
+              label: '移动到歌单',
+            ),
+          SlidableAction(
+            key: ValueKey(
+              playlistMode
+                  ? 'song-remove-playlist-action'
+                  : 'song-delete-action',
+            ),
+            onPressed: (_) => onDelete(),
+            backgroundColor: scheme.error,
+            foregroundColor: scheme.onError,
+            icon: playlistMode
+                ? Icons.playlist_remove_rounded
+                : Icons.delete_outline_rounded,
+            label: playlistMode ? '移出歌单' : '删除',
+          ),
+        ],
+      ),
+      child: row,
+    );
   }
 
   static String _subtitle(DownloadHistoryEntry entry) {
     final singer = entry.singer.trim().isEmpty ? '未知歌手' : entry.singer.trim();
     final album = entry.albumName.trim();
     return album.isEmpty ? singer : '$singer · $album';
+  }
+}
+
+class _SongActionButton extends StatelessWidget {
+  const _SongActionButton({
+    super.key,
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final backgroundColor = scheme.surfaceContainerHighest;
+    final foregroundColor = scheme.onSurfaceVariant;
+    const visualSize = 32.0;
+
+    return SizedBox.square(
+      dimension: 44,
+      child: IconButton(
+        tooltip: tooltip,
+        onPressed: onPressed,
+        padding: const EdgeInsets.all(6),
+        style: ButtonStyle(
+          fixedSize: const WidgetStatePropertyAll(Size.square(44)),
+          shape: const WidgetStatePropertyAll(CircleBorder()),
+          overlayColor: WidgetStatePropertyAll(
+            foregroundColor.withValues(alpha: 0.08),
+          ),
+        ),
+        icon: Container(
+          width: visualSize,
+          height: visualSize,
+          decoration: BoxDecoration(
+            color: backgroundColor,
+            shape: BoxShape.circle,
+          ),
+          child: Icon(icon, color: foregroundColor, size: 18),
+        ),
+      ),
+    );
   }
 }
 
@@ -320,7 +402,7 @@ class _SongCover extends StatefulWidget {
   const _SongCover({required this.entry, required this.artworkVersion});
 
   final DownloadHistoryEntry entry;
-  final Object? artworkVersion;
+  final int? artworkVersion;
 
   @override
   State<_SongCover> createState() => _SongCoverState();
@@ -362,7 +444,6 @@ class _SongCoverState extends State<_SongCover> {
     final path = widget.entry.savedPath?.trim();
     if (path == null || path.isEmpty) return;
     final version = widget.artworkVersion;
-    _artworkBytes = EmbeddedArtworkCache.peek(path, version: version);
     final request = EmbeddedArtworkCache.subscribe(path, version: version);
     _artworkRequest = request;
     unawaited(

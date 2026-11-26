@@ -8,10 +8,8 @@ import 'package:cy_shine_music/features/shell/shell_route_utils.dart';
 import 'package:cy_shine_music/features/shell/widgets/shell_header.dart';
 import 'package:cy_shine_music/features/shell/widgets/toolbar_metrics.dart';
 
-import 'helpers/prism_test_environment.dart';
-
 void main() {
-  testWidgets('section headers show back arrows for navigable child routes', (
+  testWidgets('standard section headers have no visible back arrow', (
     tester,
   ) async {
     for (final entry in <String, String>{
@@ -23,12 +21,9 @@ void main() {
       '/discover/leaderboards/kw': '排行榜',
     }.entries) {
       await _pumpHeader(tester, entry.key);
-      final backArrow = entry.key == '/discover/leaderboards/kw'
-          ? findsNothing
-          : findsOneWidget;
       expect(find.text(entry.value), findsOneWidget);
-      expect(find.byTooltip('返回上一页'), backArrow);
-      expect(find.byTooltip('返回上一页'), backArrow);
+      expect(find.byIcon(Icons.arrow_back_ios_new_rounded), findsNothing);
+      expect(find.byTooltip('返回上一页'), findsNothing);
       expect(find.byTooltip('返回歌曲列表'), findsNothing);
     }
   });
@@ -49,7 +44,7 @@ void main() {
     await _pumpHeader(tester, '/playlists/import');
 
     expect(find.text('导入歌单'), findsOneWidget);
-    expect(find.byTooltip('返回上一页'), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_back_ios_new_rounded), findsOneWidget);
     expect(find.byTooltip('返回上一页'), findsOneWidget);
   });
 
@@ -74,7 +69,6 @@ Future<void> _pumpHeader(
         ...overrides,
       ],
       child: MaterialApp(
-        builder: buildPrismTestEnvironment,
         home: Scaffold(
           body: ShellHeader(
             location: location,

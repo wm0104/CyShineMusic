@@ -19,15 +19,16 @@ class DownloadHistoryEntry {
     required this.qualityCode,
     required this.status,
     required this.createdAt,
-    this.modifiedAt,
     this.savedPath,
     this.message,
     this.picUrl,
     this.sizeBytes,
     this.musicJson,
+    this.preservePlaylistPosition = false,
   });
 
   final String id;
+  final bool preservePlaylistPosition;
   final String musicId;
   final String name;
   final String singer;
@@ -36,7 +37,6 @@ class DownloadHistoryEntry {
   final String qualityCode;
   final DownloadHistoryStatus status;
   final DateTime createdAt;
-  final DateTime? modifiedAt;
   final String? savedPath;
   final String? message;
   final String? picUrl;
@@ -71,12 +71,12 @@ class DownloadHistoryEntry {
       createdAt:
           DateTime.tryParse(json['createdAt'] as String? ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
-      modifiedAt: DateTime.tryParse(json['modifiedAt'] as String? ?? ''),
       savedPath: json['savedPath'] as String?,
       message: json['message'] as String?,
       picUrl: json['picUrl'] as String?,
       sizeBytes: json['sizeBytes'] as int?,
       musicJson: _mapOrNull(json['musicInfo']),
+      preservePlaylistPosition: json['preservePlaylistPosition'] == true,
     );
   }
 
@@ -90,12 +90,12 @@ class DownloadHistoryEntry {
     'quality': qualityCode,
     'status': status == DownloadHistoryStatus.failed ? 'failed' : 'completed',
     'createdAt': createdAt.toIso8601String(),
-    if (modifiedAt != null) 'modifiedAt': modifiedAt!.toIso8601String(),
     if (savedPath != null) 'savedPath': savedPath,
     if (message != null) 'message': message,
     if (picUrl != null) 'picUrl': picUrl,
     if (sizeBytes != null) 'sizeBytes': sizeBytes,
     if (musicJson != null) 'musicInfo': musicJson,
+    if (preservePlaylistPosition) 'preservePlaylistPosition': true,
   };
 }
 

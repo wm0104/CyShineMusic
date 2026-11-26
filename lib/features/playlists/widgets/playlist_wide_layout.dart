@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/ui/container_transform.dart';
-import '../../../core/ui/widgets/spring_artwork_hero.dart';
 import 'immersive_playlist_chrome.dart';
 
 /// Whether playlist and leaderboard details should use their split layout.
@@ -58,10 +57,9 @@ class PlaylistWideInfoPane extends StatelessWidget {
     required this.artworkProvider,
     required this.title,
     required this.metadata,
+    this.artwork,
     this.artworkLoading = false,
     this.artworkHeroTag,
-    this.scrollStorageId,
-    this.persistScrollOrigin = true,
     this.description,
     this.descriptionLoading = false,
     this.actions,
@@ -69,10 +67,9 @@ class PlaylistWideInfoPane extends StatelessWidget {
   });
 
   final ImageProvider<Object>? artworkProvider;
+  final Widget? artwork;
   final bool artworkLoading;
   final Object? artworkHeroTag;
-  final Object? scrollStorageId;
-  final bool persistScrollOrigin;
   final String title;
   final String metadata;
   final String? description;
@@ -87,53 +84,43 @@ class PlaylistWideInfoPane extends StatelessWidget {
     const radius = BorderRadius.all(Radius.circular(20));
     final artwork = AspectRatio(
       aspectRatio: 1,
-      child: PlaylistArtworkImage(
-        provider: artworkProvider,
-        loading: artworkLoading,
-      ),
+      child:
+          this.artwork ??
+          PlaylistArtworkImage(
+            provider: artworkProvider,
+            loading: artworkLoading,
+          ),
     );
-    return ContainerTransformScrollRegion(
-      key: scrollStorageId != null && persistScrollOrigin
-          ? PageStorageKey(('playlist-wide-info-pane', scrollStorageId))
-          : null,
-      storageId: scrollStorageId == null ? null : ('wide', scrollStorageId),
-      persistScrollOrigin: persistScrollOrigin,
-      child: SingleChildScrollView(
-        key: const ValueKey('playlist-wide-info-pane'),
-        physics: const BouncingScrollPhysics(
-          parent: AlwaysScrollableScrollPhysics(),
-        ),
-        padding: EdgeInsets.fromLTRB(20, 4, 12, bottomPadding),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (artworkHeroTag case final tag?)
-              if (ContainerTransformTransition.usesSpringHeroOf(context))
-                SpringArtworkHero(
-                  tag: tag,
-                  child: ClipRRect(borderRadius: radius, child: artwork),
-                )
-              else
-                Hero(
-                  tag: tag,
-                  transitionOnUserGestures: true,
-                  createRectTween: containerTransformHeroRectTween,
-                  flightShuttleBuilder: buildArtworkHeroFlightShuttle,
-                  // 卡片端圆角 → 这里的 20dp 圆角，由 shuttle 在飞行中插值。
-                  child: HeroArtworkShape(borderRadius: radius, child: artwork),
-                )
-            else
-              ClipRRect(borderRadius: radius, child: artwork),
-            PlaylistDetailInfo(
-              title: title,
-              metadata: metadata,
-              description: description,
-              descriptionLoading: descriptionLoading,
-              padding: const EdgeInsets.fromLTRB(0, 16, 0, 0),
-            ),
-            ?actions,
-          ],
-        ),
+    return SingleChildScrollView(
+      key: const ValueKey('playlist-wide-info-pane'),
+      physics: const BouncingScrollPhysics(
+        parent: AlwaysScrollableScrollPhysics(),
+      ),
+      padding: EdgeInsets.fromLTRB(20, 4, 12, bottomPadding),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (artworkHeroTag case final tag?)
+            Hero(
+              tag: tag,
+              transitionOnUserGestures: true,
+              createRectTween: containerTransformHeroRectTween,
+              placeholderBuilder: (_, _, child) => child,
+              flightShuttleBuilder: buildArtworkHeroFlightShuttle,
+              // 卡片端圆角 → 这里的 20dp 圆角，由 shuttle 在飞行中插值。
+              child: HeroArtworkShape(borderRadius: radius, child: artwork),
+            )
+          else
+            ClipRRect(borderRadius: radius, child: artwork),
+          PlaylistDetailInfo(
+            title: title,
+            metadata: metadata,
+            description: description,
+            descriptionLoading: descriptionLoading,
+            padding: const EdgeInsets.fromLTRB(0, 16, 0, 0),
+          ),
+          ?actions,
+        ],
       ),
     );
   }

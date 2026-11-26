@@ -1,9 +1,6 @@
 import '../models/download_capabilities.dart';
 import '../models/enums.dart';
 
-// Bump when runtime capability filtering changes, so stored declarations refresh.
-const int kMusicSourceCapabilitiesVersion = 1;
-
 class MusicSourceMetadata {
   const MusicSourceMetadata({
     required this.name,
@@ -32,7 +29,6 @@ class MusicSourceRecord {
     required this.importedAt,
     required this.updatedAt,
     required this.capabilities,
-    this.capabilitiesVersion = kMusicSourceCapabilitiesVersion,
     this.lastError,
   });
 
@@ -46,7 +42,6 @@ class MusicSourceRecord {
   final DateTime importedAt;
   final DateTime updatedAt;
   final Map<MusicSource, List<Quality>> capabilities;
-  final int capabilitiesVersion;
   final String? lastError;
 
   String get runtimeKey => '$id:${updatedAt.microsecondsSinceEpoch}';
@@ -60,7 +55,6 @@ class MusicSourceRecord {
     String? origin,
     DateTime? updatedAt,
     Map<MusicSource, List<Quality>>? capabilities,
-    int? capabilitiesVersion,
     String? lastError,
     bool clearLastError = false,
   }) {
@@ -75,7 +69,6 @@ class MusicSourceRecord {
       importedAt: importedAt,
       updatedAt: updatedAt ?? this.updatedAt,
       capabilities: capabilities ?? this.capabilities,
-      capabilitiesVersion: capabilitiesVersion ?? this.capabilitiesVersion,
       lastError: clearLastError ? null : lastError ?? this.lastError,
     );
   }
@@ -94,7 +87,6 @@ class MusicSourceRecord {
       for (final entry in capabilities.entries)
         entry.key.code: entry.value.map((quality) => quality.code).toList(),
     },
-    'capabilitiesVersion': capabilitiesVersion,
     if (lastError != null) 'lastError': lastError,
   };
 
@@ -132,9 +124,6 @@ class MusicSourceRecord {
           DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
       capabilities: Map.unmodifiable(capabilities),
-      capabilitiesVersion: json['capabilitiesVersion'] is int
-          ? json['capabilitiesVersion'] as int
-          : 0,
       lastError: json['lastError'] as String?,
     );
   }

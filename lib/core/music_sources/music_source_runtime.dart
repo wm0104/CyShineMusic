@@ -12,9 +12,8 @@ import '../models/music_url.dart';
 import '../sdk/internal/builders.dart';
 import '../services/app_logger.dart';
 import 'music_source_models.dart';
+import 'music_source_playback_policy.dart';
 import 'music_source_updates.dart';
-
-const _musicSourceResolveTimeout = Duration(seconds: 2);
 
 class MusicSourceRuntimeException implements Exception {
   const MusicSourceRuntimeException(this.message);
@@ -115,6 +114,7 @@ class MusicSourceRuntime {
             'version': record.version,
             'sourceKey': record.runtimeKey,
             'script': script,
+            'playbackPolicyScript': musicSourcePlaybackPolicyScript,
           })
           .timeout(const Duration(seconds: 12));
       if (result == null) {
@@ -153,7 +153,7 @@ class MusicSourceRuntime {
             'quality': quality.code,
             'musicInfo': toOldMusicInfoJson(music, quality: quality),
           })
-          .timeout(_musicSourceResolveTimeout);
+          .timeout(const Duration(seconds: 35));
       if (result == null || (result['url'] as String? ?? '').trim().isEmpty) {
         throw const MusicSourceRuntimeException('音源没有返回播放地址');
       }
@@ -163,12 +163,12 @@ class MusicSourceRuntime {
         fileName: normalizeResolvedFileName(result['fileName']),
       );
     } on TimeoutException {
-      // The Dart timeout does not cancel the native QuickJS request by itself.
-      // Dispose the runtime so a slow script cannot hold the next fallback
-      // attempt behind its still-running HTTP request.
       await _disposeRuntime();
       throw const MusicSourceRuntimeException('音源解析超时');
     } on PlatformException catch (error) {
+      if (error.code == 'MUSIC_SOURCE_RESOLVE_TIMEOUT') {
+        await _disposeRuntime();
+      }
       throw MusicSourceRuntimeException(error.message ?? '音源解析失败');
     }
   }
@@ -269,6 +269,7 @@ class MusicSourceRuntime {
           : _decodeTextBody(response.data?.toString() ?? '');
       await _respondHttp(
         requestId,
+        token: token,
         response: {
           'statusCode': response.statusCode ?? 0,
           'statusMessage': response.statusMessage ?? '',
@@ -285,21 +286,30 @@ class MusicSourceRuntime {
       );
     } on DioException catch (error) {
       if (!CancelToken.isCancel(error)) {
-        await _respondHttp(requestId, error: error.message ?? '网络请求失败');
+        await _respondHttp(
+          requestId,
+          token: token,
+          error: error.message ?? '网络请求失败',
+        );
       }
     } catch (error) {
-      await _respondHttp(requestId, error: error.toString());
+      await _respondHttp(requestId, token: token, error: error.toString());
     } finally {
-      _httpRequests.remove(requestId);
-      _scheduleUpdateCheckIdle();
+      // The replacement runtime can reuse this request ID before the reply returns.
+      if (identical(_httpRequests[requestId], token)) {
+        _httpRequests.remove(requestId);
+        _scheduleUpdateCheckIdle();
+      }
     }
   }
 
   Future<void> _respondHttp(
     String requestId, {
+    CancelToken? token,
     Map<String, dynamic>? response,
     String? error,
   }) async {
+    if (token != null && !identical(_httpRequests[requestId], token)) return;
     try {
       await _channel.invokeMethod<void>('httpResponse', {
         'requestId': requestId,

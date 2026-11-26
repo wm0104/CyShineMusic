@@ -98,40 +98,14 @@ class KgSdk {
     }
     if (resources.isEmpty) return const {};
 
-    return getQualityDetails(resources);
-  }
-
-  /// Loads the quality variants exposed by Kugou's privilege endpoint.
-  ///
-  /// Search results and playlist/rank payloads carry only the common formats.
-  /// The privilege response is where Kugou exposes `viper_atmos` and
-  /// `viper_clear` for tracks that have them.
-  static Future<Map<String, List<QualityOption>>> getQualityDetails(
-    Iterable<KgPrivilegeResource> resources,
-  ) async {
-    final unique = <String, KgPrivilegeResource>{};
-    for (final resource in resources) {
-      final hash = kgHashKey(resource.hash);
-      if (hash.isEmpty) continue;
-      unique.putIfAbsent(
-        hash,
-        () => KgPrivilegeResource(hash: hash, albumId: resource.albumId),
-      );
-    }
-    if (unique.isEmpty) return const {};
-
     final result = <String, List<QualityOption>>{};
-    final resourcesList = unique.values.toList(growable: false);
     for (
       var start = 0;
-      start < resourcesList.length;
+      start < resources.length;
       start += kgPrivilegeBatchLimit
     ) {
-      final end = (start + kgPrivilegeBatchLimit).clamp(
-        0,
-        resourcesList.length,
-      );
-      final batch = resourcesList.sublist(start, end);
+      final end = (start + kgPrivilegeBatchLimit).clamp(0, resources.length);
+      final batch = resources.sublist(start, end);
       try {
         final clientTime = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         final query = <String, String>{
@@ -162,7 +136,7 @@ class KgSdk {
         result.addAll(parseKgPrivilegeQualityDetails(response.body));
       } catch (_) {
         // Quality metadata is an enhancement. Search must still return the
-        // common formats embedded in the original search response.
+        // four formats embedded in the original search response.
       }
     }
     return result;

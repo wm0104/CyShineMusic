@@ -1,4 +1,3 @@
-import '../settings/widgets/settings_sheet.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -17,7 +16,6 @@ import '../../core/storage/settings_store.dart';
 import '../../core/ui/app_toast.dart';
 import '../../core/ui/car_display_layout.dart';
 import '../shell/shell_bottom_area.dart';
-import '../shell/widgets/scrolling_page_header.dart';
 import '../shell/shell_toolbar_visibility.dart';
 import '../settings/widgets/storage_folder_picker_sheet.dart';
 import 'music_source_import_dialog.dart';
@@ -43,12 +41,11 @@ class _MusicSourcePageState extends ConsumerState<MusicSourcePage> {
         parent: AlwaysScrollableScrollPhysics(),
       ),
       slivers: [
-        const SliverToBoxAdapter(child: ScrollHeaderSpacer()),
         SliverPadding(
           padding: EdgeInsets.fromLTRB(
-            16,
-            0,
-            16,
+            28,
+            2,
+            28,
             ShellBottomArea.contentPadding(context, 126),
           ),
           sliver: SliverToBoxAdapter(
@@ -150,12 +147,30 @@ class _MusicSourcePageState extends ConsumerState<MusicSourcePage> {
       final settings = ref.read(settingsProvider);
       final browser = ref.read(storageBrowserServiceProvider);
       if (settings.useBuiltInSourceFilePicker && browser.isSupported) {
-        if (!await PermissionService.hasScriptFileRead()) {
+        if (!await PermissionService.ensureScriptFileRead()) {
           if (!mounted) return;
-          showAppToast(
-            context,
-            '无法打开内置目录，请在「设置→权限、下载与目录」中授予存储权限',
-            type: AppToastType.warning,
+          await showDialog<void>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('需要存储访问权限'),
+              content: const Text(
+                '内置文件选择器需要存储权限才能读取 JS 脚本。'
+                '请在系统设置中允许文件访问，然后重新导入。',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    Navigator.of(context).pop();
+                    await PermissionService.openSystemAppSettings();
+                  },
+                  child: const Text('打开设置'),
+                ),
+              ],
+            ),
           );
           return;
         }
@@ -304,7 +319,7 @@ class _MusicSourcePageState extends ConsumerState<MusicSourcePage> {
   }
 
   Future<void> _delete(MusicSourceRecord record) async {
-    final confirmed = await showSettingsDialog<bool>(
+    final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('删除音源'),

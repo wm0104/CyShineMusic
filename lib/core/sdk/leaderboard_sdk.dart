@@ -9,16 +9,13 @@ import '../ui/cover_image_source.dart';
 import 'internal/builders.dart';
 import 'internal/crypto_util.dart';
 import 'internal/format.dart';
-import 'internal/kg_quality.dart';
 import 'internal/sdk_http.dart';
 import 'internal/tx_quality.dart';
-import 'kg_sdk.dart';
 import 'leaderboard_catalog.dart';
 import 'playlist_adapters/kg_playlist_adapter.dart';
 import 'playlist_adapters/kw_playlist_adapter.dart';
 import 'playlist_adapters/mg_playlist_adapter.dart';
 import 'playlist_sdk.dart';
-import 'qs_sdk.dart';
 
 typedef LeaderboardJsonPoster =
     Future<dynamic> Function(
@@ -67,11 +64,6 @@ class LeaderboardSdk {
     LeaderboardJsonPoster? jsonPoster,
     LeaderboardPlaylistLoader? playlistLoader,
   }) async {
-    if (board.source == MusicSource.qs && board.previewTracks.isNotEmpty) {
-      return board.copyWith(
-        previewTracks: board.previewTracks.take(limit).toList(growable: false),
-      );
-    }
     final detail = await get(
       source: board.source,
       boardId: board.boardId,
@@ -116,14 +108,12 @@ class LeaderboardSdk {
         board,
         maxTracks: maxTracks,
         load: jsonLoader ?? SdkHttp.getJson,
-        enrichQualityDetails: jsonLoader == null && jsonPoster == null,
       ),
       MusicSource.mg => _getMg(
         board,
         maxTracks: maxTracks,
         load: jsonLoader ?? SdkHttp.getJson,
       ),
-      MusicSource.qs => qishuiSdk.leaderboard(boardId, maxTracks: maxTracks),
       MusicSource.all => throw Exception('排行榜不支持“全部”音源'),
     };
   }
@@ -202,7 +192,7 @@ class LeaderboardSdk {
     final info = data['data'] as Map? ?? const {};
     final songs = (data['songInfoList'] as List? ?? const []).whereType<Map>();
     final tracks = songs
-        .map(_parseTxTrack)
+        .map(parseTxTrack)
         .whereType<MusicInfo>()
         .toList(growable: false);
     return PlaylistInfo(
@@ -218,7 +208,7 @@ class LeaderboardSdk {
     );
   }
 
-  static MusicInfo? _parseTxTrack(Map item) {
+  static MusicInfo? parseTxTrack(Map item) {
     final file = item['file'];
     final songMid = item['mid'];
     final mediaMid = file is Map ? file['media_mid'] : null;
@@ -249,7 +239,6 @@ class LeaderboardSdk {
     LeaderboardSummary board, {
     required int? maxTracks,
     required SdkJsonLoader load,
-    required bool enrichQualityDetails,
   }) async {
     const pageCapacity = 100;
     final requested = maxTracks != null && maxTracks > 0 ? maxTracks : 1000;
@@ -283,36 +272,8 @@ class LeaderboardSdk {
         break;
       }
     }
-    final qualityDetails = enrichQualityDetails
-        ? await KgSdk.getQualityDetails([
-            for (final song in songs)
-              KgPrivilegeResource(
-                hash:
-                    (song['audio_info'] as Map?)?['hash'] ??
-                    song['hash'] ??
-                    song['FileHash'] ??
-                    '',
-                albumId:
-                    (song['audio_info'] as Map?)?['album_id'] ??
-                    (song['album_info'] as Map?)?['album_id'] ??
-                    song['album_id'],
-              ),
-          ])
-        : const <String, List<QualityOption>>{};
     final tracks = songs
-        .map(
-          (song) => KgPlaylistAdapter.parseTrack(
-            song,
-            qualityDetails:
-                qualityDetails[kgHashKey(
-                  ((song['audio_info'] as Map?)?['hash'] ??
-                          song['hash'] ??
-                          song['FileHash'] ??
-                          '')
-                      .toString(),
-                )],
-          ),
-        )
+        .map(KgPlaylistAdapter.parseTrack)
         .whereType<MusicInfo>()
         .toList(growable: false);
     final cover = tracks

@@ -1,23 +1,14 @@
-import 'dart:math' as math;
-import 'dart:ui';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../../core/storage/settings_store.dart';
-import '../../../core/ui/artwork_colors.dart';
 import '../../../core/ui/container_transform.dart';
 import '../../../core/ui/cover_image_source.dart';
 import '../../../core/ui/cover_placeholder.dart';
-import '../../../core/ui/route_settle.dart';
-import '../../../core/ui/widgets/app_navigation_button.dart';
-import '../../../core/ui/widgets/spring_artwork_hero.dart';
 import '../../../theme/app_motion.dart';
 import '../../../theme/app_theme.dart';
-import '../../shell/widgets/scrolling_page_header.dart';
 
 ImageProvider<Object>? networkPlaylistArtworkProvider(
   String? rawUrl, {
@@ -62,27 +53,11 @@ typedef _ArtworkSchemeCacheKey = ({
 class _PlaylistArtworkThemeState extends ConsumerState<PlaylistArtworkTheme> {
   static const _schemeCacheLimit = 48;
   static final Map<_ArtworkSchemeCacheKey, ColorScheme> _resolvedSchemes = {};
-  static final Map<_ArtworkSchemeCacheKey, Future<ColorScheme?>>
+  static final Map<_ArtworkSchemeCacheKey, Future<ColorScheme>>
   _pendingSchemes = {};
 
   ColorScheme? _scheme;
   _ArtworkSchemeCacheKey? _activeRequestKey;
-
-  /// 由 [_scheme] 生成的主题。构建完整 ThemeData 不便宜，页面每次重建
-  /// （搜索输入、收藏状态）都重新生成会白白多花一截构建时间。
-  ({ColorScheme scheme, TextTheme textTheme, ThemeData theme})? _artworkTheme;
-
-  ThemeData _themeFor(ColorScheme scheme, TextTheme textTheme) {
-    final cached = _artworkTheme;
-    if (cached != null &&
-        identical(cached.scheme, scheme) &&
-        identical(cached.textTheme, textTheme)) {
-      return cached.theme;
-    }
-    final theme = ThemeData.localize(AppTheme.fromScheme(scheme), textTheme);
-    _artworkTheme = (scheme: scheme, textTheme: textTheme, theme: theme);
-    return theme;
-  }
 
   @override
   void didChangeDependencies() {
@@ -133,48 +108,27 @@ class _PlaylistArtworkThemeState extends ConsumerState<PlaylistArtworkTheme> {
     _makeSchemeCacheRoom(requestKey);
     final future = _pendingSchemes.putIfAbsent(
       requestKey,
-      () => _loadScheme(provider, base.brightness),
+      () => ColorScheme.fromImageProvider(
+        provider: provider,
+        brightness: base.brightness,
+        dynamicSchemeVariant: DynamicSchemeVariant.fidelity,
+        contrastLevel: 0.1,
+      ),
     );
     future.then(
       (scheme) {
         if (identical(_pendingSchemes[requestKey], future)) {
           _pendingSchemes.remove(requestKey);
-          if (scheme != null) _resolvedSchemes[requestKey] = scheme;
+          _resolvedSchemes[requestKey] = scheme;
         }
-        void apply() {
-          if (!mounted || _activeRequestKey != requestKey) return;
-          setState(() => _scheme = scheme);
-        }
-
         if (!mounted || _activeRequestKey != requestKey) return;
-        // 主题插值会逐帧重建整页，不与进入动画叠在一起。
-        if (!deferUntilRouteSettled(context, apply)) apply();
+        setState(() => _scheme = scheme);
       },
       onError: (_) {
         if (identical(_pendingSchemes[requestKey], future)) {
           _pendingSchemes.remove(requestKey);
         }
-        if (!mounted || _activeRequestKey != requestKey) return;
-        setState(() => _scheme = null);
       },
-    );
-  }
-
-  static Future<ColorScheme?> _loadScheme(
-    ImageProvider<Object> provider,
-    Brightness brightness,
-  ) async {
-    final colors = await loadArtworkColors(provider);
-    if (colors == null) return null;
-    var seed = colors.accent ?? colors.baseColor;
-    // Keep monochrome covers neutral, as the player controls do. The flow
-    // palette gives them a small artificial saturation for its animation.
-    if (HSLColor.fromColor(seed).saturation <= 0.22) seed = colors.baseColor;
-    return ColorScheme.fromSeed(
-      seedColor: seed,
-      brightness: brightness,
-      dynamicSchemeVariant: DynamicSchemeVariant.fidelity,
-      contrastLevel: 0.1,
     );
   }
 
@@ -208,7 +162,7 @@ class _PlaylistArtworkThemeState extends ConsumerState<PlaylistArtworkTheme> {
     );
     final baseTheme = Theme.of(context);
     final theme = enabled && _scheme != null
-        ? _themeFor(_scheme!, baseTheme.textTheme)
+        ? ThemeData.localize(AppTheme.fromScheme(_scheme!), baseTheme.textTheme)
         : baseTheme;
     final scheme = theme.colorScheme;
     final onDarkSurface =
@@ -248,36 +202,38 @@ class ImmersivePlaylistHeader extends StatelessWidget {
     super.key,
     required this.artworkProvider,
     required this.topBar,
+    this.artwork,
     this.artworkLoading = false,
     this.artworkHeroTag,
-    this.showTopBar = true,
   });
 
   final ImageProvider<Object>? artworkProvider;
   final Widget topBar;
+  final Widget? artwork;
   final bool artworkLoading;
   final Object? artworkHeroTag;
-  final bool showTopBar;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final height = _immersivePlaylistHeaderHeight(context);
-    final springHero = ContainerTransformTransition.usesSpringHeroOf(context);
-    final artwork = PlaylistArtworkImage(
-      provider: artworkProvider,
-      loading: artworkLoading,
-    );
-    // Hero 位于页面顶栏上方，飞行时也要绘制顶栏，才能在落地前接上。
-    // showTopBar 只控制头图原位；外置滚动顶栏的页面应传入相同的静态外观。
-    // 同一组 widget 会同时出现在两棵子树里，所以 [topBar] 不能带 GlobalKey。
+    final screen = MediaQuery.sizeOf(context);
+    final height = (screen.height * 0.4).clamp(320.0, 460.0);
+    final artwork =
+        this.artwork ??
+        PlaylistArtworkImage(
+          provider: artworkProvider,
+          loading: artworkLoading,
+        );
+    // scrim 与顶栏既叠在头图上，也随封面 Hero 的 shuttle 一起飞行（落地前
+    // 淡入），飞行结束时不会突然出现。同一组 widget 会同时出现在两棵子树
+    // 里，所以 [topBar] 不能带 GlobalKey。
     final overlays = <Widget>[
       const DecoratedBox(
         decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.center,
-            colors: [Color(0x4D000000), Color(0x00000000)],
+            colors: [Color(0x8A000000), Color(0x00000000)],
           ),
         ),
       ),
@@ -286,17 +242,16 @@ class ImmersivePlaylistHeader extends StatelessWidget {
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            stops: const [0.55, 0.78, 1],
+            stops: const [0.68, 1],
             colors: [
               Colors.transparent,
               scheme.surface.withValues(alpha: 0.18),
-              scheme.surface,
             ],
           ),
         ),
       ),
+      Positioned(left: 0, right: 0, top: 0, child: topBar),
     ];
-    final topBarOverlay = Positioned(left: 0, right: 0, top: 0, child: topBar);
 
     return SizedBox(
       key: const ValueKey('immersive-playlist-header'),
@@ -305,144 +260,33 @@ class ImmersivePlaylistHeader extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           if (artworkHeroTag case final tag?)
-            if (springHero)
-              SpringArtworkHero(
-                tag: tag,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [artwork, ...overlays],
-                ),
-              )
-            else
-              Hero(
-                tag: tag,
-                transitionOnUserGestures: true,
-                createRectTween: containerTransformHeroRectTween,
-                // 使用 Hero 默认占位保留布局，避免大头图与移动封面同时绘制。
-                flightShuttleBuilder:
-                    (flightContext, animation, direction, fromHero, toHero) =>
-                        buildArtworkHeroFlightShuttle(
-                          flightContext,
-                          animation,
-                          direction,
-                          fromHero,
-                          toHero,
-                          overlay: Stack(
-                            fit: StackFit.expand,
-                            children: [...overlays, topBarOverlay],
-                          ),
+            Hero(
+              tag: tag,
+              transitionOnUserGestures: true,
+              createRectTween: containerTransformHeroRectTween,
+              // 飞行期间头图原位照常绘制，shuttle 只是叠在其上：落地零跳变，
+              // 卡片封面比头图窄时（榜单横向卡片）露出的部分也是同一张图。
+              placeholderBuilder: (_, _, child) => child,
+              flightShuttleBuilder:
+                  (flightContext, animation, direction, fromHero, toHero) =>
+                      buildArtworkHeroFlightShuttle(
+                        flightContext,
+                        animation,
+                        direction,
+                        fromHero,
+                        toHero,
+                        overlay: Stack(
+                          fit: StackFit.expand,
+                          children: overlays,
                         ),
-                child: artwork,
-              )
+                      ),
+              child: artwork,
+            )
           else
             artwork,
-          if (!springHero || artworkHeroTag == null) ...overlays,
-          if (showTopBar) topBarOverlay,
+          ...overlays,
         ],
       ),
-    );
-  }
-}
-
-double _immersivePlaylistHeaderHeight(BuildContext context) =>
-    (MediaQuery.sizeOf(context).height * 0.4).clamp(320.0, 460.0);
-
-TextStyle _playlistDetailTitleStyle(BuildContext context) =>
-    DefaultTextStyle.of(context).style.copyWith(
-      color: Theme.of(context).colorScheme.onSurface,
-      fontSize: 27,
-      height: 1.12,
-      fontWeight: FontWeight.w700,
-      letterSpacing: 0,
-    );
-
-/// 图片与大标题滚走后，顶部再淡入单行名称。
-class ScrollingImmersivePlaylistBody extends StatelessWidget {
-  const ScrollingImmersivePlaylistBody({
-    super.key,
-    required this.child,
-    this.scrollStorageId,
-    this.persistScrollOrigin = true,
-    this.title = '',
-    this.onBack,
-    this.topBarBuilder,
-  });
-
-  final Widget child;
-  final Object? scrollStorageId;
-  final bool persistScrollOrigin;
-  final String title;
-  final VoidCallback? onBack;
-  final Widget Function(
-    BuildContext context,
-    bool onImage,
-    bool statusBarOnImage,
-    double revealProgress,
-  )?
-  topBarBuilder;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final top = MediaQuery.viewPaddingOf(context).top;
-        final headerHeight = _immersivePlaylistHeaderHeight(context);
-        final painter =
-            TextPainter(
-              text: TextSpan(
-                text: title,
-                style: _playlistDetailTitleStyle(context),
-              ),
-              maxLines: 2,
-              ellipsis: '…',
-              textDirection: Directionality.of(context),
-              textScaler: MediaQuery.textScalerOf(context),
-              textHeightBehavior: DefaultTextStyle.of(
-                context,
-              ).textHeightBehavior,
-              locale: Localizations.maybeLocaleOf(context),
-            )..layout(
-              maxWidth: math.min(900, math.max(1, constraints.maxWidth - 40)),
-            );
-        // 原标题底边进入状态栏遮罩后，再用 32dp 的滚动距离淡入。
-        final titleRevealStart = headerHeight + 20 + painter.height - top;
-        painter.dispose();
-        return ScrollingPageHeader(
-          topInset: 0,
-          headerBuilder: (context, scrollOffset) {
-            final imageEnd = headerHeight - top - 64;
-            final revealProgress = Curves.easeOut.transform(
-              ((scrollOffset - titleRevealStart) / 32).clamp(0.0, 1.0),
-            );
-            if (topBarBuilder != null) {
-              return topBarBuilder!(
-                context,
-                scrollOffset < imageEnd,
-                scrollOffset < headerHeight,
-                revealProgress,
-              );
-            }
-            return ImmersivePlaylistTopBar(
-              title: title,
-              titleOpacity: title.trim().isEmpty ? 0 : revealProgress,
-              showGradient: revealProgress > 0,
-              backdropOpacity: revealProgress,
-              blurSigma: 24 * revealProgress,
-              onImage: scrollOffset < imageEnd,
-              statusBarOnImage: scrollOffset < headerHeight,
-              onBack: onBack,
-            );
-          },
-          child: ContainerTransformScrollRegion(
-            key: ValueKey(('compact-scroll-origin', scrollStorageId)),
-            storageId: scrollStorageId == null
-                ? null
-                : ('compact', scrollStorageId),
-            persistScrollOrigin: persistScrollOrigin,
-            child: child,
-          ),
-        );
-      },
     );
   }
 }
@@ -483,7 +327,13 @@ class PlaylistDetailInfo extends StatelessWidget {
                   key: const ValueKey('playlist-detail-title'),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: _playlistDetailTitleStyle(context),
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontSize: 27,
+                    height: 1.12,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0,
+                  ),
                 ),
                 const SizedBox(height: 8),
                 Text(
@@ -593,27 +443,11 @@ class ImmersivePlaylistTopBar extends StatelessWidget {
     this.leading,
     this.actions = const [],
     this.onImage = true,
-    this.showBack = true,
-    this.showGradient = true,
-    this.onBack,
-    this.titleOpacity = 1,
-    this.blurSigma = 0,
-    this.backdropOpacity = 1,
-    this.statusBarOnImage,
-    this.titleContent,
   });
 
   final String title;
   final Widget? leading;
   final List<Widget> actions;
-  final bool showBack;
-  final bool showGradient;
-  final VoidCallback? onBack;
-  final double titleOpacity;
-  final double blurSigma;
-  final double backdropOpacity;
-  final bool? statusBarOnImage;
-  final Widget? titleContent;
 
   /// true = 压在头图上（白字 + 阴影）；false = 直接放在 surface 上，
   /// 前景跟随主题（宽屏分栏没有头图，白字在浅色主题下不可见）。
@@ -622,161 +456,41 @@ class ImmersivePlaylistTopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final top = MediaQuery.viewPaddingOf(context).top;
-    final scheme = Theme.of(context).colorScheme;
-    final foreground = onImage ? Colors.white : scheme.onSurface;
-    final lightStatusBar =
-        (statusBarOnImage ?? onImage) || scheme.brightness == Brightness.dark;
-    final back =
-        leading ??
-        (showBack
-            ? AppNavigationButton.back(
-                // The button owns a themed surface, even over artwork.
-                // Its arrow must follow that surface rather than the title.
-                onPressed:
-                    onBack ??
-                    () {
-                      if (context.canPop()) {
-                        context.pop();
-                        return;
-                      }
-                      final uri = GoRouterState.of(context).uri;
-                      context.go(
-                        uri.path.startsWith('/discover/')
-                            ? '/'
-                            : uri.queryParameters['from'] == 'manage'
-                            ? '/playlists'
-                            : '/songs',
-                      );
-                    },
-              )
-            : null);
-    return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: SystemUiOverlayStyle(
-        statusBarColor: Colors.transparent,
-        statusBarIconBrightness: lightStatusBar
-            ? Brightness.light
-            : Brightness.dark,
-        statusBarBrightness: lightStatusBar
-            ? Brightness.dark
-            : Brightness.light,
-      ),
-      child: IconTheme(
-        data: IconThemeData(color: foreground),
-        child: DefaultTextStyle(
-          style: TextStyle(
-            color: foreground,
-            fontSize: 17,
-            fontWeight: FontWeight.w600,
-            shadows: onImage
-                ? const [Shadow(color: Color(0x85000000), blurRadius: 8)]
-                : null,
-          ),
-          child: Stack(
-            children: [
-              if (showGradient)
-                Positioned.fill(
-                  bottom: 14,
-                  child: IgnorePointer(
-                    child: _PlaylistTopBarBackdrop(
-                      onImage: onImage,
-                      blurSigma: blurSigma,
-                      opacity: backdropOpacity,
-                    ),
+    final theme = Theme.of(context);
+    final textStyle = theme.textTheme.bodyMedium;
+    final foreground = onImage ? Colors.white : theme.colorScheme.onSurface;
+    return IconTheme(
+      data: IconThemeData(color: foreground),
+      child: DefaultTextStyle(
+        style: TextStyle(
+          color: foreground,
+          fontSize: 17,
+          fontWeight: FontWeight.w600,
+          fontFamily: textStyle?.fontFamily,
+          fontFamilyFallback: textStyle?.fontFamilyFallback,
+          shadows: onImage
+              ? const [Shadow(color: Color(0x85000000), blurRadius: 8)]
+              : null,
+        ),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(16, top, 12, 8),
+          child: SizedBox(
+            height: 48,
+            child: Row(
+              children: [
+                if (leading != null) ...[leading!, const SizedBox(width: 4)],
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-              Padding(
-                padding: EdgeInsets.fromLTRB(16, top + 8, 16, 20),
-                child: SizedBox(
-                  height: 44,
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 44,
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: back,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      if (titleContent != null)
-                        Expanded(child: titleContent!)
-                      else ...[
-                        Expanded(
-                          child: IgnorePointer(
-                            child: Opacity(
-                              opacity: titleOpacity,
-                              child: Text(
-                                title,
-                                maxLines: 1,
-                                textAlign: TextAlign.center,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        if (actions.isEmpty)
-                          const SizedBox(width: 44)
-                        else
-                          FloatingHeaderSurface(
-                            onImage: onImage,
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: actions,
-                            ),
-                          ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ],
+                ...actions,
+              ],
+            ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _PlaylistTopBarBackdrop extends StatelessWidget {
-  const _PlaylistTopBarBackdrop({
-    required this.onImage,
-    required this.blurSigma,
-    required this.opacity,
-  });
-
-  final bool onImage;
-  final double blurSigma;
-  final double opacity;
-
-  @override
-  Widget build(BuildContext context) {
-    final surface = Theme.of(context).colorScheme.surface;
-    final background = DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          stops: const [0, 0.58, 1],
-          colors: onImage
-              ? [
-                  Colors.black.withValues(alpha: 0.4 * opacity),
-                  Colors.black.withValues(alpha: (0x30 / 255) * opacity),
-                  Colors.transparent,
-                ]
-              : [
-                  surface.withValues(alpha: 0.96 * opacity),
-                  surface.withValues(alpha: 0.82 * opacity),
-                  surface.withValues(alpha: 0),
-                ],
-        ),
-      ),
-    );
-    if (blurSigma <= 0) return background;
-    return ClipRect(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: blurSigma, sigmaY: blurSigma),
-        child: background,
       ),
     );
   }
@@ -811,7 +525,7 @@ class ImmersiveTopIconButton extends StatelessWidget {
           disabledForegroundColor: onImage
               ? Colors.white.withValues(alpha: 0.38)
               : scheme.onSurface.withValues(alpha: 0.34),
-          backgroundColor: Colors.transparent,
+          backgroundColor: onImage ? const Color(0x30000000) : null,
         ),
         icon: Icon(icon, size: 20),
       ),
@@ -826,18 +540,18 @@ class PlaylistArtworkImage extends StatelessWidget {
     super.key,
     required this.provider,
     required this.loading,
+    this.placeholder = const CoverUnavailablePlaceholder(iconSize: 56),
   });
 
   final ImageProvider<Object>? provider;
   final bool loading;
+  final Widget placeholder;
 
   @override
   Widget build(BuildContext context) {
     final provider = this.provider;
     if (provider == null) {
-      return loading
-          ? const CoverLoadingSkeleton()
-          : const CoverUnavailablePlaceholder(iconSize: 56);
+      return loading ? const CoverLoadingSkeleton() : placeholder;
     }
     return Image(
       image: provider,
@@ -859,8 +573,7 @@ class PlaylistArtworkImage extends StatelessWidget {
           ],
         );
       },
-      errorBuilder: (_, _, _) =>
-          const CoverUnavailablePlaceholder(iconSize: 56),
+      errorBuilder: (_, _, _) => placeholder,
     );
   }
 }

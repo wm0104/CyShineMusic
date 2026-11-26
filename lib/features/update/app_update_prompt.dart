@@ -1,11 +1,12 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_info.dart';
 import '../../core/services/app_logger.dart';
 import '../../core/services/app_update_service.dart';
-import '../../core/storage/settings_store.dart';
 import '../../core/ui/app_toast.dart';
+import 'app_update_controller.dart';
 
 enum AppUpdateCheckOutcome {
   updateAvailable,
@@ -16,13 +17,25 @@ enum AppUpdateCheckOutcome {
 
 bool _appUpdateCheckInProgress = false;
 
-enum _AppUpdateAction { ignore, download }
-
 Future<AppUpdateCheckOutcome> checkForAppUpdate(
   BuildContext context,
   WidgetRef ref, {
   bool showFeedback = false,
 }) async {
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    final controller = ref.read(appUpdateControllerProvider);
+    final result = await controller.check(automatic: !showFeedback);
+    if (showFeedback && context.mounted && controller.message != null) {
+      showAppToast(context, controller.message!,
+        type: result == UpdateCheckResult.failed ? AppToastType.warning : AppToastType.info);
+    }
+    return switch (result) {
+      UpdateCheckResult.updateAvailable => AppUpdateCheckOutcome.updateAvailable,
+      UpdateCheckResult.upToDate => AppUpdateCheckOutcome.upToDate,
+      UpdateCheckResult.alreadyChecking || UpdateCheckResult.skipped => AppUpdateCheckOutcome.alreadyChecking,
+      UpdateCheckResult.failed => AppUpdateCheckOutcome.failed,
+    };
+  }
   if (_appUpdateCheckInProgress) {
     if (showFeedback && context.mounted) {
       showAppToast(context, '正在检查更新，请稍候');
@@ -89,7 +102,7 @@ Future<void> _showUpdateDialog(
   required String currentVersion,
   required AppRelease release,
 }) async {
-  final action = await showDialog<_AppUpdateAction>(
+  final shouldOpen = await showDialog<bool>(
     context: context,
     useRootNavigator: true,
     builder: (dialogContext) => AlertDialog(
@@ -99,41 +112,23 @@ Future<void> _showUpdateDialog(
       content: Text(
         '$currentVersion  →  ${release.version}\n\n'
         '${release.title}\n'
-        '将前往 GitHub Release 页面，由你选择并下载更新包。\n\n'
-        '忽略更新后，启动时将不再自动检查，可在设置中手动检查更新。',
+        '将前往 GitHub Release 页面，由你选择并下载更新包。',
       ),
       actions: [
         TextButton(
-          key: const ValueKey('app-update-ignore'),
-          onPressed: () =>
-              Navigator.of(dialogContext).pop(_AppUpdateAction.ignore),
-          child: const Text('忽略更新'),
-        ),
-        TextButton(
           key: const ValueKey('app-update-later'),
-          onPressed: () => Navigator.of(dialogContext).pop(),
+          onPressed: () => Navigator.of(dialogContext).pop(false),
           child: const Text('稍后再说'),
         ),
         FilledButton(
           key: const ValueKey('app-update-open-release'),
-          onPressed: () =>
-              Navigator.of(dialogContext).pop(_AppUpdateAction.download),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
           child: const Text('前往下载'),
         ),
       ],
     ),
   );
-  if (!context.mounted) return;
-  if (action == _AppUpdateAction.ignore) {
-    await ref
-        .read(settingsProvider.notifier)
-        .setCheckForUpdatesOnStartup(false);
-    if (context.mounted) {
-      showAppToast(context, '已关闭启动时检查更新，可在设置中手动检查');
-    }
-    return;
-  }
-  if (action != _AppUpdateAction.download) return;
+  if (shouldOpen != true || !context.mounted) return;
 
   try {
     final opened = await ref.read(externalUriLauncherProvider)(release.pageUri);

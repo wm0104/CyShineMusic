@@ -1,10 +1,9 @@
 enum OnlineCollectionKind {
-  playlist('歌单'),
-  leaderboard('榜单'),
-  artist('艺人'),
-  album('专辑');
+  playlist('歌单', 'playlists'),
+  leaderboard('榜单', 'leaderboards'),
+  artist('歌手', 'artists');
 
-  const OnlineCollectionKind(this.label);
+  const OnlineCollectionKind(this.label, this.path);
   final String label;
-  bool get isCatalog => this == artist || this == album;
+  final String path;
 }

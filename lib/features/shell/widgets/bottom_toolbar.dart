@@ -75,7 +75,6 @@ class BottomToolbar extends ConsumerWidget {
               child: ToolbarCapsule(
                 scheme: scheme,
                 height: toolbarHeight,
-                padding: EdgeInsets.zero,
                 child: _ToolbarPager(
                   location: location,
                   routeLocation: routeLocation,
@@ -165,6 +164,19 @@ class _ToolbarPagerState extends State<_ToolbarPager>
   }
 
   @override
+  void didUpdateWidget(covariant _ToolbarPager oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.location != oldWidget.location &&
+        isPlaybackArtistLocation(widget.location)) {
+      // Show the Playback destination even when the mini player was visible.
+      _page = 0;
+      _dragSign = 0;
+      _lastDragDelta = 0;
+      _switch.value = 0;
+    }
+  }
+
+  @override
   void dispose() {
     _switch.dispose();
     super.dispose();
@@ -228,20 +240,16 @@ class _ToolbarPagerState extends State<_ToolbarPager>
 
   @override
   Widget build(BuildContext context) {
-    final totalWidth = widget.actionWidth * toolbarActionCount + 10;
     final pageSize = Size(
-      totalWidth,
+      widget.actionWidth * toolbarActionCount,
       widget.toolbarHeight,
     );
-    final navPage = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 5),
-      child: _MainToolbar(
-        location: widget.location,
-        routeLocation: widget.routeLocation,
-        actionWidth: widget.actionWidth,
-        actionHeight: widget.actionHeight,
-        toolbarHeight: widget.toolbarHeight,
-      ),
+    final navPage = _MainToolbar(
+      location: widget.location,
+      routeLocation: widget.routeLocation,
+      actionWidth: widget.actionWidth,
+      actionHeight: widget.actionHeight,
+      toolbarHeight: widget.toolbarHeight,
     );
     final miniPage = SizedBox.fromSize(
       size: pageSize,
@@ -411,7 +419,7 @@ class _MainToolbar extends ConsumerWidget {
                 tooltip: '播放页',
                 label: '播放',
                 icon: Icons.graphic_eq_rounded,
-                selected: location == '/player',
+                selected: selectedIndex == 2,
                 animatedPlayback: playerPlaying,
                 width: actionWidth,
                 height: actionHeight,

@@ -10,8 +10,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
 import 'package:cy_shine_music/core/api/music_api.dart';
 import 'package:cy_shine_music/core/models/enums.dart';
+import 'package:cy_shine_music/core/models/leaderboard_info.dart';
 import 'package:cy_shine_music/core/models/music_info.dart';
 import 'package:cy_shine_music/core/models/playlist_info.dart';
+import 'package:cy_shine_music/core/models/playlist_summary.dart';
 import 'package:cy_shine_music/features/downloads/download_history_entry.dart';
 import 'package:cy_shine_music/features/player/player_audio_handler.dart';
 import 'package:cy_shine_music/features/player/lyric_parser.dart';
@@ -22,10 +24,6 @@ import 'package:cy_shine_music/features/playlists/playlist_detail_page.dart';
 import 'package:cy_shine_music/features/playlists/playlist_models.dart';
 import 'package:cy_shine_music/features/playlists/playlist_store.dart';
 import 'package:cy_shine_music/router.dart';
-import 'package:cy_shine_music/features/shell/shell_navigation.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
-
-import 'helpers/prism_test_environment.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -34,13 +32,85 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
+  testWidgets('iOS edge back follows real shell page origins', (tester) async {
+    await _usePhoneViewport(tester);
+    final prefs = await _prefsWith([
+      _playlist(id: 'saved', name: '已保存歌单', originSourceCode: 'spotify'),
+    ]);
+    final audioHandler = PlayerAudioHandler();
+    final router = createAppRouter(initialLocation: '/settings');
+    addTearDown(() {
+      router.dispose();
+      unawaited(audioHandler.disposeHandler());
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          playerAudioHandlerProvider.overrideWithValue(audioHandler),
+          musicApiProvider.overrideWithValue(_EdgeBackMusicApi()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: router,
+          theme: ThemeData(platform: TargetPlatform.iOS),
+        ),
+      ),
+    );
+    await _pumpUi(tester);
+
+    String location() => router.routeInformationProvider.value.uri.toString();
+    Future<void> swipeFrom(String page, String expected) async {
+      await _pumpUi(tester);
+      expect(location(), page);
+      await tester.dragFrom(const Offset(4, 360), const Offset(210, 0));
+      await _pumpUi(tester);
+      expect(location(), expected, reason: 'Edge back from $page');
+    }
+
+    for (final (page, expected) in [
+      ('/settings/webdav', '/settings'),
+      ('/settings/equalizer', '/settings'),
+      ('/debug', '/settings'),
+      ('/downloads', '/songs'),
+      ('/songs/search', '/songs'),
+      ('/playlists', '/songs'),
+      ('/playlists/import', '/playlists'),
+      ('/discover/playlists/wy/online', '/'),
+      ('/discover/leaderboards/wy', '/'),
+      ('/discover/leaderboards/wy/chart', '/'),
+    ]) {
+      router.go(page);
+      await swipeFrom(page, expected);
+    }
+
+    const saved = '/playlists/saved?from=manage';
+    router.go(saved);
+    await _pumpUi(tester);
+    await tester.tap(find.text('补配未匹配项'));
+    await swipeFrom('/playlists/import?rematch=saved', saved);
+
+    for (final (origin, page) in [
+      ('/?origin=online', '/discover/playlists/wy/online'),
+      ('/?origin=charts', '/discover/leaderboards/wy'),
+      ('/?origin=chart', '/discover/leaderboards/wy/chart'),
+      (
+        '/discover/leaderboards/wy?origin=list',
+        '/discover/leaderboards/wy/chart',
+      ),
+    ]) {
+      router.go(origin);
+      await _pumpUi(tester);
+      unawaited(router.push<void>(page));
+      await swipeFrom(page, origin);
+    }
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'songs playlist entry preserves management source through player return',
     (tester) async {
       await _usePhoneViewport(tester);
-      final prefs = await _prefsWith([
-        _playlist(id: 'night', name: 'Night playlist'),
-      ]);
+      final prefs = await _prefsWith([_playlist(id: 'night', name: '夜晚循环')]);
       final audioHandler = PlayerAudioHandler();
       final router = createAppRouter(initialLocation: '/songs');
       addTearDown(() {
@@ -55,7 +125,6 @@ void main() {
             playerAudioHandlerProvider.overrideWithValue(audioHandler),
           ],
           child: MaterialApp.router(
-            builder: buildPrismTestEnvironment,
             debugShowCheckedModeBanner: false,
             theme: ThemeData(
               useMaterial3: true,
@@ -68,7 +137,7 @@ void main() {
       await _pumpUi(tester);
 
       expect(router.routeInformationProvider.value.uri.path, '/songs');
-      await tester.tap(find.byTooltip('歌单管理'));
+      await tester.tap(find.byTooltip('歌单'));
       await _pumpUi(tester);
       expect(find.text('歌单管理'), findsOneWidget);
 
@@ -76,10 +145,10 @@ void main() {
       await _pumpUi(tester);
       expect(find.byType(DraggableScrollableSheet), findsNothing);
       expect(router.routeInformationProvider.value.uri.path, '/playlists');
-      expect(find.text('Night playlist'), findsOneWidget);
-      expect(find.byTooltip('返回上一页'), findsOneWidget);
+      expect(find.text('夜晚循环'), findsOneWidget);
+      expect(find.byTooltip('返回上一页'), findsNothing);
 
-      await tester.tap(find.text('Night playlist'));
+      await tester.tap(find.text('夜晚循环'));
       await _pumpUi(tester);
       expect(
         router.routeInformationProvider.value.uri.toString(),
@@ -90,12 +159,9 @@ void main() {
         find.byType(PlaylistDetailPage),
       );
       expect(detail.returnLocation, '/playlists/night?from=manage');
-      expect(find.byTooltip('返回上一页'), findsOneWidget);
+      expect(find.byTooltip('返回上一页'), findsNothing);
 
-      openPlayer(
-        tester.element(find.byType(PlaylistDetailPage)),
-        returnLocation: detail.returnLocation!,
-      );
+      await tester.tap(find.byTooltip('播放页'));
       await _pumpUi(tester);
       expect(find.byType(PlayerPage), findsOneWidget);
       expect(router.routeInformationProvider.value.uri.path, '/player');
@@ -124,7 +190,7 @@ void main() {
       expect(await tester.binding.handlePopRoute(), isTrue);
       await _pumpUi(tester);
       expect(router.routeInformationProvider.value.uri.path, '/playlists');
-      expect(find.text('Night playlist'), findsOneWidget);
+      expect(find.text('夜晚循环'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
   );
@@ -136,13 +202,13 @@ void main() {
       final prefs = await _prefsWith([
         _playlist(
           id: 'night',
-          name: 'Night playlist',
+          name: '夜晚循环',
           tracks: const [
             PlaylistTrack(
               musicId: 'track-1',
-              name: 'Nocturne',
-              singer: 'Jay Chou',
-              albumName: 'November album',
+              name: '夜曲',
+              singer: '周杰伦',
+              albumName: '十一月的萧邦',
               sourceCode: 'wy',
               qualityCode: 'flac',
             ),
@@ -163,7 +229,6 @@ void main() {
             playerAudioHandlerProvider.overrideWithValue(audioHandler),
           ],
           child: MaterialApp.router(
-            builder: buildPrismTestEnvironment,
             debugShowCheckedModeBanner: false,
             theme: ThemeData(
               useMaterial3: true,
@@ -176,16 +241,16 @@ void main() {
       await _pumpUi(tester);
 
       // 首页标题下拉：列出本地歌曲与歌单。
-      await tester.tap(find.byKey(const ValueKey('library-view-menu-anchor')));
+      await tester.tap(find.byIcon(Icons.arrow_drop_down_rounded));
       await _pumpUi(tester);
       expect(find.text('本地歌曲'), findsOneWidget);
-      expect(find.text('Night playlist'), findsOneWidget);
+      expect(find.text('夜晚循环'), findsOneWidget);
 
       // 选歌单只在 Songs 页原地换入歌单曲目。
-      await tester.tap(find.text('Night playlist'));
+      await tester.tap(find.text('夜晚循环'));
       await _pumpUi(tester);
       expect(router.routeInformationProvider.value.uri.path, '/songs');
-      expect(find.text('Nocturne'), findsOneWidget);
+      expect(find.text('夜曲'), findsOneWidget);
       expect(find.text('1 首歌单歌曲'), findsOneWidget);
       expect(
         find.byKey(
@@ -199,12 +264,14 @@ void main() {
       );
       expect(find.byKey(const ValueKey('songs-sort-button')), findsNothing);
 
-      expect(find.byTooltip('搜索歌单歌曲'), findsOneWidget);
-      expect(find.byTooltip('搜索本地歌曲'), findsNothing);
-      await tester.tap(find.byTooltip('搜索歌单歌曲'));
+      await tester.tap(find.byTooltip('更多歌曲操作'));
       await _pumpUi(tester);
-      expect(router.routeInformationProvider.value.uri.path, '/songs');
-      expect(find.byKey(const ValueKey('header-search-field')), findsOneWidget);
+      expect(find.text('搜索歌单歌曲'), findsOneWidget);
+      expect(find.text('搜索本地歌曲'), findsNothing);
+      await tester.tap(find.text('搜索歌单歌曲'));
+      await _pumpUi(tester);
+      expect(router.routeInformationProvider.value.uri.path, '/songs/search');
+      expect(find.text('搜索歌单歌曲'), findsOneWidget);
       expect(await tester.binding.handlePopRoute(), isTrue);
       await _pumpUi(tester);
       expect(router.routeInformationProvider.value.uri.path, '/songs');
@@ -218,7 +285,7 @@ void main() {
       await _pumpUi(tester);
 
       // 切换到歌单后，右侧按钮仍保持默认的歌单管理入口。
-      await tester.tap(find.byTooltip('歌单管理'));
+      await tester.tap(find.byTooltip('歌单'));
       await _pumpUi(tester);
       expect(router.routeInformationProvider.value.uri.path, '/songs');
       expect(find.text('歌单管理'), findsOneWidget);
@@ -265,7 +332,6 @@ void main() {
           musicApiProvider.overrideWithValue(api),
         ],
         child: MaterialApp.router(
-          builder: buildPrismTestEnvironment,
           theme: ThemeData(
             useMaterial3: true,
             colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
@@ -276,7 +342,7 @@ void main() {
     );
     await _pumpUi(tester);
 
-    await tester.tap(find.byKey(const ValueKey('library-view-menu-anchor')));
+    await tester.tap(find.byIcon(Icons.arrow_drop_down_rounded));
     await _pumpUi(tester);
     await tester.tap(find.text('在线收藏'));
     await _pumpUi(tester);
@@ -288,7 +354,7 @@ void main() {
     expect(api.inputs, ['3778678']);
     expect(find.text('新歌曲'), findsOneWidget);
 
-    await tester.tap(find.byKey(const ValueKey('library-view-menu-anchor')));
+    await tester.tap(find.byIcon(Icons.arrow_drop_down_rounded));
     await _pumpUi(tester);
     await tester.tap(find.text('本地新建'));
     await _pumpUi(tester);
@@ -327,7 +393,6 @@ void main() {
             playerAudioHandlerProvider.overrideWithValue(audioHandler),
           ],
           child: MaterialApp.router(
-            builder: buildPrismTestEnvironment,
             debugShowCheckedModeBanner: false,
             theme: ThemeData(
               useMaterial3: true,
@@ -342,26 +407,38 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('library-view-menu-anchor')));
       await _pumpUi(tester);
 
-      final panel = find.byType(prism.PopupMenu);
+      final panel = find.byKey(const ValueKey('library-view-menu-panel'));
+      final scroll = find.byKey(const ValueKey('library-view-menu-scroll'));
+      final localOption = find.byKey(
+        const ValueKey('library-view-menu-option-local'),
+      );
+      final longOption = find.byKey(
+        const ValueKey('library-view-menu-option-playlist-list-0'),
+      );
+      final lastOption = find.byKey(
+        const ValueKey('library-view-menu-option-playlist-list-11'),
+      );
       expect(panel, findsOneWidget);
-      expect(tester.getSize(panel).width, lessThanOrEqualTo(280));
-      final menu = tester.widget<prism.PopupMenu>(panel);
-      expect(menu.items, hasLength(13));
-      expect(menu.items.first.label, '本地歌曲');
-      expect(menu.items.first.checked, isTrue);
-      final longLabel = tester.widget<Text>(find.text(longName));
+      expect(scroll, findsOneWidget);
+      expect(tester.getSize(panel).height, closeTo(300, 0.01));
+      expect(tester.getSize(panel).width, lessThanOrEqualTo(240.01));
+      expect(
+        find.descendant(
+          of: localOption,
+          matching: find.byIcon(Icons.radio_button_checked_rounded),
+        ),
+        findsOneWidget,
+      );
+      final longLabel = tester.widget<Text>(
+        find.descendant(of: longOption, matching: find.text(longName)),
+      );
       expect(longLabel.maxLines, 1);
       expect(longLabel.overflow, TextOverflow.ellipsis);
-      final scroll = find
-          .descendant(of: panel, matching: find.byType(Scrollable))
-          .last;
-      await tester.scrollUntilVisible(
-        find.text('歌单 11'),
-        160,
-        scrollable: scroll,
-      );
+
+      final initialLastTop = tester.getTopLeft(lastOption).dy;
+      await tester.drag(scroll, const Offset(0, -220));
       await _pumpUi(tester);
-      expect(find.text('歌单 11').hitTestable(), findsOneWidget);
+      expect(tester.getTopLeft(lastOption).dy, lessThan(initialLastTop));
 
       expect(await tester.binding.handlePopRoute(), isTrue);
       await _pumpUi(tester);
@@ -390,7 +467,6 @@ void main() {
           playerControllerProvider.overrideWith(_TestPlayerController.new),
         ],
         child: MaterialApp.router(
-          builder: buildPrismTestEnvironment,
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
             useMaterial3: true,
@@ -415,7 +491,8 @@ void main() {
     await _pumpUi(tester);
 
     expect(find.text('播放列表'), findsOneWidget);
-    expect(find.byType(prism.SheetDragHandle), findsOneWidget);
+    final bottomSheet = tester.widget<BottomSheet>(find.byType(BottomSheet));
+    expect(bottomSheet.showDragHandle, isFalse);
 
     final playingBars = find.byKey(const ValueKey('playing-bars'));
     expect(playingBars, findsOneWidget);
@@ -466,7 +543,6 @@ void main() {
           playerControllerProvider.overrideWith(_TestPlayerController.new),
         ],
         child: MaterialApp.router(
-          builder: buildPrismTestEnvironment,
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
             useMaterial3: true,
@@ -522,7 +598,6 @@ void main() {
           playerControllerProvider.overrideWith(_TestPlayerController.new),
         ],
         child: MaterialApp.router(
-          builder: buildPrismTestEnvironment,
           debugShowCheckedModeBanner: false,
           themeMode: ThemeMode.dark,
           theme: ThemeData(useMaterial3: true, colorScheme: darkScheme),
@@ -563,7 +638,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('floating dock stays fixed and usable while the page scrolls', (
+  testWidgets('shell toolbar follows a drag continuously before settling', (
     tester,
   ) async {
     await _usePhoneViewport(tester);
@@ -582,7 +657,6 @@ void main() {
           playerAudioHandlerProvider.overrideWithValue(audioHandler),
         ],
         child: MaterialApp.router(
-          builder: buildPrismTestEnvironment,
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
             useMaterial3: true,
@@ -594,18 +668,33 @@ void main() {
     );
     await _pumpUi(tester);
 
-    final dock = find.byKey(const ValueKey('floating-navigation-dock'));
-    final initialRect = tester.getRect(dock);
-    await tester.drag(
-      find.byType(CustomScrollView).first,
-      const Offset(0, -120),
-    );
+    final initialTop = tester.getTopLeft(find.byTooltip('发现')).dy;
+    final gesture = await tester.startGesture(const Offset(195, 380));
+    await gesture.moveBy(const Offset(0, -34));
+    await tester.pump();
+
+    final draggedTop = tester.getTopLeft(find.byTooltip('发现')).dy;
+    expect(draggedTop, greaterThan(initialTop));
+    expect(draggedTop, lessThan(initialTop + 68));
+
+    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 80));
+    final settlingTop = tester.getTopLeft(find.byTooltip('发现')).dy;
+    expect(settlingTop, greaterThanOrEqualTo(draggedTop));
     await _pumpUi(tester);
-    expect(tester.getRect(dock), initialRect);
-    expect(floatingShellTab('设置').hitTestable(), findsOneWidget);
-    await tester.tap(floatingShellTab('设置'));
+    final hiddenTop = tester.getTopLeft(find.byTooltip('发现')).dy;
+    expect(hiddenTop, greaterThan(initialTop));
+
+    final reverseGesture = await tester.startGesture(const Offset(195, 380));
+    await reverseGesture.moveBy(const Offset(0, 34));
+    await tester.pump();
+    final restoredPartiallyTop = tester.getTopLeft(find.byTooltip('发现')).dy;
+    expect(restoredPartiallyTop, lessThan(hiddenTop));
+    expect(restoredPartiallyTop, greaterThan(initialTop));
+
+    await reverseGesture.up();
     await _pumpUi(tester);
-    expect(router.routeInformationProvider.value.uri.path, '/settings');
+    expect(tester.getTopLeft(find.byTooltip('发现')).dy, lessThan(hiddenTop));
     expect(tester.takeException(), isNull);
   });
 
@@ -636,9 +725,7 @@ void main() {
             data: MediaQuery.of(
               context,
             ).copyWith(textScaler: const TextScaler.linear(1.6)),
-            child: Builder(
-              builder: (context) => buildPrismTestEnvironment(context, child),
-            ),
+            child: child!,
           ),
           routerConfig: router,
         ),
@@ -646,14 +733,122 @@ void main() {
     );
     await _pumpUi(tester);
 
-    final dock = tester.getRect(
-      find.byKey(const ValueKey('floating-navigation-dock')),
-    );
-    expect(dock.width, lessThanOrEqualTo(320));
-    expect(dock.height, greaterThanOrEqualTo(48));
-    for (final label in ['发现', '歌曲', '设置']) {
-      expect(floatingShellTab(label).hitTestable(), findsOneWidget);
+    for (final tooltip in ['发现', '歌曲', '播放页', '设置']) {
+      final size = tester.getSize(find.byTooltip(tooltip));
+      expect(size.width, greaterThanOrEqualTo(48));
+      expect(size.height, greaterThanOrEqualTo(48));
     }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a short toolbar pull tracks the finger then settles back', (
+    tester,
+  ) async {
+    await _usePhoneViewport(tester);
+    final prefs = await _prefsWith(const []);
+    final audioHandler = PlayerAudioHandler();
+    final router = createAppRouter(initialLocation: '/songs');
+    addTearDown(() {
+      router.dispose();
+      unawaited(audioHandler.disposeHandler());
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          playerAudioHandlerProvider.overrideWithValue(audioHandler),
+        ],
+        child: MaterialApp.router(
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+          ),
+          routerConfig: router,
+        ),
+      ),
+    );
+    await _pumpUi(tester);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byTooltip('发现')),
+    );
+    // Pointer-down mounts the player layer before the drag clears the slop.
+    await tester.pump();
+    // The first move only crosses the touch slop — DragStartBehavior.start
+    // absorbs it — so the tracked distance comes from the moves after it.
+    await gesture.moveBy(const Offset(0, -20));
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, -30));
+    await tester.pump();
+
+    final dragged = tester.widget<PlayerPage>(find.byType(PlayerPage));
+    expect(dragged.progress.value, greaterThan(0));
+    expect(dragged.progress.value, lessThan(1));
+    expect(router.routeInformationProvider.value.uri.path, '/songs');
+
+    await gesture.up();
+    await _pumpUi(tester);
+
+    // A 30dp drag is below the 56dp threshold; the player returns to the capsule.
+    final settled = tester.widget<PlayerPage>(find.byType(PlayerPage));
+    expect(settled.progress.value, 0);
+    expect(router.routeInformationProvider.value.uri.path, '/songs');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a long toolbar pull commits and remembers the return route', (
+    tester,
+  ) async {
+    await _usePhoneViewport(tester);
+    final prefs = await _prefsWith(const []);
+    final audioHandler = PlayerAudioHandler();
+    final router = createAppRouter(initialLocation: '/settings');
+    addTearDown(() {
+      router.dispose();
+      unawaited(audioHandler.disposeHandler());
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          playerAudioHandlerProvider.overrideWithValue(audioHandler),
+        ],
+        child: MaterialApp.router(
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+          ),
+          routerConfig: router,
+        ),
+      ),
+    );
+    await _pumpUi(tester);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byTooltip('发现')),
+    );
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, -20));
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, -500));
+    await tester.pump();
+    await gesture.up();
+    await _pumpUi(tester);
+
+    expect(router.routeInformationProvider.value.uri.path, '/player');
+    final page = tester.widget<PlayerPage>(find.byType(PlayerPage));
+    expect(page.active, isTrue);
+    // The pull carries the origin route through, so leaving the player goes
+    // back to settings rather than the '/songs' default.
+    expect(page.returnLocation, '/settings');
+    expect(
+      tester.widget<PlayerPage>(find.byType(PlayerPage)).progress.value,
+      1,
+    );
     expect(tester.takeException(), isNull);
   });
 }
@@ -831,4 +1026,36 @@ class _PlaylistRefreshMusicApi extends MusicApi {
     inputs.add(input);
     return result;
   }
+}
+
+class _EdgeBackMusicApi extends _PlaylistRefreshMusicApi {
+  _EdgeBackMusicApi()
+    : super(
+        const PlaylistInfo(
+          id: 'online',
+          name: '在线歌单',
+          source: MusicSource.wy,
+          tracks: [],
+        ),
+      );
+
+  @override
+  Future<List<PlaylistSummary>> featuredPlaylists({
+    required MusicSource source,
+    int page = 1,
+    int limit = 20,
+    String? categoryId,
+  }) async => [];
+
+  @override
+  Future<List<LeaderboardSummary>> getLeaderboards(MusicSource source) async =>
+      [];
+
+  @override
+  Future<PlaylistInfo> getLeaderboard({
+    required MusicSource source,
+    required String boardId,
+    int? maxTracks,
+  }) async =>
+      PlaylistInfo(id: boardId, name: '榜单', source: source, tracks: const []);
 }

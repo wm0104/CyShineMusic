@@ -15,14 +15,12 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29"/>
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"
-        tools:node="remove"/>
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage"/>
 
     <application
         android:label="${appLabel}"
-        android:name=".CyShineApplication"
+        android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true">
@@ -42,14 +40,6 @@
             <meta-data
                 android:name="flutter_deeplinking_enabled"
                 android:value="false" />
-            <!-- Flutter needs a stable activity in both source and APK manifests.
-                 The private scheme excludes this filter from desktop launcher
-                 queries; Flutter starts MainActivity by explicit component. -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-                <data android:scheme="${applicationId}.flutter" />
-            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -151,9 +141,6 @@
             tools:ignore="Instantiatable">
             <intent-filter>
                 <action android:name="android.media.browse.MediaBrowserService" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="com.vivo.musicwidgetmix.support.service" />
             </intent-filter>
         </service>
         <receiver

@@ -1,16 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../core/services/saf_storage.dart';
-import '../../core/services/local_audio_source.dart';
 import '../../core/models/enums.dart';
 import '../../core/services/embedded_artwork_cache.dart';
-import '../../core/services/embedded_audio_tags.dart';
+import '../../core/services/tagger.dart';
 import '../../core/storage/settings_store.dart';
 import '../../core/ui/app_scrollbar.dart';
 import '../../core/ui/app_toast.dart';
@@ -19,7 +18,6 @@ import '../../theme/app_motion.dart';
 import '../downloads/download_history_store.dart';
 import '../music_sources/music_source_action_guard.dart';
 import '../player/player_controller.dart';
-import '../search/widgets/quality_picker_sheet.dart';
 import '../playlists/playlist_browser_sheet.dart';
 import '../playlists/playlist_models.dart';
 import '../playlists/online_playlist_updater.dart';
@@ -27,24 +25,24 @@ import '../playlists/resolved_playlist_track.dart';
 import '../playlists/playlist_store.dart';
 import '../shell/shell_toolbar_visibility.dart';
 import '../shell/shell_bottom_area.dart';
-import '../shell/widgets/scrolling_page_header.dart';
+import '../shell/shell_navigation.dart';
 import 'local_song_scan_cache.dart';
 import 'scanned_song_file.dart';
 import 'song_search.dart';
 import 'songs_toolbar_state.dart';
-import 'songs_playback_location.dart';
 import 'widgets/song_row.dart';
 import 'widgets/songs_batch_action_bar.dart';
 import 'widgets/songs_placeholders.dart';
 import 'widgets/songs_sort_sheet.dart';
 
+const _songTagReadTimeout = Duration(seconds: 8);
+const _songScanCacheTtl = Duration(seconds: 12);
 const _songSortModeKey = 'songs_sort_mode_v1';
 const _songSortAscendingKey = 'songs_sort_ascending_v1';
 
 class SongsPage extends ConsumerStatefulWidget {
   const SongsPage({super.key, this.searchMode = false});
 
-  /// Initial state for restored /songs/search routes. Header searches open in place.
   final bool searchMode;
 
   @override
@@ -56,30 +54,32 @@ class _SongsPageState extends ConsumerState<SongsPage> {
   bool _ascending = true;
   bool _batchMode = false;
   String _searchQuery = '';
-  bool _searchMode = false;
-  double? _preSearchScrollOffset;
   final Object _toolbarOwner = Object();
   final ScrollController _scrollController = ScrollController();
-  final GlobalKey _songsListKey = GlobalKey(debugLabel: 'songs-list');
-  int _locateGeneration = 0;
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode(debugLabel: 'songs-search');
   bool? _toolbarVisibilityBeforeSearchFocus;
+  bool _tabActive = false;
   List<DownloadHistoryEntry> _visibleSongs = const [];
   Map<String, PlaylistTrack> _visiblePlaylistTracks = const {};
   final Set<String> _selectedIds = <String>{};
   final Set<String> _updatingPlaylistIds = <String>{};
+  final Map<String, EmbeddedAudioTags?> _tagCache = {};
+  final Map<String, DateTime> _tagModifiedAt = {};
+  final Set<String> _tagLoadingKeys = <String>{};
   List<ScannedSongFile>? _scannedFiles;
   String? _scanError;
-  ProviderSubscription<List<String>>? _localMusicDirSubscription;
+  int _scanGeneration = 0;
+  Timer? _tagFlushTimer;
+  ProviderSubscription<String>? _localMusicDirSubscription;
   late final StateController<SongsToolbarState> _toolbarStateController;
   late final StateController<bool> _shellToolbarController;
   late final LocalSongScanCache _scanCache;
+  late final Future<void> _firstRouteTransitionSettled;
 
   @override
   void initState() {
     super.initState();
-    _searchMode = widget.searchMode;
     final prefs = ref.read(sharedPreferencesProvider);
     _sortMode = SongSortMode.fromCode(prefs.getString(_songSortModeKey));
     _ascending = prefs.getBool(_songSortAscendingKey) ?? true;
@@ -88,15 +88,16 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     _scanCache = ref.read(localSongScanCacheProvider);
     _seedFromScanCache();
     _scanCache.addListener(_handleScanCacheChanged);
-    if (_searchMode) _enableSearchFocusHandling();
+    if (widget.searchMode) _enableSearchFocusHandling();
+    _firstRouteTransitionSettled = _waitForFirstRouteTransition();
     _localMusicDirSubscription = ref.listenManual(
-      settingsProvider.select((settings) => settings.localMusicDirs),
+      settingsProvider.select((settings) => settings.localMusicDir),
       (previous, next) {
         if (previous == null || previous == next) return;
-        // Keep the currently rendered library in place while the new folders are
+        // Keep the currently rendered library in place while the new folder is
         // scanned, then swap the result in one frame. This avoids a loading
         // flash when the local music folder changes from Settings.
-        unawaited(_scanCache.ensureScan(directories: next));
+        unawaited(_scanLocalMusicFolder());
       },
     );
     unawaited(_initializeScan());
@@ -107,41 +108,65 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     // would clamp PageStorage's saved scroll offset back to zero.
     final snapshot = _scanCache.snapshot;
     if (snapshot == null ||
-        !snapshot.matchesDirectories(
-          ref.read(settingsProvider).localMusicDirs,
-        )) {
+        snapshot.directory != ref.read(settingsProvider).localMusicDir) {
       return;
     }
     _scannedFiles = [
       for (final file in snapshot.files) ScannedSongFile.fromSnapshot(file),
     ];
     _scanError = snapshot.error;
+    _tagCache.addAll(songTagCacheSnapshot);
+    _tagModifiedAt.addAll(songTagModifiedAtSnapshot);
   }
 
   @override
   void didUpdateWidget(covariant SongsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.searchMode == widget.searchMode) return;
-    _searchMode = widget.searchMode;
-    if (_searchMode) {
+    if (widget.searchMode) {
       _enableSearchFocusHandling();
     } else {
       _disableSearchFocusHandling();
     }
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final active = TickerMode.valuesOf(context).enabled;
+    final resumes = active && !_tabActive;
+    _tabActive = active;
+    if (!resumes) return;
+    final files = _scannedFiles;
+    if (files != null && files.isNotEmpty) {
+      unawaited(_resumeCachedHydration(files, _scanGeneration));
+    }
+  }
+
   Future<void> _initializeScan() async {
-    await _scanCache.ensureScan(
-      directories: ref.read(settingsProvider).localMusicDirs,
-    );
-    if (mounted) _handleScanCacheChanged();
+    await _scanCache.ensureLoaded();
+    if (!mounted) return;
+
+    _handleScanCacheChanged();
+    final snapshot = _scanCache.snapshot;
+    final currentDirectory = ref.read(settingsProvider).localMusicDir;
+    final shouldRefresh =
+        snapshot == null ||
+        snapshot.directory != currentDirectory ||
+        snapshot.error != null ||
+        DateTime.now().difference(snapshot.cachedAt) >= _songScanCacheTtl;
+    if (shouldRefresh) {
+      unawaited(_scanCache.refresh(directory: currentDirectory));
+    }
   }
 
   @override
   void dispose() {
+    _scanGeneration++;
     _disableSearchFocusHandling(deferRestore: true);
     _scanCache.removeListener(_handleScanCacheChanged);
     _localMusicDirSubscription?.close();
+    _tagFlushTimer?.cancel();
     _scrollController.dispose();
     _searchController.dispose();
     _searchFocusNode.dispose();
@@ -159,7 +184,25 @@ class _SongsPageState extends ConsumerState<SongsPage> {
 
   void _enableSearchFocusHandling() {
     _searchFocusNode.addListener(_handleSearchFocusChanged);
-    // The shared header requests focus after its opening animation completes.
+    if (!ref.read(songsSearchAutoFocusProvider)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted ||
+            !widget.searchMode ||
+            !TickerMode.valuesOf(context).enabled) {
+          return;
+        }
+        final toolbar = ref.read(shellToolbarVisibleProvider.notifier);
+        if (toolbar.mounted) toolbar.state = true;
+      });
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          widget.searchMode &&
+          TickerMode.valuesOf(context).enabled) {
+        _searchFocusNode.requestFocus();
+      }
+    });
   }
 
   void _disableSearchFocusHandling({bool deferRestore = false}) {
@@ -168,7 +211,7 @@ class _SongsPageState extends ConsumerState<SongsPage> {
   }
 
   void _handleSearchFocusChanged() {
-    if (!mounted || !_searchMode) return;
+    if (!mounted || !widget.searchMode) return;
     if (!_searchFocusNode.hasFocus) {
       _restoreToolbarAfterSearchFocus();
       return;
@@ -198,25 +241,81 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     }
   }
 
+  Future<void> _waitForFirstRouteTransition() async {
+    await WidgetsBinding.instance.endOfFrame;
+    final reduceMotion = WidgetsBinding
+        .instance
+        .platformDispatcher
+        .accessibilityFeatures
+        .disableAnimations;
+    if (!reduceMotion) await Future<void>.delayed(AppMotion.long);
+  }
+
+  bool _isActiveScan(int generation) {
+    if (!mounted || generation != _scanGeneration) return false;
+    return _isSongsRouteActive();
+  }
+
+  bool _isSongsRouteActive() {
+    if (!mounted || !_tabActive) return false;
+    final path = GoRouter.of(context).routeInformationProvider.value.uri.path;
+    // The player now covers this live route rather than disposing it. Keep
+    // metadata hydration alive so returning cannot strand a half-loaded list.
+    return path == '/player' ||
+        path == (widget.searchMode ? '/songs/search' : '/songs');
+  }
+
+  Future<void> _resumeCachedHydration(
+    List<ScannedSongFile> files,
+    int generation,
+  ) async {
+    await _firstRouteTransitionSettled;
+    if (!_isActiveScan(generation)) return;
+    await _hydrateScannedTags(files, generation);
+  }
+
   void _handleScanCacheChanged() {
     if (!mounted) return;
     final snapshot = _scanCache.snapshot;
     if (snapshot == null) return;
-    final currentDirectories = ref.read(settingsProvider).localMusicDirs;
-    if (!snapshot.matchesDirectories(currentDirectories)) return;
+    final currentDirectory = ref.read(settingsProvider).localMusicDir;
+    if (snapshot.directory != currentDirectory) return;
 
     final files = [
       for (final file in snapshot.files) ScannedSongFile.fromSnapshot(file),
     ];
+    final previousFiles = _scannedFiles ?? const <ScannedSongFile>[];
+    final nextFilesByKey = {
+      for (final file in files) _pathKey(file.path): file,
+    };
+    for (final previous in previousFiles) {
+      final next = nextFilesByKey[_pathKey(previous.path)];
+      if (next == null || next.modifiedAt != previous.modifiedAt) {
+        EmbeddedArtworkCache.evictPath(previous.path);
+      }
+    }
+
+    final generation = ++_scanGeneration;
     setState(() {
       _scannedFiles = files;
       _scanError = snapshot.error;
+      final currentKeys = nextFilesByKey.keys.toSet();
+      _tagCache.removeWhere((key, _) => !currentKeys.contains(key));
+      _tagModifiedAt.removeWhere((key, _) => !currentKeys.contains(key));
+      _tagLoadingKeys.clear();
+      _selectedIds.clear();
+      _batchMode = false;
+      _tagCache.addAll(songTagCacheSnapshot);
+      _tagModifiedAt.addAll(songTagModifiedAtSnapshot);
     });
+    if (snapshot.error == null && files.isNotEmpty) {
+      unawaited(_resumeCachedHydration(files, generation));
+    }
   }
 
   Future<void> _scanLocalMusicFolder() {
     return _scanCache.refresh(
-      directories: ref.read(settingsProvider).localMusicDirs,
+      directory: ref.read(settingsProvider).localMusicDir,
     );
   }
 
@@ -234,7 +333,7 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     final seen = <String>{};
     for (final file in scannedFiles) {
       final key = _pathKey(file.path);
-      final tags = file.tags;
+      final tags = _tagCache[key];
       final historyEntry = historyByPath[key];
       final entry = historyEntry == null
           ? _syntheticEntryFor(file, tags)
@@ -250,11 +349,6 @@ class _SongsPageState extends ConsumerState<SongsPage> {
           return a.singer.toLowerCase().compareTo(b.singer.toLowerCase());
         case SongSortMode.added:
           return a.createdAt.compareTo(b.createdAt);
-        case SongSortMode.modified:
-          return (a.modifiedAt ?? DateTime.fromMillisecondsSinceEpoch(0))
-              .compareTo(
-                b.modifiedAt ?? DateTime.fromMillisecondsSinceEpoch(0),
-              );
       }
     }
 
@@ -275,11 +369,18 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     final tracksByEntryId = <String, PlaylistTrack>{};
     for (final track in playlist.tracks) {
       final localEntry = localIndex.resolve(track, playlist.id);
+      final entryId = 'playlist:${playlist.id}:${track.identityKey}';
+      final queueEntry = track.spotify != null && localEntry != null
+          ? DownloadHistoryEntry.fromJson({
+              ...localEntry.toJson(),
+              'id': entryId,
+              'preservePlaylistPosition': true,
+            })
+          : localEntry ?? track.toQueueEntry(playlistId: playlist.id);
       final entry =
-          localEntry ??
-          track.toQueueEntry(playlistId: playlist.id) ??
+          queueEntry ??
           DownloadHistoryEntry(
-            id: 'playlist:${playlist.id}:${track.identityKey}',
+            id: entryId,
             musicId: track.musicId,
             name: track.name,
             singer: track.singer,
@@ -319,7 +420,6 @@ class _SongsPageState extends ConsumerState<SongsPage> {
       qualityCode: entry.qualityCode,
       status: entry.status,
       createdAt: file.createdAt,
-      modifiedAt: file.modifiedAt,
       savedPath: file.path,
       message: entry.message,
       picUrl: entry.picUrl,
@@ -333,8 +433,8 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     EmbeddedAudioTags? tags,
   ) {
     return DownloadHistoryEntry(
-      id: 'file:${file.identityPath}',
-      musicId: file.identityPath,
+      id: 'file:${file.path}',
+      musicId: file.path,
       name: _preferTag(tags?.title, file.title),
       singer: _preferTag(tags?.artist, file.artist),
       albumName: _preferTag(tags?.album, ''),
@@ -342,22 +442,70 @@ class _SongsPageState extends ConsumerState<SongsPage> {
       qualityCode: file.extension.toLowerCase(),
       status: DownloadHistoryStatus.completed,
       createdAt: file.createdAt,
-      modifiedAt: file.modifiedAt,
       savedPath: file.path,
       sizeBytes: file.sizeBytes,
     );
   }
 
+  Future<void> _hydrateScannedTags(
+    List<ScannedSongFile> files,
+    int generation,
+  ) async {
+    for (final file in files) {
+      if (!_isActiveScan(generation)) return;
+      final key = _pathKey(file.path);
+      if (_tagCache.containsKey(key) &&
+          _tagModifiedAt[key] == file.modifiedAt) {
+        continue;
+      }
+      if (!_tagLoadingKeys.add(key)) continue;
+      EmbeddedAudioTags? tags;
+      try {
+        tags = await Tagger.readEmbeddedTags(
+          file.path,
+          includeLyrics: false,
+          includeArtwork: false,
+        ).timeout(_songTagReadTimeout);
+      } catch (_) {
+        tags = null;
+      }
+      if (!_isActiveScan(generation)) {
+        _tagLoadingKeys.remove(key);
+        return;
+      }
+      _tagLoadingKeys.remove(key);
+      if (tags == null) {
+        _tagCache.remove(key);
+        _tagModifiedAt.remove(key);
+        songTagCacheSnapshot.remove(key);
+        songTagModifiedAtSnapshot.remove(key);
+      } else {
+        _tagCache[key] = tags;
+        _tagModifiedAt[key] = file.modifiedAt;
+        songTagCacheSnapshot[key] = tags;
+        songTagModifiedAtSnapshot[key] = file.modifiedAt;
+      }
+      // One setState per file means N full list rebuild+sorts while a large
+      // library hydrates; coalesce text metadata into small batches.
+      _scheduleTagFlush();
+    }
+  }
+
+  void _scheduleTagFlush() {
+    _tagFlushTimer ??= Timer(const Duration(milliseconds: 90), () {
+      _tagFlushTimer = null;
+      if (_isSongsRouteActive()) setState(() {});
+    });
+  }
+
   Future<void> _play(
     DownloadHistoryEntry entry,
-    List<DownloadHistoryEntry> queue, {
-    bool replaceQueue = true,
-  }) async {
+    List<DownloadHistoryEntry> queue,
+  ) async {
     final path = entry.savedPath;
     final hasLocalFile =
-        path != null && path.isNotEmpty && isLocalAudioSourceAvailable(path);
-    final playlistId = ref.read(songsLibraryPlaylistIdProvider);
-    final playlistMode = playlistId != null;
+        path != null && path.isNotEmpty && File(path).existsSync();
+    final playlistMode = ref.read(songsLibraryPlaylistIdProvider) != null;
     if (!hasLocalFile && (!playlistMode || entry.musicInfo == null)) {
       showAppToast(
         context,
@@ -371,122 +519,20 @@ class _SongsPageState extends ConsumerState<SongsPage> {
       entry,
     );
     if (!available || !mounted) return;
-    if (_searchMode) {
+    if (widget.searchMode) {
       ref.read(songsSearchAutoFocusProvider.notifier).state = false;
       _searchFocusNode.unfocus();
       _restoreToolbarAfterSearchFocus();
     }
+    openPlayer(
+      context,
+      returnLocation: widget.searchMode ? '/songs/search' : '/songs',
+    );
     final player = ref.read(playerControllerProvider.notifier);
-    if (!replaceQueue) {
-      await player.playSingleQueueEntry(entry);
-    } else if (playlistMode) {
-      await player.playFromPlaylistQueue(entry, queue, playlistId: playlistId);
+    if (playlistMode) {
+      await player.playFromPlaylistQueue(entry, queue);
     } else {
       await player.playFromHistoryQueue(entry, queue);
-    }
-  }
-
-  Future<void> _locateCurrentSong() async {
-    final generation = ++_locateGeneration;
-    final initialPlayer = ref.read(playerControllerProvider);
-    final trackId = initialPlayer.track?.id;
-    if (trackId == null) return;
-    final destination = findPlayingLibrary(
-      player: initialPlayer,
-      sourcePlaylistId: ref
-          .read(playerControllerProvider.notifier)
-          .queuePlaylistId,
-      selectedPlaylistId: ref.read(songsLibraryPlaylistIdProvider),
-      playlists: ref.read(localPlaylistsProvider),
-      localSongs: _songs(ref.read(downloadHistoryProvider)),
-    );
-    if (destination == null) {
-      showAppToast(context, '当前歌曲不在本地歌曲或已收藏歌单中');
-      return;
-    }
-    final playlistId = destination.playlistId;
-    _selectLibraryPlaylist(playlistId);
-    if (_searchMode) _clearSearch();
-    // Selecting a library replaces the keyed list. Wait until its rows and
-    // scroll dimensions are ready before finding the playing song.
-    await WidgetsBinding.instance.endOfFrame;
-    if (!mounted || generation != _locateGeneration) return;
-    final duration = MediaQuery.disableAnimationsOf(context)
-        ? Duration.zero
-        : AppMotion.medium;
-
-    // SliverList only builds nearby rows. Use a measured row to reach the
-    // target's neighborhood, then align the actual target after layout.
-    for (var attempt = 0; attempt < 3; attempt++) {
-      if (!mounted || generation != _locateGeneration) return;
-      final player = ref.read(playerControllerProvider);
-      if (player.track?.id != trackId ||
-          ref.read(songsLibraryPlaylistIdProvider) != playlistId ||
-          !_scrollController.hasClients) {
-        return;
-      }
-      final queueEntry =
-          player.queueIndex >= 0 && player.queueIndex < player.queue.length
-          ? player.queue[player.queueIndex]
-          : null;
-      final index = _visibleSongs.indexWhere(
-        (entry) => matchesPlayingEntry(
-          entry,
-          queueEntry,
-          player.track?.localPath,
-          trackId,
-        ),
-      );
-      if (index < 0) {
-        showAppToast(context, '当前歌曲不在这个列表中');
-        return;
-      }
-      final sliver = _songsListKey.currentContext?.findRenderObject();
-      if (sliver is! RenderSliverMultiBoxAdaptor) return;
-      RenderBox? anchor;
-      RenderBox? target;
-      var child = sliver.firstChild;
-      while (child != null) {
-        final data = child.parentData! as SliverMultiBoxAdaptorParentData;
-        // The separated list alternates song rows and 1dp dividers.
-        if (data.index!.isEven) anchor ??= child;
-        if (data.index == index * 2) {
-          target = child;
-          break;
-        }
-        child = sliver.childAfter(child);
-      }
-      final position = _scrollController.position;
-      if (target != null) {
-        await position.ensureVisible(
-          target,
-          alignment: 0.45,
-          duration: duration,
-          curve: AppMotion.emphasized,
-        );
-        return;
-      }
-      if (anchor == null) return;
-      final data = anchor.parentData! as SliverMultiBoxAdaptorParentData;
-      final anchorOffset = RenderAbstractViewport.of(
-        anchor,
-      ).getOffsetToReveal(anchor, 0.45).offset;
-      final offset =
-          (anchorOffset + (index - data.index! ~/ 2) * (anchor.size.height + 1))
-              .clamp(position.minScrollExtent, position.maxScrollExtent)
-              .toDouble();
-      // Skip a long scroll animation when the target is far away.
-      if (duration == Duration.zero ||
-          (offset - position.pixels).abs() > position.viewportDimension * 2) {
-        _scrollController.jumpTo(offset);
-      } else {
-        await _scrollController.animateTo(
-          offset,
-          duration: duration,
-          curve: AppMotion.emphasized,
-        );
-      }
-      await WidgetsBinding.instance.endOfFrame;
     }
   }
 
@@ -494,9 +540,7 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     final playable = songs
         .where((entry) {
           final path = entry.savedPath;
-          return (path != null &&
-                  path.isNotEmpty &&
-                  isLocalAudioSourceAvailable(path)) ||
+          return (path != null && path.isNotEmpty && File(path).existsSync()) ||
               entry.musicInfo != null;
         })
         .toList(growable: false);
@@ -517,9 +561,7 @@ class _SongsPageState extends ConsumerState<SongsPage> {
         .where((entry) => _selectedIds.contains(entry.id))
         .where((entry) {
           final path = entry.savedPath;
-          return (path != null &&
-                  path.isNotEmpty &&
-                  isLocalAudioSourceAvailable(path)) ||
+          return (path != null && path.isNotEmpty && File(path).existsSync()) ||
               entry.musicInfo != null;
         })
         .toList(growable: false);
@@ -537,7 +579,7 @@ class _SongsPageState extends ConsumerState<SongsPage> {
   Future<void> _addNext(DownloadHistoryEntry entry) async {
     final path = entry.savedPath;
     final hasLocalFile =
-        path != null && path.isNotEmpty && isLocalAudioSourceAvailable(path);
+        path != null && path.isNotEmpty && File(path).existsSync();
     if (!hasLocalFile && entry.musicInfo == null) {
       showAppToast(context, '文件不存在，无法加入队列', type: AppToastType.warning);
       return;
@@ -605,84 +647,15 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     await _addSongToPlaylist(entry, playlist);
   }
 
-  bool _deletingFiles = false;
-
-  Future<void> _deleteSong(DownloadHistoryEntry entry) => _deleteSongs([entry]);
-
-  Future<void> _deleteSongs(List<DownloadHistoryEntry> entries) async {
-    if (_deletingFiles) return;
-    final paths = entries
-        .map((e) => e.savedPath)
-        .whereType<String>()
-        .where((p) => p.isNotEmpty)
-        .toSet();
-    if (paths.isEmpty) return;
-    _deletingFiles = true;
-    final history = ref.read(downloadHistoryProvider);
-    final historyNotifier = ref.read(downloadHistoryProvider.notifier);
-    final playlists = ref.read(localPlaylistsProvider.notifier);
-    final scanCache = _scanCache;
-    final wasBatch = _batchMode;
+  Future<void> _deleteSong(DownloadHistoryEntry entry) async {
     try {
-      final result = await SafStorage.deleteFiles(paths);
-      final deletedKeys = result.deletedPaths.map(_pathKey).toSet();
-      if (deletedKeys.isNotEmpty) {
-        for (final path in result.deletedPaths) {
-          await playlists.removeLocalPathFromAll(
-            path,
-            pathKey: scanCache.pathKey,
-          );
-          _forgetTagCache(path);
-        }
-        await historyNotifier.removeMany([
-          for (final item in history)
-            if (item.savedPath != null &&
-                deletedKeys.contains(_pathKey(item.savedPath!)))
-              item.id,
-        ]);
-        await scanCache.flush();
-        if (mounted && wasBatch) {
-          setState(() {
-            _selectedIds
-              ..clear()
-              ..addAll(
-                entries
-                    .where(
-                      (entry) =>
-                          entry.savedPath != null &&
-                          !deletedKeys.contains(_pathKey(entry.savedPath!)),
-                    )
-                    .map((e) => e.id),
-              );
-            _batchMode = _selectedIds.isNotEmpty;
-          });
-        }
-      }
+      await _deleteSongData(entry);
+      await _scanLocalMusicFolder();
       if (!mounted) return;
-      if (result.failed.isNotEmpty) {
-        showAppToast(
-          context,
-          '已删除 ${deletedKeys.length} 个文件，${result.failed.length} 个失败：${result.failed.values.first}',
-          type: deletedKeys.isEmpty ? AppToastType.error : AppToastType.warning,
-        );
-      } else if (result.cancelled) {
-        showAppToast(
-          context,
-          deletedKeys.isEmpty ? '已取消删除' : '已删除 ${deletedKeys.length} 个文件，其余已取消',
-        );
-      } else {
-        showAppToast(
-          context,
-          '已删除 ${deletedKeys.length} 个文件',
-          type: AppToastType.success,
-        );
-      }
-    } catch (error) {
-      if (mounted) {
-        showAppToast(context, '删除失败：$error', type: AppToastType.error);
-      }
-    } finally {
-      _deletingFiles = false;
+      showAppToast(context, '歌曲已删除', type: AppToastType.success);
+    } catch (e) {
+      if (!mounted) return;
+      showAppToast(context, '删除失败：$e', type: AppToastType.error);
     }
   }
 
@@ -706,14 +679,7 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     LocalPlaylist playlist,
     List<DownloadHistoryEntry> songs,
   ) async {
-    final selectedEntries = songs
-        .where((entry) => _selectedIds.contains(entry.id))
-        .toList(growable: false);
-    final trackIds = <String>{};
-    for (final entry in selectedEntries) {
-      final track = _visiblePlaylistTracks[entry.id];
-      if (track != null) trackIds.add(track.id);
-    }
+    final trackIds = _selectedPlaylistTrackIds(songs);
     if (trackIds.isEmpty) {
       showAppToast(context, '请先选择要移出的歌曲', type: AppToastType.warning);
       return;
@@ -729,6 +695,48 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     showAppToast(context, '已从歌单移出 $removed 首歌曲', type: AppToastType.success);
   }
 
+  List<String> _selectedPlaylistTrackIds(List<DownloadHistoryEntry> songs) => [
+    for (final entry in songs)
+      if (_selectedIds.contains(entry.id))
+        if (_visiblePlaylistTracks[entry.id] case final track?) track.id,
+  ];
+
+  Future<void> _transferPlaylistTracks(
+    LocalPlaylist playlist,
+    Iterable<String> trackIds, {
+    required bool move,
+    bool batch = false,
+  }) async {
+    if (!mounted) return;
+    final count = await transferTracksToChosenPlaylist(
+      context,
+      ref,
+      fromPlaylistId: playlist.id,
+      trackIds: trackIds,
+      move: move,
+    );
+    if (!mounted || count == 0 || !batch) return;
+    _setBatchMode(false);
+  }
+
+  Future<void> _deleteSongData(DownloadHistoryEntry entry) async {
+    await _deleteSongFile(entry);
+    if (!entry.id.startsWith('file:')) {
+      await ref.read(downloadHistoryProvider.notifier).remove(entry.id);
+    }
+  }
+
+  Future<void> _deleteSongFile(DownloadHistoryEntry entry) async {
+    final path = entry.savedPath;
+    if (path == null || path.isEmpty) return;
+    final file = File(path);
+    if (await file.exists()) await file.delete();
+    await ref
+        .read(localPlaylistsProvider.notifier)
+        .removeLocalPathFromAll(path);
+    _forgetTagCache(path);
+  }
+
   Future<void> _openPlaylists() async {
     final destination = await showPlaylistBrowserSheet(context);
     if (!mounted || destination == null) return;
@@ -740,42 +748,8 @@ class _SongsPageState extends ConsumerState<SongsPage> {
   }
 
   void _openSearch() {
-    if (_searchMode) return;
-    _preSearchScrollOffset = _scrollController.hasClients
-        ? _scrollController.offset
-        : null;
     ref.read(songsSearchAutoFocusProvider.notifier).state = true;
-    _enableSearchFocusHandling();
-    setState(() {
-      _searchMode = true;
-      _batchMode = false;
-      _selectedIds.clear();
-    });
-  }
-
-  void _closeSearch() {
-    if (!_searchMode) return;
-    _disableSearchFocusHandling();
-    _searchFocusNode.unfocus();
-    _searchController.clear();
-    setState(() {
-      _searchMode = false;
-      _searchQuery = '';
-      _selectedIds.clear();
-    });
-    final previousOffset = _preSearchScrollOffset;
-    _preSearchScrollOffset = null;
-    if (previousOffset != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_searchMode && _scrollController.hasClients) {
-          _scrollController.jumpTo(
-            previousOffset.clamp(0, _scrollController.position.maxScrollExtent),
-          );
-        }
-      });
-    }
-    // Keep old links/restored search routes working; new searches stay in place.
-    if (widget.searchMode) context.go('/songs');
+    context.go('/songs/search');
   }
 
   Future<void> _updatePlaylist(LocalPlaylist playlist) async {
@@ -807,7 +781,6 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     final nextId = normalized == null || normalized.isEmpty ? null : normalized;
     if (ref.read(songsLibraryPlaylistIdProvider) == nextId) return;
     ref.read(songsLibraryPlaylistIdProvider.notifier).select(nextId);
-    if (_searchMode) _preSearchScrollOffset = 0;
     setState(() {
       _selectedIds.clear();
       _batchMode = false;
@@ -845,11 +818,6 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     setState(() {
       _searchQuery = query;
       if (_batchMode) _selectedIds.clear();
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _searchMode && _scrollController.hasClients) {
-        _scrollController.jumpTo(0);
-      }
     });
   }
 
@@ -902,9 +870,13 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     showAppToast(context, '已加入 $added 首歌曲', type: AppToastType.success);
   }
 
-  String _pathKey(String path) => _scanCache.pathKey(path);
-
   void _forgetTagCache(String path) {
+    final key = _pathKey(path);
+    _tagCache.remove(key);
+    _tagModifiedAt.remove(key);
+    _tagLoadingKeys.remove(key);
+    songTagCacheSnapshot.remove(key);
+    songTagModifiedAtSnapshot.remove(key);
     EmbeddedArtworkCache.evictPath(path);
   }
 
@@ -914,7 +886,6 @@ class _SongsPageState extends ConsumerState<SongsPage> {
 
   void _setBatchMode(bool enabled) {
     if (_batchMode == enabled) return;
-    _searchFocusNode.unfocus();
     setState(() {
       _batchMode = enabled;
       if (!enabled) _selectedIds.clear();
@@ -951,7 +922,71 @@ class _SongsPageState extends ConsumerState<SongsPage> {
       return;
     }
 
-    await _deleteSongs(selected);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.delete_outline_rounded),
+        title: const Text('删除已选歌曲？'),
+        content: Text('将删除 ${selected.length} 首本地歌曲文件，并移除对应下载记录。此操作无法撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    final historyIds = <String>[];
+    final deletedIds = <String>[];
+    final failures = <String>[];
+    for (final entry in selected) {
+      try {
+        await _deleteSongFile(entry);
+        deletedIds.add(entry.id);
+        if (!entry.id.startsWith('file:')) historyIds.add(entry.id);
+      } catch (e) {
+        final name = entry.name.trim().isEmpty
+            ? entry.savedPath ?? entry.id
+            : entry.name;
+        failures.add('$name：$e');
+      }
+    }
+
+    if (historyIds.isNotEmpty) {
+      await ref.read(downloadHistoryProvider.notifier).removeMany(historyIds);
+    }
+    await _scanLocalMusicFolder();
+    if (!mounted) return;
+    setState(() {
+      _selectedIds.removeAll(deletedIds);
+      if (failures.isEmpty) {
+        _selectedIds.clear();
+        _batchMode = false;
+      }
+    });
+
+    if (failures.isEmpty) {
+      showAppToast(
+        context,
+        '已删除 ${deletedIds.length} 首歌曲',
+        type: AppToastType.success,
+      );
+    } else {
+      final type = deletedIds.isEmpty
+          ? AppToastType.error
+          : AppToastType.warning;
+      showAppToast(
+        context,
+        '已删除 ${deletedIds.length} 首，${failures.length} 首失败：${failures.first}',
+        type: type,
+      );
+    }
   }
 
   void _syncToolbarState({
@@ -960,7 +995,6 @@ class _SongsPageState extends ConsumerState<SongsPage> {
     required int songCount,
     required int selectedCount,
     required LocalPlaylist? activePlaylist,
-    required bool searchAutoFocus,
   }) {
     if (!TickerMode.valuesOf(context).enabled ||
         ModalRoute.of(context)?.isCurrent == false) {
@@ -986,8 +1020,6 @@ class _SongsPageState extends ConsumerState<SongsPage> {
         selectedCount: selectedCount,
         allSelected: allSelected,
         batchMode: _batchMode,
-        searchMode: _searchMode,
-        searchAutoFocus: searchAutoFocus,
         canUpdatePlaylist: canUpdatePlaylist,
         updatingPlaylist: updatingPlaylist,
       )) {
@@ -1001,15 +1033,9 @@ class _SongsPageState extends ConsumerState<SongsPage> {
         selectedCount: selectedCount,
         allSelected: allSelected,
         batchMode: _batchMode,
-        searchMode: _searchMode,
-        searchAutoFocus: searchAutoFocus,
         onSelectLibraryPlaylist: _selectLibraryPlaylist,
         onOpenPlaylists: _openPlaylists,
         onSearch: _openSearch,
-        onCloseSearch: _closeSearch,
-        onSearchChanged: _updateSearchQuery,
-        searchController: _searchController,
-        searchFocusNode: _searchFocusNode,
         onShuffle: _shuffleVisibleSongs,
         onOpenHistory: _openHistory,
         onUpdatePlaylist: canUpdatePlaylist
@@ -1045,13 +1071,14 @@ class _SongsPageState extends ConsumerState<SongsPage> {
       }
     }
     final playlistMode = selectedPlaylist != null;
+    final canTransfer = playlistMode && playlists.length > 1;
     final history = ref.watch(downloadHistoryProvider);
     final playlistSongs = selectedPlaylist == null
         ? null
         : _songsForPlaylist(selectedPlaylist, history);
     final allSongs = playlistSongs?.songs ?? _songs(history);
     _visiblePlaylistTracks = playlistSongs?.tracksByEntryId ?? const {};
-    final songs = _searchMode
+    final songs = widget.searchMode
         ? filterSongsByQuery(allSongs, _searchQuery)
         : allSongs;
     final scanning = !playlistMode && _scannedFiles == null;
@@ -1064,14 +1091,13 @@ class _SongsPageState extends ConsumerState<SongsPage> {
         return (
           queueEntry: queueEntry,
           localPath: state.track?.localPath,
-          trackId: state.track?.id,
           playing: state.playing,
         );
       }),
     );
-    final artworkVersionByPath = <String, String>{
+    final artworkVersionByPath = <String, int>{
       for (final file in _scannedFiles ?? const <ScannedSongFile>[])
-        _pathKey(file.path): file.fingerprint,
+        _pathKey(file.path): file.modifiedAt.microsecondsSinceEpoch,
     };
     final selectedCount = songs
         .where((entry) => _selectedIds.contains(entry.id))
@@ -1083,7 +1109,6 @@ class _SongsPageState extends ConsumerState<SongsPage> {
       songCount: songs.length,
       selectedCount: selectedCount,
       activePlaylist: selectedPlaylist,
-      searchAutoFocus: ref.watch(songsSearchAutoFocusProvider),
     );
 
     final libraryView = AppScrollbar(
@@ -1098,7 +1123,20 @@ class _SongsPageState extends ConsumerState<SongsPage> {
           parent: AlwaysScrollableScrollPhysics(),
         ),
         slivers: [
-          const SliverToBoxAdapter(child: ScrollHeaderSpacer()),
+          if (widget.searchMode)
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(14, 2, 14, 0),
+              sliver: SliverToBoxAdapter(
+                child: SongsSearchBar(
+                  controller: _searchController,
+                  focusNode: _searchFocusNode,
+                  query: _searchQuery,
+                  autofocus: ref.watch(songsSearchAutoFocusProvider),
+                  onChanged: _updateSearchQuery,
+                  onClear: _clearSearch,
+                ),
+              ),
+            ),
           if (allSongs.isNotEmpty)
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(14, 0, 14, 2),
@@ -1106,7 +1144,8 @@ class _SongsPageState extends ConsumerState<SongsPage> {
                 child: SongsListSummary(
                   count: songs.length,
                   totalCount: allSongs.length,
-                  searching: _searchMode && _searchQuery.trim().isNotEmpty,
+                  searching:
+                      widget.searchMode && _searchQuery.trim().isNotEmpty,
                   sortMode: _sortMode,
                   ascending: _ascending,
                   batchMode: _batchMode,
@@ -1140,58 +1179,66 @@ class _SongsPageState extends ConsumerState<SongsPage> {
                 12,
                 _batchMode ? 12 : ShellBottomArea.contentPadding(context, 104),
               ),
-              sliver: SliverList.separated(
-                key: _songsListKey,
-                itemCount: songs.length,
-                separatorBuilder: (_, _) => const SongListDivider(),
-                itemBuilder: (context, index) {
-                  final entry = songs[index];
-                  final path = entry.savedPath;
-                  final playing = matchesPlayingEntry(
-                    entry,
-                    playbackIdentity.queueEntry,
-                    playbackIdentity.localPath,
-                    playbackIdentity.trackId,
-                  );
-                  return SongRow(
-                    key: ValueKey(entry.id),
-                    entry: entry,
-                    artworkVersion: path == null
-                        ? null
-                        : artworkVersionByPath[_pathKey(path)],
-                    playing: playing,
-                    playingActive: playing && playbackIdentity.playing,
-                    batchMode: _batchMode,
-                    selected: _selectedIds.contains(entry.id),
-                    onToggleSelected: () => _toggleSelection(entry),
-                    onAddNext: () => _addNext(entry),
-                    onAddToPlaylist: () =>
-                        unawaited(_selectPlaylistForSong(entry)),
-                    onDownload: entry.musicInfo == null
-                        ? null
-                        : () =>
-                              showQualityPickerSheet(context, entry.musicInfo!),
-                    onPlay: () => _play(
+              sliver: SlidableAutoCloseBehavior(
+                child: SliverList.separated(
+                  itemCount: songs.length,
+                  separatorBuilder: (_, _) => const SongListDivider(),
+                  itemBuilder: (context, index) {
+                    final entry = songs[index];
+                    final track = _visiblePlaylistTracks[entry.id];
+                    final path = entry.savedPath;
+                    final playing = _matchesPlayingEntry(
                       entry,
-                      songs,
-                      replaceQueue:
-                          !_searchMode ||
-                          _searchQuery.trim().isEmpty ||
-                          ref.read(settingsProvider).replaceQueueOnSearchPlay,
-                    ),
-                    onDelete: playlistMode
-                        ? () {
-                            final track = _visiblePlaylistTracks[entry.id];
-                            if (track != null) {
-                              unawaited(
-                                _removePlaylistTrack(selectedPlaylist!, track),
-                              );
+                      playbackIdentity.queueEntry,
+                      playbackIdentity.localPath,
+                    );
+                    return SongRow(
+                      key: ValueKey(entry.id),
+                      entry: entry,
+                      artworkVersion: path == null
+                          ? null
+                          : artworkVersionByPath[_pathKey(path)],
+                      playing: playing,
+                      playingActive: playing && playbackIdentity.playing,
+                      batchMode: _batchMode,
+                      selected: _selectedIds.contains(entry.id),
+                      onToggleSelected: () => _toggleSelection(entry),
+                      onAddNext: () => _addNext(entry),
+                      onAddToPlaylist: playlistMode
+                          ? () {
+                              if (track != null) {
+                                unawaited(
+                                  _transferPlaylistTracks(selectedPlaylist!, [
+                                    track.id,
+                                  ], move: false),
+                                );
+                              }
                             }
-                          }
-                        : () => _deleteSong(entry),
-                    playlistMode: playlistMode,
-                  );
-                },
+                          : () => unawaited(_selectPlaylistForSong(entry)),
+                      onMoveToPlaylist: canTransfer && track != null
+                          ? () => unawaited(
+                              _transferPlaylistTracks(selectedPlaylist!, [
+                                track.id,
+                              ], move: true),
+                            )
+                          : null,
+                      onPlay: () => _play(entry, songs),
+                      onDelete: playlistMode
+                          ? () {
+                              if (track != null) {
+                                unawaited(
+                                  _removePlaylistTrack(
+                                    selectedPlaylist!,
+                                    track,
+                                  ),
+                                );
+                              }
+                            }
+                          : () => _deleteSong(entry),
+                      playlistMode: playlistMode,
+                    );
+                  },
+                ),
               ),
             ),
         ],
@@ -1210,41 +1257,82 @@ class _SongsPageState extends ConsumerState<SongsPage> {
                       _removeSelectedFromPlaylist(selectedPlaylist!, songs),
                     )
                   : () => unawaited(_confirmDeleteSelected(songs)),
-              onAddToPlaylist: playlistMode || selectedCount == 0
+              onAddToPlaylist: selectedCount == 0
                   ? null
-                  : () => unawaited(_addSelectedToPlaylist(songs)),
+                  : !playlistMode
+                  ? () => unawaited(_addSelectedToPlaylist(songs))
+                  : canTransfer
+                  ? () => unawaited(
+                      _transferPlaylistTracks(
+                        selectedPlaylist!,
+                        _selectedPlaylistTrackIds(songs),
+                        move: false,
+                        batch: true,
+                      ),
+                    )
+                  : null,
+              onMoveToPlaylist: canTransfer && selectedCount > 0
+                  ? () => unawaited(
+                      _transferPlaylistTracks(
+                        selectedPlaylist!,
+                        _selectedPlaylistTrackIds(songs),
+                        move: true,
+                        batch: true,
+                      ),
+                    )
+                  : null,
               onPlaySelected: selectedCount == 0
                   ? null
                   : () => unawaited(_playSelected(songs)),
               playlistMode: playlistMode,
+              showPlaylistTransfers: canTransfer,
             )
           : null,
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          _batchMode || playlistMode
-              ? libraryView
-              : AppRefreshIndicator(
-                  onRefresh: _scanLocalMusicFolder,
-                  child: libraryView,
-                ),
-          if (!_batchMode && playbackIdentity.trackId != null)
-            Positioned(
-              right: 18,
-              bottom: ShellBottomArea.contentPadding(context, 88),
-              child: FloatingActionButton.small(
-                key: const ValueKey('songs-locate-current'),
-                heroTag: null,
-                tooltip: '定位当前歌曲',
-                elevation: 3,
-                onPressed: () => unawaited(_locateCurrentSong()),
-                child: const Icon(Icons.my_location_rounded, size: 22),
-              ),
+      body: _batchMode || playlistMode
+          ? libraryView
+          : AppRefreshIndicator(
+              onRefresh: _scanLocalMusicFolder,
+              child: libraryView,
             ),
-        ],
-      ),
     );
   }
+}
+
+String _pathKey(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  return Platform.isWindows ? normalized.toLowerCase() : normalized;
+}
+
+bool _matchesPlayingEntry(
+  DownloadHistoryEntry entry,
+  DownloadHistoryEntry? queueEntry,
+  String? playerLocalPath,
+) {
+  if (queueEntry != null) {
+    if (queueEntry.id == entry.id) return true;
+    final queuedPath = queueEntry.savedPath?.trim();
+    final entryPath = entry.savedPath?.trim();
+    if (queuedPath != null &&
+        queuedPath.isNotEmpty &&
+        entryPath != null &&
+        entryPath.isNotEmpty &&
+        _pathKey(queuedPath) == _pathKey(entryPath)) {
+      return true;
+    }
+    if (queueEntry.sourceCode == entry.sourceCode &&
+        queueEntry.musicId.isNotEmpty &&
+        queueEntry.musicId == entry.musicId) {
+      return true;
+    }
+  }
+
+  final entryPath = entry.savedPath?.trim();
+  final activePath = playerLocalPath?.trim();
+  return entryPath != null &&
+      entryPath.isNotEmpty &&
+      activePath != null &&
+      activePath.isNotEmpty &&
+      _pathKey(entryPath) == _pathKey(activePath);
 }
 
 String _preferTag(String? value, String fallback) {

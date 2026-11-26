@@ -6,8 +6,7 @@ const Duration kFlowingLightFrameInterval = Duration(milliseconds: 42);
 
 const Duration kFlowingLightArtworkFade = Duration(milliseconds: 500);
 
-// Leave the full spring tail to the reveal animation before resuming blur.
-const double kFlowingLightRevealThreshold = 1.0;
+const double kFlowingLightRevealThreshold = 0.95;
 
 const int kFlowingLightFeedbackAlpha = 64;
 

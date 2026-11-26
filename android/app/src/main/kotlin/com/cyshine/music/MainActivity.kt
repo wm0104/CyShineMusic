@@ -1,7 +1,5 @@
 package com.cyshine.music
 
-import android.app.ActivityManager
-import android.app.ApplicationExitInfo
 import android.content.Intent
 import android.graphics.Color
 import android.hardware.display.DisplayManager
@@ -9,7 +7,6 @@ import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Debug
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
@@ -49,7 +46,6 @@ class MainActivity : AudioServiceActivity() {
     private var incomingAudioChannel: MethodChannel? = null
     private var pendingAudioUri: Uri? = null
     private var displayListener: DisplayManager.DisplayListener? = null
-    private var screenCorners: ScreenCornersBridge? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,7 +75,6 @@ class MainActivity : AudioServiceActivity() {
         super.onResume()
         applyEdgeToEdgeSystemBars()
         applyHighestRefreshRate()
-        window.decorView.post { screenCorners?.refresh() }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -91,24 +86,12 @@ class MainActivity : AudioServiceActivity() {
     }
 
     override fun onDestroy() {
-        screenCorners?.dispose()
-        screenCorners = null
         unregisterDisplayListener()
         super.onDestroy()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        screenCorners = ScreenCornersBridge(this, flutterEngine.dartExecutor.binaryMessenger)
-        if (!flutterEngine.plugins.has(ArtworkColorsPlugin::class.java)) {
-            flutterEngine.plugins.add(ArtworkColorsPlugin())
-        }
-        if (!flutterEngine.plugins.has(SafStoragePlugin::class.java)) {
-            flutterEngine.plugins.add(SafStoragePlugin())
-        }
-        if (!flutterEngine.plugins.has(MediaLibraryPlugin::class.java)) {
-            flutterEngine.plugins.add(MediaLibraryPlugin())
-        }
         val appIcons = AppIconManager(applicationContext)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "cy_shine_music/app_icon")
             .setMethodCallHandler { call, result ->
@@ -228,13 +211,16 @@ class MainActivity : AudioServiceActivity() {
                             return@setMethodCallHandler
                         }
                         try {
-                            val uri = if (path.startsWith("content://")) {
-                                Uri.parse(path)
-                            } else {
-                                val file = File(path)
-                                check(file.exists()) { "file does not exist" }
-                                FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                            val file = java.io.File(path)
+                            if (!file.exists()) {
+                                result.error("NOT_FOUND", "file does not exist", null)
+                                return@setMethodCallHandler
                             }
+                            val uri = FileProvider.getUriForFile(
+                                this,
+                                "$packageName.fileprovider",
+                                file,
+                            )
                             val intent = Intent(Intent.ACTION_VIEW).apply {
                                 setDataAndType(uri, "audio/*")
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -261,21 +247,6 @@ class MainActivity : AudioServiceActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "moveToBack" -> result.success(moveTaskToBack(true))
-                    "exportLog" -> {
-                        val path = call.argument<String>("path")
-                        if (path.isNullOrBlank()) {
-                            result.error("INVALID_ARGS", "缺少日志快照", null)
-                            return@setMethodCallHandler
-                        }
-                        Thread {
-                            try {
-                                val exported = AppLogExport.save(applicationContext, path)
-                                runOnUiThread { result.success(exported) }
-                            } catch (failure: Throwable) {
-                                runOnUiThread { result.error("LOG_EXPORT_FAILED", "无法导出日志", failure.message) }
-                            }
-                        }.start()
-                    }
                     "diagnostics" -> {
                         val power = getSystemService(POWER_SERVICE) as PowerManager
                         result.success(mapOf(
@@ -293,97 +264,11 @@ class MainActivity : AudioServiceActivity() {
                                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && power.isDeviceIdleMode
                             ),
                             "notificationsEnabled" to NotificationManagerCompat.from(this).areNotificationsEnabled(),
-                            "recentProcessExits" to recentProcessExits(),
-                            "processExitHistorySupported" to (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R),
-                            "javaCrash" to AndroidCrashHandler.read(applicationContext),
-                            "memory" to memoryDiagnostics(),
                         ))
-                    }
-                    "clearCrashLog" -> {
-                        AndroidCrashHandler.clear(applicationContext)
-                        result.success(null)
                     }
                     else -> result.notImplemented()
                 }
             }
-    }
-
-    /**
-     * Android keeps a short history of why an application's process exited.
-     * Reading it on the next launch lets the Dart logger distinguish a crash
-     * or ANR from a normal task stop, even when no Dart callback ran.
-     */
-    private fun recentProcessExits(): List<Map<String, Any?>> {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
-        val manager = getSystemService(ACTIVITY_SERVICE) as? ActivityManager
-            ?: return emptyList()
-        return runCatching {
-            manager.getHistoricalProcessExitReasons(packageName, 0, 5).map { info ->
-                mapOf(
-                    "reason" to info.reason,
-                    "reasonName" to processExitReasonName(info.reason),
-                    "status" to info.status,
-                    "timestamp" to info.timestamp,
-                    "importance" to info.importance,
-                    "pid" to info.pid,
-                    "processName" to info.processName,
-                    "pssKb" to info.pss,
-                    "rssKb" to info.rss,
-                    "description" to info.description,
-                    "nativeTrace" to nativeTrace(info),
-                )
-            }
-        }.getOrDefault(emptyList())
-    }
-
-    // Diagnostics run on every lifecycle change; parse each tombstone once.
-    private val nativeTraces = HashMap<Long, String?>()
-
-    /** The crashing thread's backtrace from the tombstone of a native crash. */
-    private fun nativeTrace(info: ApplicationExitInfo): String? {
-        if (info.reason != ApplicationExitInfo.REASON_CRASH_NATIVE) return null
-        return nativeTraces.getOrPut(info.timestamp) {
-            runCatching { info.traceInputStream?.let(TombstoneSummary::read) }
-                .getOrElse { "tombstone unavailable: ${it.javaClass.simpleName}" }
-        }
-    }
-
-    private fun memoryDiagnostics(): Map<String, Any> {
-        val memory = ActivityManager.MemoryInfo()
-        val manager = getSystemService(ACTIVITY_SERVICE) as ActivityManager
-        manager.getMemoryInfo(memory)
-        val runtime = Runtime.getRuntime()
-        return mapOf(
-            "availableBytes" to memory.availMem,
-            "totalBytes" to memory.totalMem,
-            "lowMemory" to memory.lowMemory,
-            "javaHeapUsedBytes" to (runtime.totalMemory() - runtime.freeMemory()),
-            "javaHeapMaxBytes" to runtime.maxMemory(),
-            "nativeHeapAllocatedBytes" to Debug.getNativeHeapAllocatedSize(),
-        )
-    }
-
-    private fun processExitReasonName(reason: Int): String = when (reason) {
-        0 -> "UNKNOWN"
-        1 -> "EXIT_SELF"
-        2 -> "SIGNALED"
-        3 -> "LOW_MEMORY"
-        4 -> "CRASH"
-        5 -> "CRASH_NATIVE"
-        6 -> "ANR"
-        7 -> "INITIALIZATION_FAILURE"
-        8 -> "PERMISSION_CHANGE"
-        9 -> "EXCESSIVE_RESOURCE_USAGE"
-        10 -> "USER_REQUESTED"
-        11 -> "USER_STOPPED"
-        12 -> "DEPENDENCY_DIED"
-        13 -> "OTHER"
-        14 -> "FREEZER"
-        15 -> "PACKAGE_STATE_CHANGE"
-        16 -> "PACKAGE_UPDATED"
-        17 -> "MEMORY_LIMITER"
-        18 -> "ANOMALY"
-        else -> "UNKNOWN_$reason"
     }
 
     private fun handleIncomingAudioIntent(intent: Intent) {
@@ -453,7 +338,24 @@ class MainActivity : AudioServiceActivity() {
 
         Thread {
             try {
-                val payload = ContentAudioTags.read(applicationContext, path, includeLyrics, includeArtwork)
+                val file = java.io.File(path)
+                if (!file.exists()) {
+                    result.error("NOT_FOUND", "file does not exist", null)
+                    return@Thread
+                }
+
+                val tag = AudioFileIO.read(file).tag
+                val payload = mapOf(
+                    "title" to tag?.getFirst(FieldKey.TITLE),
+                    "artist" to tag?.getFirst(FieldKey.ARTIST),
+                    "album" to tag?.getFirst(FieldKey.ALBUM),
+                    "lyrics" to if (includeLyrics) tag?.getFirst(FieldKey.LYRICS) else null,
+                    "artwork" to if (includeArtwork) {
+                        runCatching { tag?.firstArtwork?.binaryData }.getOrNull()
+                    } else {
+                        null
+                    },
+                )
                 // MethodChannel.Result is thread-safe. Reply here so encoding a
                 // large artwork ByteArray never runs on Android's main thread.
                 result.success(payload)
@@ -824,7 +726,6 @@ class MainActivity : AudioServiceActivity() {
             override fun onDisplayChanged(displayId: Int) {
                 if (displayId == currentDisplay()?.displayId) {
                     applyHighestRefreshRate()
-                    window.decorView.post { screenCorners?.refresh() }
                 }
             }
         }

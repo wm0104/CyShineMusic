@@ -24,71 +24,6 @@ void main() {
   });
 
   test(
-    'refreshes legacy enabled capabilities once without changing priority',
-    () async {
-      final old = _record('old').copyWith(capabilitiesVersion: 0);
-      final disabled = _record('disabled').copyWith(capabilitiesVersion: 0);
-      final current = _record('current');
-      final harness = await _Harness.create(
-        MusicSourceState(
-          records: [old, disabled, current],
-          enabledIds: ['current', 'old'],
-        ),
-        runtimeCapabilities: {
-          MusicSource.kw: [Quality.k128],
-          MusicSource.qs: [Quality.k320, Quality.flac],
-        },
-      );
-      addTearDown(harness.container.dispose);
-      final state = harness.container
-          .read(musicSourceControllerProvider)
-          .requireValue;
-      expect(state.enabledIds, ['current', 'old']);
-      expect(
-        state.records.firstWhere((r) => r.id == 'old').supports(MusicSource.qs),
-        isTrue,
-      );
-      expect(
-        state.records.firstWhere((r) => r.id == 'disabled').capabilitiesVersion,
-        0,
-      );
-      final runtime =
-          harness.container.read(musicSourceRuntimeProvider)
-              as _ValidationRuntime;
-      expect(runtime.loadedIds, ['old']);
-      harness.container.invalidate(musicSourceControllerProvider);
-      await harness.container.read(musicSourceControllerProvider.future);
-      expect(runtime.loadedIds, ['old']);
-    },
-  );
-
-  test(
-    'a capability refresh failure preserves enabled sources and retries later',
-    () async {
-      final harness = await _Harness.create(
-        MusicSourceState(
-          records: [
-            _record('broken').copyWith(capabilitiesVersion: 0),
-            _record('healthy').copyWith(capabilitiesVersion: 0),
-          ],
-          enabledIds: ['broken', 'healthy'],
-        ),
-        failingIds: {'broken'},
-      );
-      addTearDown(harness.container.dispose);
-      final state = harness.container
-          .read(musicSourceControllerProvider)
-          .requireValue;
-      expect(state.enabledIds, ['broken', 'healthy']);
-      expect(state.records.first.capabilitiesVersion, 0);
-      expect(
-        state.records.last.capabilitiesVersion,
-        kMusicSourceCapabilitiesVersion,
-      );
-    },
-  );
-
-  test(
     'controller enables at most five sources without changing their order',
     () async {
       final records = [
@@ -641,14 +576,10 @@ class _Harness {
     Future<void>? beforeResponse,
     Set<String> checkFailedIds = const {},
     Map<String, String> checkUpdateUrls = const {},
-    Map<MusicSource, List<Quality>>? runtimeCapabilities,
   }) async {
     final preferences = await SharedPreferences.getInstance();
     final store = _MemoryStore(preferences, initialState);
-    final runtime = _ValidationRuntime(
-      failingIds,
-      capabilities: runtimeCapabilities,
-    );
+    final runtime = _ValidationRuntime(failingIds);
     final container = ProviderContainer(
       overrides: [
         sharedPreferencesProvider.overrideWithValue(preferences),
@@ -714,18 +645,10 @@ class _MemoryStore extends MusicSourceStore {
 }
 
 class _ValidationRuntime extends MusicSourceRuntime {
-  _ValidationRuntime(
-    this.failingIds, {
-    Map<MusicSource, List<Quality>>? capabilities,
-  }) : capabilities =
-           capabilities ??
-           const {
-             MusicSource.kw: [Quality.k128],
-           },
-       super(Dio(), channel: const MethodChannel('test/controller-runtime'));
+  _ValidationRuntime(this.failingIds)
+    : super(Dio(), channel: const MethodChannel('test/controller-runtime'));
 
   final Set<String> failingIds;
-  final Map<MusicSource, List<Quality>> capabilities;
   final List<String> loadedIds = [];
 
   @override
@@ -737,7 +660,9 @@ class _ValidationRuntime extends MusicSourceRuntime {
     if (failingIds.contains(record.id)) {
       throw const MusicSourceRuntimeException('初始化失败');
     }
-    return capabilities;
+    return const {
+      MusicSource.kw: [Quality.k128],
+    };
   }
 
   @override

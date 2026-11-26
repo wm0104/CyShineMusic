@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../settings/settings_section.dart';
-
 // Pure route helpers shared by the AppShell state machine (app_shell.dart)
 // and the extracted shell widgets (widgets/). Kept in their own file so
 // widgets/ never has to import the page file.
@@ -25,12 +23,18 @@ bool isImmersivePlaylistDetailLocation(String location) {
   return isPlaylistDetailLocation(location) ||
       location.startsWith('/discover/playlists/') ||
       location.startsWith('/discover/artists/') ||
-      location.startsWith('/discover/albums/') ||
       leaderboardDetail;
 }
 
 bool isDiscoveryLocation(String location) =>
     location == '/' || location.startsWith('/discover/');
+
+bool isPlaybackArtistLocation(String location) =>
+    location == '/player/track-artists' ||
+    location.startsWith('/player/artists/');
+
+bool isTopLevelShellLocation(String location) =>
+    location == '/' || location == '/songs' || location == '/settings';
 
 bool isSongsLibraryLocation(String location) {
   return location == '/songs' || location == '/songs/search';
@@ -55,7 +59,6 @@ bool isPlayerReturnLocation(String location) {
   final path = uri.path;
   if (isDiscoveryLocation(path)) return true;
   if (isPlaylistLocation(path)) return true;
-  if (SettingsSection.fromLocation(path) != null) return true;
   return switch (path) {
     '/' ||
     '/downloads' ||

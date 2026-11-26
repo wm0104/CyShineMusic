@@ -16,7 +16,6 @@ List<LeaderboardSummary> leaderboardCatalogFor(MusicSource source) {
     MusicSource.tx => txLeaderboards,
     MusicSource.wy => wyLeaderboards,
     MusicSource.mg => mgLeaderboards,
-    // Qishui's directory is loaded dynamically by MusicApi.
-    MusicSource.qs || MusicSource.all => const <LeaderboardSummary>[],
+    MusicSource.all => const <LeaderboardSummary>[],
   };
 }

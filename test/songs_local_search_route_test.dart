@@ -1,26 +1,127 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:cy_shine_music/core/models/enums.dart';
+import 'package:cy_shine_music/core/models/music_info.dart';
+import 'package:cy_shine_music/core/services/embedded_artwork_cache.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
+import 'package:cy_shine_music/features/downloads/download_history_store.dart';
 import 'package:cy_shine_music/features/player/player_audio_handler.dart';
+import 'package:cy_shine_music/features/playlists/playlist_models.dart';
+import 'package:cy_shine_music/features/playlists/playlist_store.dart';
+import 'package:cy_shine_music/features/playlists/spotify_playlist_import.dart';
 import 'package:cy_shine_music/features/shell/shell_toolbar_visibility.dart';
 import 'package:cy_shine_music/features/songs/songs_page.dart';
 import 'package:cy_shine_music/features/songs/songs_toolbar_state.dart';
+import 'package:cy_shine_music/features/songs/widgets/song_row.dart';
+import 'package:cy_shine_music/features/songs/widgets/songs_placeholders.dart';
 import 'package:cy_shine_music/router.dart';
-import 'package:prism_ui/prism_ui.dart' as prism;
-
-import 'helpers/prism_test_environment.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  testWidgets('songs header opens local search in place', (tester) async {
+  testWidgets('moving a downloaded Spotify occurrence uses the tapped row', (
+    tester,
+  ) async {
+    _useNarrowPhone(tester);
+    final folder = Directory.systemTemp.createTempSync(
+      'cyshine-transfer-test-',
+    );
+    final audioFile = File('${folder.path}/song.mp3')..writeAsBytesSync([0]);
+    await tester.runAsync(() => EmbeddedArtworkCache.load(audioFile.path));
+    addTearDown(() {
+      EmbeddedArtworkCache.evictPath(audioFile.path);
+      audioFile.deleteSync();
+      folder.deleteSync();
+    });
+    final music = MusicInfo.fromJson({
+      'id': 'wy_1',
+      'source': 'wy',
+      'name': '本地版本',
+      'singer': '歌手',
+      'meta': {
+        'songId': '1',
+        'qualitys': [{'type': Quality.flac.code}],
+      },
+    });
+    final tracks = [
+      for (final occurrence in [0, 1])
+        PlaylistTrack.fromSpotify(
+          SpotifyTrackMetadata(
+            uri: 'spotify:track:duplicate',
+            title: '重复歌曲',
+            artist: '歌手',
+            occurrence: occurrence,
+          ),
+          music,
+        ),
+    ];
+    final prefs = await SharedPreferences.getInstance();
+    final audioHandler = PlayerAudioHandler();
+    final router = createAppRouter(initialLocation: '/songs');
+    final container = ProviderContainer(
+      overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        playerAudioHandlerProvider.overrideWithValue(audioHandler),
+      ],
+    );
+    addTearDown(() {
+      router.dispose();
+      container.dispose();
+      unawaited(audioHandler.disposeHandler());
+    });
+    final store = container.read(localPlaylistsProvider.notifier);
+    final source = await store.importSpotify(
+      SpotifyPlaylistPreview(
+        id: 'fixture',
+        name: '原歌单',
+        tracks: tracks,
+        total: tracks.length,
+      ),
+    );
+    final target = await store.create('目标歌单');
+    await container
+        .read(downloadHistoryProvider.notifier)
+        .addCompleted(
+          music: music,
+          quality: Quality.k128,
+          savedPath: audioFile.path,
+        );
+    container.read(songsLibraryPlaylistIdProvider.notifier).select(source.id);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await _pumpUi(tester);
+    final firstRow = find.byKey(
+      ValueKey('playlist:${source.id}:${tracks.first.id}'),
+    );
+    expect(firstRow, findsOneWidget);
+    expect(tester.widget<SongRow>(firstRow).entry.qualityCode, Quality.k128.code);
+    await tester.drag(firstRow, const Offset(-245, 0));
+    await _pumpUi(tester);
+    await tester.tap(find.byKey(const ValueKey('song-move-playlist-action')));
+    await _pumpUi(tester);
+    await tester.tap(find.text('目标歌单'));
+    await _pumpUi(tester);
+    expect(store.byId(source.id)!.tracks.single.id, tracks.last.id);
+    expect(store.byId(target.id)!.tracks.single.id, tracks.first.id);
+    expect(audioFile.existsSync(), isTrue);
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('songs overflow opens the dedicated local search page', (
+    tester,
+  ) async {
     _useNarrowPhone(tester);
     final prefs = await SharedPreferences.getInstance();
     final audioHandler = PlayerAudioHandler();
@@ -37,7 +138,6 @@ void main() {
           playerAudioHandlerProvider.overrideWithValue(audioHandler),
         ],
         child: MaterialApp.router(
-          builder: buildPrismTestEnvironment,
           theme: ThemeData(
             useMaterial3: true,
             colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
@@ -48,30 +148,24 @@ void main() {
     );
     await _pumpUi(tester);
 
-    expect(find.byKey(const ValueKey('header-search-field')), findsNothing);
-    expect(find.byTooltip('搜索本地歌曲'), findsOneWidget);
-    await tester.tap(find.byTooltip('搜索本地歌曲'));
+    expect(find.byType(SongsSearchBar), findsNothing);
+    await tester.tap(find.byTooltip('更多歌曲操作'));
     await _pumpUi(tester);
-    expect(router.routeInformationProvider.value.uri.path, '/songs');
-    expect(find.byKey(const ValueKey('header-search-field')), findsOneWidget);
-    expect(
-      ProviderScope.containerOf(
-        tester.element(find.byType(SongsPage)),
-      ).read(songsToolbarStateProvider).searchMode,
-      isTrue,
-    );
+    expect(find.text('搜索本地歌曲'), findsOneWidget);
+    expect(find.text('下载历史'), findsOneWidget);
+
+    await tester.tap(find.text('搜索本地歌曲'));
+    await _pumpUi(tester);
+    expect(router.routeInformationProvider.value.uri.path, '/songs/search');
+    expect(find.byType(SongsSearchBar), findsOneWidget);
+    expect(tester.widget<SongsPage>(find.byType(SongsPage)).searchMode, isTrue);
     expect(find.byTooltip('返回歌曲列表'), findsNothing);
-    expect(find.byTooltip('返回上一页'), findsNothing);
+    expect(find.byIcon(Icons.arrow_back_ios_new_rounded), findsNothing);
     final container = ProviderScope.containerOf(
       tester.element(find.byType(SongsPage)),
     );
     expect(
-      tester
-          .widget<prism.SearchField>(
-            find.byKey(const ValueKey('header-search-field')),
-          )
-          .focusNode
-          ?.hasFocus,
+      tester.widget<SearchBar>(find.byType(SearchBar)).focusNode?.hasFocus,
       isTrue,
     );
     expect(container.read(shellToolbarVisibleProvider), isFalse);
@@ -79,19 +173,20 @@ void main() {
     FocusManager.instance.primaryFocus?.unfocus();
     await tester.pump();
     expect(container.read(shellToolbarVisibleProvider), isTrue);
-    await tester.tap(find.byKey(const ValueKey('header-search-field')));
+    await tester.tap(find.byType(SongsSearchBar));
     await tester.pump();
     expect(container.read(shellToolbarVisibleProvider), isFalse);
 
     expect(await tester.binding.handlePopRoute(), isTrue);
-    await _pumpUi(tester);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
     expect(router.routeInformationProvider.value.uri.path, '/songs');
-    expect(find.byKey(const ValueKey('header-search-field')), findsNothing);
+    expect(find.byType(SongsSearchBar), findsNothing);
     expect(container.read(shellToolbarVisibleProvider), isTrue);
 
     await _pumpUi(tester);
     expect(router.routeInformationProvider.value.uri.path, '/songs');
-    expect(find.byKey(const ValueKey('header-search-field')), findsNothing);
+    expect(find.byType(SongsSearchBar), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -114,7 +209,6 @@ void main() {
           playerAudioHandlerProvider.overrideWithValue(audioHandler),
         ],
         child: MaterialApp.router(
-          builder: buildPrismTestEnvironment,
           theme: ThemeData(
             useMaterial3: true,
             colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
@@ -126,7 +220,7 @@ void main() {
     await _pumpUi(tester);
 
     expect(find.byTooltip('返回歌曲列表'), findsNothing);
-    expect(find.byTooltip('返回上一页'), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_back_ios_new_rounded), findsNothing);
     expect(await tester.binding.handlePopRoute(), isTrue);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 120));
@@ -157,10 +251,7 @@ void main() {
             playerAudioHandlerProvider.overrideWithValue(audioHandler),
             songsSearchAutoFocusProvider.overrideWith((ref) => false),
           ],
-          child: MaterialApp.router(
-            builder: buildPrismTestEnvironment,
-            routerConfig: router,
-          ),
+          child: MaterialApp.router(routerConfig: router),
         ),
       );
       await _pumpUi(tester);
@@ -170,12 +261,7 @@ void main() {
       );
       expect(router.routeInformationProvider.value.uri.path, '/songs/search');
       expect(
-        tester
-            .widget<prism.SearchField>(
-              find.byKey(const ValueKey('header-search-field')),
-            )
-            .focusNode
-            ?.hasFocus,
+        tester.widget<SearchBar>(find.byType(SearchBar)).focusNode?.hasFocus,
         isFalse,
       );
       expect(container.read(shellToolbarVisibleProvider), isTrue);

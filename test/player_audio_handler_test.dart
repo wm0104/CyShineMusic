@@ -1,126 +1,17 @@
 import 'dart:async';
 
 import 'package:audio_service/audio_service.dart';
+import 'package:audio_service_platform_interface/audio_service_platform_interface.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:bass_player/bass_player.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:cy_shine_music/features/player/player_audio_handler.dart';
-import 'package:cy_shine_music/features/player/vivo_music_metadata.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-
-  test('Vivo queue pages use live song IDs beyond the first page', () async {
-    final handler = PlayerAudioHandler(player: _FakeBassPlayer());
-    addTearDown(handler.disposeHandler);
-    final selected = <int>[];
-    handler.bindTransportCallbacks(
-      owner: handler,
-      onPrevious: () async {},
-      onNext: () async {},
-      onQueueItem: (index) async => selected.add(index),
-      onRepeatMode: (_) async {},
-      onShuffleMode: (_) async {},
-    );
-    final items = List.generate(
-      103,
-      (index) => MediaItem(id: 'song-$index', title: 'Song $index'),
-    );
-    handler.publishQueue(items, currentIndex: 0);
-    handler.updateMediaMetadata(items.first);
-
-    final first = await handler.getChildren(VivoMusicMetadata.currentListId);
-    final second = await handler.getChildren(VivoMusicMetadata.currentListId, {
-      VivoMusicMetadata.pageKey: 1,
-    });
-    final last = await handler.getChildren(VivoMusicMetadata.currentListId, {
-      VivoMusicMetadata.pageKey: 2,
-    });
-    expect(first, hasLength(50));
-    expect(first.last.extras?[VivoMusicMetadata.pageKey], 1);
-    expect(first.last.extras?[VivoMusicMetadata.hasMoreKey], isTrue);
-    expect(second.first.id, 'song-50');
-    expect(second.last.id, 'song-99');
-    expect(last.map((item) => item.id), ['song-100', 'song-101', 'song-102']);
-    expect(last.last.extras?[VivoMusicMetadata.hasMoreKey], isFalse);
-    await handler.playFromMediaId(second.last.id);
-    expect(selected, [99]);
-
-    for (final invalidPage in [
-      -1,
-      '1',
-      0.5,
-      double.nan,
-      double.infinity,
-      1e300,
-    ]) {
-      expect(
-        await handler.getChildren(VivoMusicMetadata.currentListId, {
-          VivoMusicMetadata.pageKey: invalidPage,
-        }),
-        isEmpty,
-      );
-    }
-    handler.publishQueue(const [MediaItem(id: 'new-song', title: 'New song')]);
-    await handler.playFromMediaId('song-99');
-    expect(selected, [99]);
-  });
-
-  test(
-    'Vivo queue handles an empty page, standalone lyrics and online fallback',
-    () async {
-      final handler = PlayerAudioHandler(player: _FakeBassPlayer());
-      addTearDown(handler.disposeHandler);
-      final empty = await handler.getChildren(VivoMusicMetadata.currentListId);
-      expect(empty.single.title, '暂无播放队列');
-      expect(empty.single.extras?[VivoMusicMetadata.hasMoreKey], isFalse);
-      await handler.playFromMediaId(empty.single.id);
-
-      handler.updateMediaMetadata(
-        const MediaItem(
-          id: 'song:online',
-          title: '正在唱的歌词',
-          artist: '歌名 - 歌手',
-          extras: {
-            VivoMusicMetadata.songTitleKey: '原始歌名',
-            VivoMusicMetadata.songArtistKey: '原始歌手',
-            VivoMusicMetadata.lyricKey: '[00:01.00]正在唱的歌词',
-          },
-        ),
-      );
-      final standalone = await handler.getChildren(
-        VivoMusicMetadata.currentListId,
-      );
-      expect(standalone.single.id, 'song:online');
-      expect(standalone.single.title, '原始歌名');
-      expect(standalone.single.artist, '原始歌手');
-      expect(
-        standalone.single.extras,
-        isNot(contains(VivoMusicMetadata.lyricKey)),
-      );
-      final selected = <int>[];
-      handler.bindTransportCallbacks(
-        owner: handler,
-        onPrevious: () async {},
-        onNext: () async {},
-        onQueueItem: (index) async => selected.add(index),
-        onRepeatMode: (_) async {},
-        onShuffleMode: (_) async {},
-      );
-      handler.publishQueue(const [
-        MediaItem(id: 'song:local', title: '原始歌名', artist: '原始歌手'),
-        MediaItem(id: 'next', title: '下一首'),
-      ], currentIndex: 0);
-      final fallback = await handler.getChildren(
-        VivoMusicMetadata.currentListId,
-      );
-      expect(fallback.first.id, 'song:online');
-      await handler.playFromMediaId(fallback.first.id);
-      expect(selected, [0]);
-    },
-  );
 
   test('shared playback skips Android focus and enables iOS mixing', () {
     expect(
@@ -169,71 +60,6 @@ void main() {
       const PlayerLoadTimeoutException(Duration(seconds: 40)).toString(),
       contains('40'),
     );
-  });
-
-  test('the remote load bound leaves room for a weak network', () {
-    // Native gives a response 8 seconds, then the file headers 10 more.
-    expect(
-      playerRemoteLoadTimeout,
-      greaterThanOrEqualTo(const Duration(seconds: 20)),
-    );
-    expect(playerRemoteLoadTimeout, lessThanOrEqualTo(playerLoadTimeout));
-  });
-
-  test('a pending remote load times out at its bound and stops', () async {
-    final player = _PendingLoadBassPlayer();
-    final handler = PlayerAudioHandler(
-      player: player,
-      remoteLoadTimeout: const Duration(milliseconds: 50),
-    );
-    addTearDown(handler.disposeHandler);
-    await handler.initializeEngine();
-
-    await expectLater(
-      handler
-          .load(
-            item: const MediaItem(id: 'remote', title: 'Remote'),
-            sourceUri: Uri.parse('https://audio.test/stalled.mp3'),
-          )
-          .timeout(const Duration(seconds: 5)),
-      throwsA(
-        isA<PlayerLoadTimeoutException>().having(
-          (error) => error.timeout,
-          'timeout',
-          const Duration(milliseconds: 50),
-        ),
-      ),
-    );
-    expect(player.stopCount, 1);
-  });
-
-  test('an old remote timeout leaves a newer local load intact', () async {
-    final player = _PendingLoadBassPlayer();
-    final handler = PlayerAudioHandler(
-      player: player,
-      remoteLoadTimeout: const Duration(milliseconds: 50),
-    );
-    addTearDown(handler.disposeHandler);
-    await handler.initializeEngine();
-
-    final remoteFailure = expectLater(
-      handler.load(
-        item: const MediaItem(id: 'remote', title: 'Remote'),
-        sourceUri: Uri.parse('https://audio.test/stalled.mp3'),
-      ),
-      throwsA(isA<PlayerLoadTimeoutException>()),
-    );
-    final localLoading = handler.load(
-      item: const MediaItem(id: 'local', title: 'Local'),
-      sourceUri: Uri.file('/music/local.flac'),
-    );
-
-    await remoteFailure.timeout(const Duration(seconds: 5));
-    expect(player.stopCount, 0);
-    expect(handler.currentMediaItem?.id, 'local');
-    player.pendingLoads.last.complete(const Duration(minutes: 4));
-    expect(await localLoading, const Duration(minutes: 4));
-    expect(handler.currentMediaItem?.duration, const Duration(minutes: 4));
   });
 
   test('platform failures preserve signed BASS error codes', () {
@@ -344,6 +170,224 @@ void main() {
     expect(previousCount, 1);
   });
 
+  for (final (caseName, liveState, playing) in [
+    ('playing', BassProcessingState.ready, true),
+    ('paused', BassProcessingState.ready, false),
+    ('buffering', BassProcessingState.buffering, true),
+  ]) {
+    test(
+      'iOS sends fresh clock anchors before lyrics and artwork while $caseName',
+      () async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(
+          () => debugDefaultTargetPlatformOverride = previousPlatform,
+        );
+        const channel = MethodChannel(
+          'com.ryanheise.audio_service.handler.methods',
+        );
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        final player = _ClockBassPlayer();
+        final handler = PlayerAudioHandler(player: player);
+        final adapter = IosAudioServiceAdapter(() => handler);
+        final updates = <String>[];
+        final states = <Map<dynamic, dynamic>>[];
+        final oldStateSent = Completer<void>();
+        final releaseOldState = Completer<void>();
+        var nativePosition = 0;
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          final args = call.arguments as Map;
+          if (call.method == 'setState') {
+            final state = args['state'] as Map;
+            states.add(state);
+            nativePosition = state['updatePosition'] as int;
+            updates.add('position=$nativePosition');
+            if (nativePosition == 234000) {
+              oldStateSent.complete();
+              await releaseOldState.future;
+            }
+          } else if (call.method == 'setMediaItem') {
+            final item = args['mediaItem'] as Map;
+            final hasArt = (item['extras'] as Map?)?['artCacheFile'] != null;
+            updates.add(
+              'title=${item['title']} at $nativePosition art=$hasArt',
+            );
+          }
+          return null;
+        });
+        addTearDown(() async {
+          if (!releaseOldState.isCompleted) releaseOldState.complete();
+          messenger.setMockMethodCallHandler(channel, null);
+          await handler.disposeHandler();
+        });
+
+        const item = MediaItem(id: 'track', title: '歌曲');
+        handler.updateMediaMetadata(item);
+
+        player.report(const Duration(seconds: 234));
+        final sendingOldState = adapter.setState(
+          _stateRequest(handler.playbackState.value),
+        );
+        await oldStateSent.future;
+        player.report(const Duration(seconds: 240));
+        const lyric = MediaItemMessage(id: 'track', title: '下一行歌词');
+        final sendingLyric = adapter.setMediaItem(
+          const SetMediaItemRequest(mediaItem: lyric),
+        );
+        final sendingQueuedState = adapter.setState(
+          _stateRequest(handler.playbackState.value),
+        );
+        player.report(
+          const Duration(seconds: 260),
+          state: liveState,
+          playing: playing,
+          notify: caseName != 'playing',
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(updates, ['position=234000']);
+
+        releaseOldState.complete();
+        await Future.wait([sendingOldState, sendingLyric, sendingQueuedState]);
+        expect(updates, [
+          'position=234000',
+          'position=260000',
+          'title=下一行歌词 at 260000 art=false',
+          'position=260000',
+        ]);
+
+        final artworkPosition = caseName == 'playing' ? 282 : 260;
+        player.report(
+          Duration(seconds: artworkPosition),
+          state: liveState,
+          playing: playing,
+          notify: false,
+        );
+        await adapter.setMediaItem(
+          const SetMediaItemRequest(
+            mediaItem: MediaItemMessage(
+              id: 'track',
+              title: '下一行歌词',
+              extras: {'artCacheFile': '/cover.jpg'},
+            ),
+          ),
+        );
+        expect(updates.skip(4), [
+          'position=${artworkPosition * 1000}',
+          'title=下一行歌词 at ${artworkPosition * 1000} art=true',
+        ]);
+        for (final state in states.skip(1)) {
+          expect(state['playing'], playing);
+          expect(
+            state['processingState'],
+            liveState == BassProcessingState.buffering
+                ? AudioProcessingStateMessage.buffering.index
+                : AudioProcessingStateMessage.ready.index,
+          );
+          expect(
+            state['speed'],
+            liveState == BassProcessingState.buffering ? 0 : 1,
+          );
+          expect(
+            (state['controls'] as List).map((item) => (item as Map)['action']),
+            contains((playing ? MediaAction.pause : MediaAction.play).index),
+          );
+        }
+      },
+    );
+  }
+
+  test(
+    'iOS keeps queued playback states tied to their original track',
+    () async {
+      const channel = MethodChannel(
+        'com.ryanheise.audio_service.handler.methods',
+      );
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final player = _ClockBassPlayer();
+      final handler = PlayerAudioHandler(player: player);
+      final adapter = IosAudioServiceAdapter(() => handler);
+      final updates = <(int, int)>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        final state = (call.arguments as Map)['state'] as Map;
+        updates.add((
+          state['processingState'] as int,
+          state['updatePosition'] as int,
+        ));
+        return null;
+      });
+      addTearDown(() async {
+        messenger.setMockMethodCallHandler(channel, null);
+        await handler.disposeHandler();
+      });
+
+      handler.updateMediaMetadata(const MediaItem(id: 'old', title: '旧曲'));
+      player.report(const Duration(seconds: 234));
+      await adapter.setState(_stateRequest(handler.playbackState.value));
+      player.report(const Duration(seconds: 240));
+      final olderTrack = _stateRequest(handler.playbackState.value);
+
+      const next = MediaItem(id: 'new', title: '新曲');
+      await handler.beginTrackTransition(item: next);
+      final loading = _stateRequest(handler.playbackState.value);
+      player.report(const Duration(seconds: 12), notify: false);
+      await handler.load(
+        item: next,
+        sourceUri: Uri.https('example.invalid', 'new'),
+      );
+      final ready = _stateRequest(handler.playbackState.value);
+
+      await adapter.setState(olderTrack);
+      await adapter.setState(loading);
+      await adapter.setState(ready);
+      expect(updates, [
+        (AudioProcessingStateMessage.ready.index, 234000),
+        (AudioProcessingStateMessage.loading.index, 0),
+        (AudioProcessingStateMessage.ready.index, 12000),
+      ]);
+    },
+  );
+
+  test(
+    'iOS media clock freezes while buffering and keeps seek and track changes',
+    () async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = previousPlatform);
+      final player = _ClockBassPlayer();
+      final handler = PlayerAudioHandler(player: player);
+      addTearDown(handler.disposeHandler);
+      const item = MediaItem(id: 'track', title: '歌曲');
+      handler.updateMediaMetadata(item);
+      player.report(const Duration(seconds: 203));
+      expect(handler.playbackState.value.updatePosition.inSeconds, 203);
+
+      player.report(
+        const Duration(seconds: 235),
+        state: BassProcessingState.buffering,
+      );
+      expect(handler.playbackState.value.playing, isTrue);
+      expect(
+        handler.playbackState.value.processingState,
+        AudioProcessingState.buffering,
+      );
+      expect(handler.playbackState.value.updatePosition.inSeconds, 235);
+      expect(handler.playbackState.value.speed, 0);
+
+      player.report(const Duration(seconds: 236));
+      expect(handler.playbackState.value.speed, 1);
+      await handler.seek(const Duration(seconds: 260));
+      expect(handler.playbackState.value.updatePosition.inSeconds, 260);
+      await handler.beginTrackTransition(
+        item: const MediaItem(id: 'next-track', title: '下一首'),
+      );
+      expect(handler.playbackState.value.updatePosition, Duration.zero);
+      expect(handler.playbackState.value.playing, isFalse);
+      expect(handler.mediaItem.value?.id, 'next-track');
+    },
+  );
+
   test('pause cancels a play waiting for audio session setup', () async {
     final player = _FakeBassPlayer();
     final handler = _DelayedSessionAudioHandler(player);
@@ -405,6 +449,16 @@ void main() {
   });
 }
 
+SetStateRequest _stateRequest(PlaybackState state) => SetStateRequest(
+  state: PlaybackStateMessage(
+    playing: state.playing,
+    processingState:
+        AudioProcessingStateMessage.values[state.processingState.index],
+    updatePosition: state.updatePosition,
+    updateTime: state.updateTime,
+  ),
+);
+
 class _DelayedSessionAudioHandler extends PlayerAudioHandler {
   _DelayedSessionAudioHandler(BassPlayer player) : super(player: player);
 
@@ -448,30 +502,53 @@ class _FakeBassPlayer extends BassPlayer {
   Future<void> dispose() async {}
 }
 
-class _PendingLoadBassPlayer extends _FakeBassPlayer {
-  final pendingLoads = <Completer<Duration?>>[];
-  int stopCount = 0;
+class _ClockBassPlayer extends _FakeBassPlayer {
+  final _events = StreamController<BassPlaybackSnapshot>.broadcast(sync: true);
+  BassPlaybackSnapshot _snapshot = const BassPlaybackSnapshot.idle();
+
+  @override
+  Stream<BassPlaybackSnapshot> get playbackEventStream => _events.stream;
+
+  @override
+  BassPlaybackSnapshot get snapshot => _snapshot;
+
+  @override
+  Duration get position => _snapshot.position;
+
+  @override
+  BassProcessingState get processingState => _snapshot.processingState;
+
+  void report(
+    Duration position, {
+    BassProcessingState state = BassProcessingState.ready,
+    bool playing = true,
+    bool notify = true,
+  }) {
+    isPlaying = playing;
+    _snapshot = BassPlaybackSnapshot(
+      position: position,
+      playing: playing,
+      processingState: state,
+      bufferedPosition: position,
+      duration: const Duration(minutes: 5),
+    );
+    if (notify) _events.add(_snapshot);
+  }
+
+  @override
+  Future<void> seek(Duration position) async => report(position);
 
   @override
   Future<BassEngineInfo> initialize() async =>
-      const BassEngineInfo(version: 'test', fxVersion: 'test', plugins: {});
+      const BassEngineInfo(version: 'fake', fxVersion: 'fake', plugins: {});
 
   @override
   Future<Duration?> load(
     Uri source, {
     Map<String, String> headers = const {},
     String? formatHint,
-  }) {
-    final pending = Completer<Duration?>();
-    pendingLoads.add(pending);
-    return pending.future;
-  }
+  }) async => _snapshot.duration;
 
   @override
-  Future<void> stop() async {
-    stopCount++;
-    for (final pending in pendingLoads) {
-      if (!pending.isCompleted) pending.complete(null);
-    }
-  }
+  Future<void> dispose() => _events.close();
 }

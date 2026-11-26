@@ -5,8 +5,8 @@ import 'dart:io';
 // 1.8.x, even though material_color_utilities marks it deprecated internally.
 // ignore_for_file: deprecated_member_use
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dynamic_color/dynamic_color.dart';
@@ -14,27 +14,33 @@ import 'package:material_color_utilities/material_color_utilities.dart';
 
 import 'core/services/app_logger.dart';
 import 'core/services/permission_service.dart';
-import 'core/services/saf_storage.dart';
-import 'core/services/storage_location.dart';
 import 'core/storage/settings_store.dart';
 import 'core/sync/webdav_sync_controller.dart';
 import 'core/ui/app_toast.dart';
-import 'core/ui/widgets/prism_environment.dart';
 import 'core/ui/car_display_layout.dart';
+import 'core/ui/scroll_to_top.dart';
 import 'features/downloads/download_history_store.dart';
 import 'core/music_sources/music_source_controller.dart';
 import 'features/music_sources/music_source_update_prompt.dart';
 import 'features/player/player_controller.dart';
-import 'features/playlists/playlist_store.dart';
+import 'features/player/live_activity_service.dart';
 import 'features/player/music_home_widget_service.dart';
+import 'features/shell/shell_navigation.dart';
 import 'features/songs/local_song_scan_cache.dart';
 import 'features/startup/startup_gate.dart';
 import 'features/update/app_update_prompt.dart';
+import 'features/update/app_update_controller.dart';
 import 'router.dart';
 import 'theme/app_motion.dart';
 import 'theme/app_theme.dart';
 import 'theme/dynamic_color_scheme.dart';
 import 'theme/dynamic_color_status.dart';
+
+/// dynamic_color 只实现了 Android / Windows / Linux / macOS，**没有 iOS 实现**。
+/// 在 iOS 上直接调用它的插件方法会抛 MissingPluginException，所以这里做平台守卫：
+/// iOS 走项目自带的主题色体系（settings.themeSeed），与 Android 上的表现一致。
+bool get _supportsPlatformDynamicColor =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
 class CyShineMusicApp extends ConsumerStatefulWidget {
   const CyShineMusicApp({super.key});
@@ -56,21 +62,39 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
   bool _openedExternalAudio = false;
   bool _sourceUpdatePromptsReady = false;
   MusicHomeWidgetService? _homeWidgetService;
+  LiveActivityService? _liveActivityService;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _corePaletteFuture = DynamicColorPlugin.getCorePalette();
+    _corePaletteFuture = _supportsPlatformDynamicColor
+        ? DynamicColorPlugin.getCorePalette().then<CorePalette?>(
+            (value) => value,
+            onError: (Object _) => null,
+          )
+        : Future<CorePalette?>.value(null);
     if (Platform.isAndroid) {
       final homeWidgetService = ref.read(musicHomeWidgetProvider);
       homeWidgetService.onOpenPlayer = _openWidgetPlayer;
       _homeWidgetService = homeWidgetService;
+    }
+    // audio_intent 通道在 Android 与 iOS 上都有原生实现
+    // （iOS 见 ios/Runner/CyShineNativePlugin.swift），两边都要挂监听。
+    // 桌面卡片仍只有 Android 可用（iOS 需要单独的 WidgetKit Extension）。
+    if (Platform.isAndroid || Platform.isIOS) {
       _audioIntentChannel.setMethodCallHandler((call) async {
         if (call.method != 'audioAvailable') return;
         _externalAudioRequested = true;
         await _openPendingExternalAudio();
       });
+    }
+    // iOS 桌面 Widget 同步沿用 liveActivitySyncProvider 名称，
+    // 与 Android 桌面小组件一样在首帧之后激活。
+    if (Platform.isIOS) {
+      final liveActivity = ref.read(liveActivityProvider);
+      liveActivity.onOpenPlayer = _openLiveActivityPlayer;
+      _liveActivityService = liveActivity;
     }
     // Warm persisted library and player state after the first frame, even when
     // the startup screen is skipped.
@@ -84,61 +108,34 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
       ref.read(webDavSyncControllerProvider);
       ref.read(playerControllerProvider.notifier);
       if (Platform.isAndroid) ref.read(musicHomeWidgetSyncProvider);
-      unawaited(_initializeLocalLibrary());
+      if (Platform.isIOS) ref.read(liveActivitySyncProvider);
+      final scanCache = ref.read(localSongScanCacheProvider);
+      unawaited(
+        scanCache.ensureScan(
+          directory: ref.read(settingsProvider).localMusicDir,
+        ),
+      );
     });
   }
 
   @override
   void dispose() {
     _homeWidgetService?.onOpenPlayer = null;
-    if (Platform.isAndroid) _audioIntentChannel.setMethodCallHandler(null);
+    _liveActivityService?.onOpenPlayer = null;
+    if (Platform.isAndroid || Platform.isIOS) {
+      _audioIntentChannel.setMethodCallHandler(null);
+    }
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
-  Future<void> _initializeLocalLibrary() async {
-    final cache = ref.read(localSongScanCacheProvider);
-    final selected = ref.read(settingsProvider).localMusicDirs;
-    final directories = <String>[];
-    for (final directory in selected) {
-      directories.add(
-        isContentLocation(directory)
-            ? await SafStorage.resolveLocalPath(
-                    directory,
-                    requireReadable: false,
-                  ) ??
-                  directory
-            : directory,
-      );
-    }
-    if (!mounted) return;
-    // Do not overwrite a folder selection changed while migration was pending.
-    if (!listEquals(selected, ref.read(settingsProvider).localMusicDirs)) {
-      return;
-    }
-    if (!listEquals(selected, directories)) {
-      await ref.read(settingsProvider.notifier).setLocalMusicDirs(directories);
-    }
-    await cache.ensureScan(directories: directories);
-    if (!mounted) return;
-    await cache.linkKnownPaths([
-      for (final entry in ref.read(downloadHistoryProvider))
-        if (entry.savedPath != null) entry.savedPath!,
-      for (final playlist in ref.read(localPlaylistsProvider))
-        for (final track in playlist.tracks)
-          if (track.localPath != null) track.localPath!,
-    ]);
-  }
-
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (mounted &&
-        (state == AppLifecycleState.paused ||
-            state == AppLifecycleState.inactive)) {
-      unawaited(ref.read(localSongScanCacheProvider).flush());
-    }
     if (state != AppLifecycleState.resumed || !mounted) return;
     unawaited(ref.read(webDavSyncControllerProvider.notifier).onAppResumed());
+    if (Platform.isIOS && _externalAudioReady) {
+      unawaited(ref.read(appUpdateControllerProvider).check(automatic: true));
+    }
   }
 
   Future<void> _onStartupReady() async {
@@ -146,15 +143,15 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
       _externalAudioReady = true;
       await _openPendingExternalAudio();
       await _openWidgetPlayer();
+      if (Platform.isIOS && mounted) {
+        unawaited(ref.read(appUpdateControllerProvider).check(automatic: true));
+      }
       if (!mounted || _openedExternalAudio) return;
       final canCheckForUpdate = await _checkPermission();
       if (!canCheckForUpdate) return;
-      if (!mounted || !ref.read(settingsProvider).checkForUpdatesOnStartup) {
-        return;
-      }
       final context = rootNavigatorKey.currentContext;
       if (context == null || !context.mounted) return;
-      await checkForAppUpdate(context, ref);
+      if (!Platform.isIOS) await checkForAppUpdate(context, ref);
     } finally {
       if (mounted) setState(() => _sourceUpdatePromptsReady = true);
     }
@@ -163,17 +160,20 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
   Future<void> _openWidgetPlayer() async {
     if (!mounted || !_externalAudioReady) return;
     if (!(_homeWidgetService?.takeOpenPlayerRequest() ?? false)) return;
-    final location = appRouter.routeInformationProvider.value.uri;
-    if (location.path != '/player') {
-      unawaited(appRouter.push<void>('/player', extra: location.toString()));
-    }
+    openPlayerRoute(appRouter);
+  }
+
+  /// 点 iOS 桌面 Widget 时把播放器推到前台（保留既有回调名称）。
+  Future<void> _openLiveActivityPlayer() async {
+    if (!mounted) return;
+    openPlayerRoute(appRouter);
   }
 
   Future<void> _openPendingExternalAudio() async {
-    if (!Platform.isAndroid ||
-        !mounted ||
-        !_externalAudioReady ||
-        _handlingExternalAudio) {
+    // 这里不再限定 Android：iOS 的 audio_intent 通道实现了 takePendingAudio，
+    // 会把「文件 App → 用栖弦打开」的文件复制进沙盒并返回真实路径，
+    // 与 Android 的语义一致。缺失插件的情况由下面的 MissingPluginException 兜住。
+    if (!mounted || !_externalAudioReady || _handlingExternalAudio) {
       return;
     }
     _handlingExternalAudio = true;
@@ -192,12 +192,7 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
           _externalAudioRequested = true;
           final player = ref.read(playerControllerProvider.notifier);
           final playback = player.playFromFile(path);
-          final location = appRouter.routeInformationProvider.value.uri;
-          if (location.path != '/player') {
-            unawaited(
-              appRouter.push<void>('/player', extra: location.toString()),
-            );
-          }
+          openPlayerRoute(appRouter);
           await playback;
         } on MissingPluginException {
           // Other platforms and test engines do not install the Android entry.
@@ -221,36 +216,17 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
   }
 
   Future<bool> _checkPermission() async {
-    final granted = await PermissionService.hasAudioLibraryRead();
+    final granted = await PermissionService.hasExternalStorageWrite();
     await AppLogger.write('app', 'startup permission status granted=$granted');
-    if (granted) {
-      await PermissionService.markAudioPermissionRequestAttempted();
-      return true;
-    }
-    if (await PermissionService.hasAudioPermissionRequestAttempted()) {
-      return true;
-    }
+    if (granted) return true;
     // Wait one frame so the router has a chance to mount its home screen.
     await Future<void>.delayed(const Duration(milliseconds: 50));
     final ctx = rootNavigatorKey.currentContext;
     if (ctx == null || !ctx.mounted) return false;
-    // Remember the explanation itself, including "稍后再说" or dismissal.
-    if (await PermissionService.hasAudioPermissionRequestAttempted()) {
-      return true;
-    }
-    await PermissionService.markAudioPermissionRequestAttempted();
-    if (!ctx.mounted) return false;
     final shouldRequest = await _showPermissionDialog(ctx);
     if (!shouldRequest) return true;
 
-    final ok = await PermissionService.requestAudioLibraryRead();
-    if (ok && mounted) {
-      unawaited(
-        ref
-            .read(localSongScanCacheProvider)
-            .refresh(directories: ref.read(settingsProvider).localMusicDirs),
-      );
-    }
+    final ok = await PermissionService.ensureExternalStorageWrite();
     await AppLogger.write(
       'app',
       'startup permission user-triggered granted=$ok',
@@ -259,10 +235,11 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
     if (root == null || !root.mounted) return false;
     showAppToast(
       root,
-      ok ? '已允许读取本地音乐' : '未授权，可在「设置→权限、下载与目录」中开启音乐和音频权限',
+      ok ? '已授予存储权限' : '未授权，可在「设置→打开系统应用设置」手动开启',
       type: ok ? AppToastType.success : AppToastType.warning,
     );
-    // Let the user return to the library after handling the permission prompt.
+    // Requesting all-files access can switch to system UI. Avoid showing an
+    // update dialog behind it; the next cold start will check normally.
     return false;
   }
 
@@ -271,11 +248,11 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
           context: context,
           barrierDismissible: false,
           builder: (ctx) => AlertDialog(
-            icon: const Icon(Icons.library_music_outlined, size: 36),
-            title: const Text('读取本地音乐'),
+            icon: const Icon(Icons.folder_shared_outlined, size: 36),
+            title: const Text('需要存储权限'),
             content: const Text(
-              '允许读取设备上的音乐和音频，在选定文件夹中查找歌曲及封面。\n\n'
-              '暂不授权也可以继续使用，之后可在「设置→权限、下载与目录」中开启。',
+              '为了把下载好的音乐保存到「音乐」目录，'
+              '需要授予存储访问权限。\n\n',
             ),
             actions: [
               TextButton(
@@ -292,12 +269,22 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
         false;
   }
 
+  /// iOS 上没有 dynamic_color 原生实现，DynamicColorBuilder 会抛
+  /// MissingPluginException。这里在没有平台实现时直接用 (null, null) 调用
+  /// 同一个 builder，下游逻辑一行都不用改。
+  Widget _platformDynamicColorBuilder({
+    required Widget Function(ColorScheme?, ColorScheme?) builder,
+  }) {
+    if (!_supportsPlatformDynamicColor) return builder(null, null);
+    return DynamicColorBuilder(builder: builder);
+  }
+
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
     final themeMode = settings.themeMode;
 
-    return DynamicColorBuilder(
+    return _platformDynamicColorBuilder(
       builder: (lightDynamic, darkDynamic) {
         return FutureBuilder<CorePalette?>(
           future: _corePaletteFuture,
@@ -334,19 +321,29 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
                 lightScheme != null &&
                 darkScheme != null;
             final lightTheme = AppTheme.fromScheme(
-              AppTheme.schemeFor(
-                useDynamicScheme ? lightScheme.primary : settings.themeSeed,
-                Brightness.light,
-                settings.colorStyle,
-              ),
+              useDynamicScheme
+                  ? lightScheme
+                  : AppTheme.schemeFor(
+                      settings.themeSeed,
+                      Brightness.light,
+                      settings.colorStyle,
+                    ),
+              colors: settings.customTheme.enabled
+                  ? settings.customTheme.light
+                  : null,
               style: settings.colorStyle,
             );
             final darkTheme = AppTheme.fromScheme(
-              AppTheme.schemeFor(
-                useDynamicScheme ? darkScheme.primary : settings.themeSeed,
-                Brightness.dark,
-                settings.colorStyle,
-              ),
+              useDynamicScheme
+                  ? darkScheme
+                  : AppTheme.schemeFor(
+                      settings.themeSeed,
+                      Brightness.dark,
+                      settings.colorStyle,
+                    ),
+              colors: settings.customTheme.enabled
+                  ? settings.customTheme.dark
+                  : null,
               style: settings.colorStyle,
             );
             final isDark = switch (themeMode) {
@@ -359,53 +356,57 @@ class _CyShineMusicAppState extends ConsumerState<CyShineMusicApp>
               useDynamicScheme ? (isDark ? darkScheme : lightScheme) : null,
               fromCorePalette: corePalette != null,
             );
-            final overlayIsDark = isDark;
-            final overlayStyle = SystemUiOverlayStyle(
-              statusBarColor: Colors.transparent,
-              systemNavigationBarColor: Colors.transparent,
-              systemNavigationBarDividerColor: Colors.transparent,
-              systemStatusBarContrastEnforced: false,
-              systemNavigationBarContrastEnforced: false,
-              statusBarIconBrightness: overlayIsDark
-                  ? Brightness.light
-                  : Brightness.dark,
-              statusBarBrightness: overlayIsDark
-                  ? Brightness.dark
-                  : Brightness.light,
-              systemNavigationBarIconBrightness: overlayIsDark
-                  ? Brightness.light
-                  : Brightness.dark,
+            final overlayIsDark = settings.customTheme.enabled
+                ? ThemeData.estimateBrightnessForColor(
+                        (isDark ? darkTheme : lightTheme)
+                            .scaffoldBackgroundColor,
+                      ) ==
+                      Brightness.dark
+                : isDark;
+            SystemChrome.setSystemUIOverlayStyle(
+              SystemUiOverlayStyle(
+                statusBarColor: Colors.transparent,
+                systemNavigationBarColor: Colors.transparent,
+                systemNavigationBarDividerColor: Colors.transparent,
+                systemStatusBarContrastEnforced: false,
+                systemNavigationBarContrastEnforced: false,
+                statusBarIconBrightness: overlayIsDark
+                    ? Brightness.light
+                    : Brightness.dark,
+                statusBarBrightness: overlayIsDark
+                    ? Brightness.dark
+                    : Brightness.light,
+                systemNavigationBarIconBrightness: overlayIsDark
+                    ? Brightness.light
+                    : Brightness.dark,
+              ),
             );
 
             return MaterialApp.router(
               title: '栖弦',
-              localizationsDelegates: const [PrismChineseStrings.delegate],
               debugShowCheckedModeBanner: false,
-              themeAnimationDuration: Duration.zero,
+              themeAnimationDuration: AppMotion.long,
               themeAnimationCurve: AppMotion.emphasized,
               themeMode: themeMode,
               theme: lightTheme,
               darkTheme: darkTheme,
               routerConfig: appRouter,
               builder: (context, child) {
-                // Route-specific regions (such as artwork headers) override
-                // this baseline only while they are visible in the layer tree.
-                return AnnotatedRegion<SystemUiOverlayStyle>(
-                  value: overlayStyle,
+                // ScrollToTopScope 放在最外层：iOS 的「点状态栏回到顶部」由它接管，
+                // 原因见 lib/core/ui/scroll_to_top.dart 的说明（框架自带的实现
+                // 在 ShellRoute + indexedStack 结构下会被外壳 Scaffold 挡住）。
+                return ScrollToTopScope(
                   child: CarDisplayViewport(
                     enabled: settings.carDisplayEnabled,
                     sizeFactor: settings.carDisplaySize,
-                    child: PrismEnvironment(
-                      mode: settings.liquidGlassMode,
-                      child: AppToastOverlay(
-                        child: MusicSourceUpdatePrompt(
-                          navigatorKey: rootNavigatorKey,
-                          ready: _sourceUpdatePromptsReady,
-                          child: StartupGate(
-                            skipStartupScreen: settings.skipStartupScreen,
-                            onReady: _onStartupReady,
-                            child: child ?? const SizedBox.shrink(),
-                          ),
+                    child: AppToastOverlay(
+                      child: MusicSourceUpdatePrompt(
+                        navigatorKey: rootNavigatorKey,
+                        ready: _sourceUpdatePromptsReady,
+                        child: StartupGate(
+                          skipStartupScreen: settings.skipStartupScreen,
+                          onReady: _onStartupReady,
+                          child: child ?? const SizedBox.shrink(),
                         ),
                       ),
                     ),
