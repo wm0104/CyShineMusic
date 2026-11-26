@@ -24,13 +24,18 @@ void main() {
   late ProviderContainer container;
   late _Adapter adapter;
   late DownloadService service;
+  late List<String> pathCalls;
   setUp(() async {
+    pathCalls = [];
     root = await Directory.systemTemp.createTemp('cyshine-pause-');
     final musicDir = await Directory('${root.path}/music').create();
     final cacheDir = await Directory('${root.path}/cache').create();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('plugins.flutter.io/path_provider'),
-      (call) async => call.method == 'getTemporaryDirectory' ? cacheDir.path : null,
+      (call) async {
+        pathCalls.add(call.method);
+        return call.method == 'getTemporaryDirectory' ? cacheDir.path : null;
+      },
     );
     SharedPreferences.setMockInitialValues({'download_dir': musicDir.path});
     final prefs = await SharedPreferences.getInstance();
@@ -114,13 +119,45 @@ void main() {
       }),
     ], embed: _embed);
     await adapter.started.future;
+    final ids = container.read(downloadProgressProvider).tasks.map((task) => task.id).toList();
     service.pauseAll();
     expect(container.read(downloadProgressProvider).tasks, hasLength(5));
     expect(container.read(downloadProgressProvider).tasks.every((t) => t.stage == DownloadStage.paused), isTrue);
     expect(await batch, isEmpty);
+    await container.read(downloadProgressProvider.notifier).flushPersistence();
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getStringList(DownloadProgressNotifier.storageKey)!.map(
+      (row) => jsonDecode(row) as Map<String, dynamic>,
+    ).toList();
+    expect(stored.map((row) => row['id']), ids);
+    expect(stored.map((row) => row['stage']), everyElement('paused'));
+    expect(pathCalls, isNot(contains('getApplicationDocumentsDirectory')));
     adapter.hold = false;
     await service.resumeAll();
-    expect(container.read(downloadProgressProvider).tasks.every((t) => t.stage == DownloadStage.done), isTrue);
+    final completed = container.read(downloadProgressProvider).tasks;
+    expect(completed.map((task) => task.id), ids);
+    expect(completed.every((t) => t.stage == DownloadStage.done), isTrue);
+    expect(completed.every((t) => File(t.savedPath!).existsSync()), isTrue);
+    expect(pathCalls, isNot(contains('getApplicationDocumentsDirectory')));
+  });
+
+  test('concurrent downloads keep a writable requested directory without false fallback', () async {
+    adapter.hold = false;
+    final results = await service.downloadMany(musics: [
+      for (var index = 0; index < 3; index++) MusicInfo.fromJson({
+        ..._music.toJson(), 'id': 'probe-$index', 'name': 'probe $index',
+      }),
+    ], embed: _embed);
+    expect(results, hasLength(3));
+    expect(results.every((result) => result.success), isTrue);
+    expect(adapter.calls, 3);
+    expect(pathCalls, isNot(contains('getApplicationDocumentsDirectory')));
+    expect(container.read(downloadProgressProvider).tasks.map((task) => task.stage),
+      everyElement(DownloadStage.done));
+    expect(results.map((result) => result.result!.path),
+      everyElement(startsWith('${root.path}/music/')));
+    final directoryEntries = await Directory('${root.path}/music').list().toList();
+    expect(directoryEntries.whereType<Directory>(), isEmpty);
   });
 
   test('explicit quality, embed or destination changes download again; identical requests reuse', () async {

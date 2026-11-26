@@ -3,11 +3,25 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:cy_shine_music/core/storage/settings_store.dart';
+import 'package:cy_shine_music/features/downloads/download_progress.dart';
 import 'package:cy_shine_music/core/models/enums.dart';
 import 'package:cy_shine_music/core/models/music_info.dart';
 import 'package:cy_shine_music/core/services/download_service.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late SharedPreferences prefs;
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    prefs = await SharedPreferences.getInstance();
+  });
+  ProviderContainer open() => ProviderContainer(overrides: [
+    sharedPreferencesProvider.overrideWithValue(prefs),
+  ]);
+
   test(
     'batch downloads are deduplicated, isolated, and capped at three',
     () async {
@@ -15,7 +29,7 @@ void main() {
       final serviceProvider = Provider<_RecordingDownloadService>(
         (ref) => service = _RecordingDownloadService(ref, failIds: {'song-4'}),
       );
-      final container = ProviderContainer();
+      final container = open();
       addTearDown(container.dispose);
       container.read(serviceProvider);
 
@@ -34,6 +48,11 @@ void main() {
       expect(service.maxActive, 3);
       expect(results.where((item) => item.success), hasLength(7));
       expect(results.singleWhere((item) => !item.success).music.id, 'song-4');
+      final tasks = container.read(downloadProgressProvider).tasks;
+      expect(tasks, hasLength(8));
+      expect(tasks.where((task) => task.stage == DownloadStage.done), hasLength(7));
+      expect(tasks.singleWhere((task) => task.stage == DownloadStage.failed).musicId, 'song-4');
+      expect(tasks.any((task) => task.isBusy), isFalse);
     },
   );
 
@@ -45,7 +64,7 @@ void main() {
       final serviceProvider = Provider<_RecordingDownloadService>(
         (ref) => service = _RecordingDownloadService(ref, blocker: blocker),
       );
-      final container = ProviderContainer();
+      final container = open();
       addTearDown(container.dispose);
       container.read(serviceProvider);
 
@@ -56,9 +75,13 @@ void main() {
       final duplicate = await service.downloadMany(musics: [music]);
       expect(duplicate, isEmpty);
       expect(service.calls, ['same-song']);
+      expect(container.read(downloadProgressProvider).tasks, hasLength(1));
+      final taskId = container.read(downloadProgressProvider).tasks.single.id;
 
       blocker.complete();
       expect((await first).single.success, isTrue);
+      expect(container.read(downloadProgressProvider).tasks.single.id, taskId);
+      expect(container.read(downloadProgressProvider).tasks.single.stage, DownloadStage.done);
     },
   );
 
@@ -67,7 +90,7 @@ void main() {
     final serviceProvider = Provider<_RecordingDownloadService>(
       (ref) => service = _RecordingDownloadService(ref),
     );
-    final container = ProviderContainer();
+    final container = open();
     addTearDown(container.dispose);
     container.read(serviceProvider);
 
@@ -83,12 +106,16 @@ void main() {
     );
 
     expect(service.qualities, [Quality.k320]);
+    expect(container.read(downloadProgressProvider).tasks.single.qualityCode, Quality.k320.code);
+    expect(container.read(downloadProgressProvider).tasks.single.stage, DownloadStage.done);
   });
 }
 
 class _RecordingDownloadService extends DownloadService {
-  _RecordingDownloadService(super.ref, {this.failIds = const {}, this.blocker});
+  _RecordingDownloadService(this.testRef, {this.failIds = const {}, this.blocker})
+      : super(testRef);
 
+  final Ref testRef;
   final Set<String> failIds;
   final Completer<void>? blocker;
   final Completer<void> firstStarted = Completer<void>();
@@ -103,6 +130,11 @@ class _RecordingDownloadService extends DownloadService {
     Quality? quality,
     required EmbedRequest embed,
   }) async {
+    final task = testRef.read(downloadProgressProvider).tasks.singleWhere(
+      (task) => task.musicId == music.id && task.stage == DownloadStage.queued,
+    );
+    final progress = testRef.read(downloadProgressProvider.notifier);
+    progress.updateStage(task.id, DownloadStage.downloading);
     calls.add(music.id);
     qualities.add(quality);
     active += 1;
@@ -115,7 +147,12 @@ class _RecordingDownloadService extends DownloadService {
         await Future<void>.delayed(const Duration(milliseconds: 8));
       }
       if (failIds.contains(music.id)) throw StateError('download failed');
-      return DownloadResult(path: 'D:/Music/${music.id}.mp3');
+      final path = 'D:/Music/${music.id}.mp3';
+      progress.finish(task.id, path);
+      return DownloadResult(path: path);
+    } catch (error) {
+      progress.fail(task.id, error.toString());
+      rethrow;
     } finally {
       active -= 1;
     }

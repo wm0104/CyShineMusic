@@ -136,7 +136,6 @@ void main() {
   testWidgets('complete album select all chooses one destination and adds all 65 in order', (tester) async {
     final h = await _pump(tester, '/discover/albums/wy/record');
     final target = await h.container.read(localPlaylistsProvider.notifier).create('目标歌单');
-    await h.container.read(localPlaylistsProvider.notifier).addMusic(target.id, _song(0));
     await _frames(tester);
     await _selectAll(tester);
     final navigation = find.byTooltip('设置').hitTestable();
@@ -150,9 +149,45 @@ void main() {
     await _frames(tester);
     final stored = h.container.read(localPlaylistsProvider.notifier).byId(target.id)!;
     expect(stored.tracks, hasLength(65));
+    expect(stored.tracks.map((track) => track.musicInfo?.id),
+      List.generate(65, (index) => 'wy_$index'));
+    expect(stored.customOrderedTracks.map((track) => track.musicInfo?.id),
+      List.generate(65, (index) => 'wy_$index'));
     expect(stored.tracks.last.musicInfo?.id, 'wy_64');
     expect(find.text('添加歌曲到'), findsNothing);
     expect(h.player.played, isEmpty);
+    await _finishToast(tester);
+  });
+
+  testWidgets('album addition deduplicates while retaining existing target and custom order', (tester) async {
+    final h = await _pump(tester, '/discover/albums/wy/record');
+    final store = h.container.read(localPlaylistsProvider.notifier);
+    final target = await store.create('已有曲目目标');
+    await store.addMusics(target.id, [_song(0), _song(64)]);
+    final before = store.byId(target.id)!;
+    await store.setCustomTrackOrder(target.id,
+      before.tracks.reversed.map((track) => track.identityKey).toList());
+    final beforeCustom = List<String>.of(store.byId(target.id)!.customTrackOrder!);
+    await _frames(tester);
+    await _selectAll(tester);
+    await tester.tap(find.text('添加到歌单').hitTestable());
+    await _frames(tester);
+    expect(find.text('添加歌曲到'), findsOneWidget);
+    await tester.tap(find.text('已有曲目目标').hitTestable());
+    await _frames(tester);
+    final stored = store.byId(target.id)!;
+    expect(stored.tracks, hasLength(65));
+    // addMusics prepends only new tracks; existing raw/custom orders are kept.
+    expect(stored.tracks.map((track) => track.musicInfo?.id),
+      [for (var index = 1; index < 64; index++) 'wy_$index', 'wy_0', 'wy_64']);
+    expect(stored.customOrderedTracks.map((track) => track.musicInfo?.id),
+      ['wy_64', 'wy_0', for (var index = 1; index < 64; index++) 'wy_$index']);
+    expect(stored.customTrackOrder!.take(2), beforeCustom);
+    expect(h.api.full.tracks.map((music) => music.id),
+      List.generate(65, (index) => 'wy_$index'));
+    expect(find.text('添加歌曲到'), findsNothing);
+    expect(h.player.played, isEmpty);
+    await _finishToast(tester);
   });
 
   testWidgets('cancel destination writes nothing and leaves selection intact', (tester) async {
@@ -192,6 +227,7 @@ void main() {
       'tx_selected');
     expect(h.api.full.tracks.first.id, 'wy_0');
     expect(h.player.played, isEmpty);
+    await _finishToast(tester);
   });
   testWidgets('single album song uses the existing destination sheet once', (tester) async {
     final h = await _pump(tester, '/discover/albums/wy/record');
@@ -206,6 +242,7 @@ void main() {
     expect(h.container.read(localPlaylistsProvider.notifier).byId(target.id)!.tracks.single.musicInfo?.id, 'wy_0');
     expect(find.text('添加歌曲到'), findsNothing);
     expect(h.player.played, isEmpty);
+    await _finishToast(tester);
   });
 
   testWidgets('explicit play all uses all album tracks in order with album queue identity', (tester) async {
@@ -231,6 +268,7 @@ void main() {
     expect(find.byType(SearchPage), findsNothing);
     expect(find.text('原曲 0'), findsOneWidget);
     expect(h.player.played, isEmpty);
+    await _finishToast(tester);
   });
 
   testWidgets('cancelling match keeps the previous manual version', (tester) async {
@@ -261,6 +299,7 @@ void main() {
     final key = albumTrackMatchKey(source: MusicSource.wy, albumId: 'record', original: _song(0));
     expect(h.container.read(albumTrackMatchesProvider)[key], same(newer));
     expect(h.player.played, isEmpty);
+    await _finishToast(tester);
   });
 
   testWidgets('discovery album search opens the same full-detail route as the artist catalog', (tester) async {
@@ -283,9 +322,9 @@ void main() {
     await tester.tap(find.byTooltip('批量操作'));
     await _frames(tester);
     for (final index in [1, 0]) {
-      final row = find.byKey(ValueKey('album-track-wy:wy_$index'));
-      await tester.ensureVisible(row);
-      await tester.tap(row);
+      final row = await _revealAlbumTrack(tester, index,
+        delta: index == 0 ? -120 : 120);
+      await tester.tap(row.hitTestable());
       await _frames(tester);
     }
     await tester.tap(find.text('添加到歌单').hitTestable());
@@ -296,6 +335,7 @@ void main() {
     expect(h.container.read(localPlaylistsProvider.notifier).byId(target.id)!.tracks.map((track) => track.musicInfo?.id),
       ['wy_0', 'wy_1']);
     expect(h.player.played, isEmpty);
+    await _finishToast(tester);
   });
 
 }
@@ -436,4 +476,27 @@ Future<void> _openMatch(WidgetTester tester) async {
   await _slideFirst(tester);
   await tester.tap(find.text('更换匹配').hitTestable());
   await _frames(tester);
+}
+
+Future<Finder> _revealAlbumTrack(WidgetTester tester, int index, {required double delta}) async {
+  final row = find.byKey(ValueKey('album-track-wy:wy_$index'));
+  final scrollable = find.descendant(
+    of: find.byType(OnlinePlaylistDetailPage),
+    matching: find.byType(Scrollable),
+  ).first;
+  // ensureVisible cannot locate a sliver row which has not been built yet.
+  await tester.scrollUntilVisible(row, delta, scrollable: scrollable);
+  await tester.pumpAndSettle();
+  await Scrollable.ensureVisible(tester.element(row), alignment: 0.5,
+    duration: const Duration(milliseconds: 200));
+  await tester.pumpAndSettle();
+  expect(row.hitTestable(), findsOneWidget);
+  return row;
+}
+
+Future<void> _finishToast(WidgetTester tester) async {
+  // Use the real 3-second toast lifecycle, including its removal animation.
+  await tester.pump(const Duration(seconds: 4));
+  await _frames(tester);
+  expect(find.byKey(const ValueKey('app-toast-capsule')), findsNothing);
 }

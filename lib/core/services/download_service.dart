@@ -715,10 +715,14 @@ class DownloadService {
         await PermissionService.ensureExternalStorageWrite();
         await dir.create(recursive: true);
       }
-      // Write probe to confirm we actually have permission.
-      final probe = File(p.join(dir.path, '.cyshine_probe'));
-      await probe.writeAsString('ok');
-      await probe.delete();
+      // Each concurrent task needs its own probe; sharing a filename makes
+      // another task's successful cleanup look like a permission failure.
+      final probeDir = await dir.createTemp('.cyshine-probe-');
+      try {
+        await File(p.join(probeDir.path, 'write')).writeAsString('ok');
+      } finally {
+        await probeDir.delete(recursive: true);
+      }
       return dir;
     } catch (e) {
       log('destDir FAILED ${dir.path}: $e; falling back to app-private');
