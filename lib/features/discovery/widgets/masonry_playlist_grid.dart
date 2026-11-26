@@ -12,9 +12,14 @@ import 'discovery_playlist_cover.dart';
 import 'playlist_preview_dialog.dart';
 
 class MasonryPlaylistGrid extends ConsumerWidget {
-  const MasonryPlaylistGrid({super.key, required this.items});
+  const MasonryPlaylistGrid({
+    super.key,
+    required this.items,
+    required this.compactLandscape,
+  });
 
   final List<PlaylistSummary> items;
+  final bool compactLandscape;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -23,12 +28,15 @@ class MasonryPlaylistGrid extends ConsumerWidget {
     );
     return LayoutBuilder(
       builder: (context, constraints) {
-        final columnCount = CarDisplayLayout.enabledOf(context)
+        const gap = 10.0;
+        // Keep covers near the width of a two-column portrait card after rotation.
+        final columnCount = compactLandscape
+            ? ((constraints.maxWidth + gap) / (190 + gap)).round().clamp(2, 6)
+            : CarDisplayLayout.enabledOf(context)
             ? (constraints.maxWidth / 240).floor().clamp(2, 6)
             : carPadModeEnabled || constraints.maxWidth >= 700
             ? 3
             : 2;
-        const gap = 10.0;
         final width =
             (constraints.maxWidth - gap * (columnCount - 1)) / columnCount;
         final columns = List.generate(columnCount, (_) => <_MasonryEntry>[]);

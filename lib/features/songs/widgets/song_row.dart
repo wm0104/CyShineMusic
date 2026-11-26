@@ -8,6 +8,7 @@ import 'package:flutter_slidable/flutter_slidable.dart';
 
 import '../../../core/services/embedded_artwork_cache.dart';
 import '../../../core/ui/cover_image_source.dart';
+import '../../../core/ui/tight_track_actions.dart';
 import '../../../theme/app_motion.dart';
 import '../../downloads/download_history_store.dart';
 
@@ -31,6 +32,8 @@ class SongRow extends StatelessWidget {
     required this.onDelete,
     this.playlistMode = false,
     this.onMoveToPlaylist,
+    this.onMatch,
+    this.tapToMatch = false,
   });
 
   final DownloadHistoryEntry entry;
@@ -46,11 +49,18 @@ class SongRow extends StatelessWidget {
   final VoidCallback onDelete;
   final bool playlistMode;
   final VoidCallback? onMoveToPlaylist;
+  final VoidCallback? onMatch;
+  final bool tapToMatch;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final subtitle = _subtitle(entry);
+    final matchOnTap = tapToMatch && onMatch != null && !batchMode;
+    final canReplace = onMatch != null && !tapToMatch;
+    final tapHint = matchOnTap ? '轻触匹配音源' : '轻触播放';
+    final subtitle = matchOnTap
+        ? '${_subtitle(entry)} · 轻触匹配'
+        : _subtitle(entry);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final shortDuration = reduceMotion ? Duration.zero : AppMotion.short;
     final mediumDuration = reduceMotion ? Duration.zero : AppMotion.medium;
@@ -80,9 +90,11 @@ class SongRow extends StatelessWidget {
         child: Semantics(
           button: true,
           selected: batchMode && selected,
-          hint: batchMode ? '轻触选择歌曲' : '轻触播放',
+          hint: batchMode ? '轻触选择歌曲' : tapHint,
           child: InkWell(
-            onTap: batchMode ? onToggleSelected : onPlay,
+            onTap: batchMode
+                ? onToggleSelected
+                : (matchOnTap ? onMatch : onPlay),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(4, 8, 2, 8),
               child: Row(
@@ -194,17 +206,22 @@ class SongRow extends StatelessWidget {
       ),
     );
 
-    return Slidable(
+    final canAdd = !playlistMode || onMoveToPlaylist != null;
+    final addLabel = playlistMode ? '添加到歌单' : '歌单';
+    final removeLabel = playlistMode ? '移出歌单' : '删除';
+    final actionPadding = canReplace ? tightTrackActionPadding : null;
+    int actionFlex(String label) =>
+        canReplace ? tightTrackActionFlex(label) : 1;
+
+    Widget slidable(double extentRatio) => Slidable(
       key: ValueKey('song-slide-${entry.id}'),
       groupTag: 'songs',
       enabled: !batchMode,
       endActionPane: ActionPane(
         motion: const BehindMotion(),
-        extentRatio: playlistMode
-            ? (onMoveToPlaylist == null ? 0.22 : 0.66)
-            : 0.4,
+        extentRatio: extentRatio,
         children: [
-          if (!playlistMode || onMoveToPlaylist != null)
+          if (canAdd)
             SlidableAction(
               key: const ValueKey('song-add-playlist-action'),
               autoClose: false,
@@ -215,7 +232,9 @@ class SongRow extends StatelessWidget {
               backgroundColor: scheme.secondaryContainer,
               foregroundColor: scheme.onSecondaryContainer,
               icon: Icons.playlist_add_rounded,
-              label: playlistMode ? '添加到歌单' : '歌单',
+              label: addLabel,
+              padding: actionPadding,
+              flex: actionFlex(addLabel),
             ),
           if (onMoveToPlaylist case final move?)
             SlidableAction(
@@ -229,7 +248,10 @@ class SongRow extends StatelessWidget {
               foregroundColor: scheme.onTertiaryContainer,
               icon: Icons.drive_file_move_rounded,
               label: '移动到歌单',
+              padding: actionPadding,
+              flex: actionFlex('移动到歌单'),
             ),
+          if (canReplace) replaceTrackMatchAction(context, onMatch!),
           SlidableAction(
             key: ValueKey(
               playlistMode
@@ -242,11 +264,27 @@ class SongRow extends StatelessWidget {
             icon: playlistMode
                 ? Icons.playlist_remove_rounded
                 : Icons.delete_outline_rounded,
-            label: playlistMode ? '移出歌单' : '删除',
+            label: removeLabel,
+            padding: actionPadding,
+            flex: actionFlex(removeLabel),
           ),
         ],
       ),
       child: row,
+    );
+    if (canReplace) {
+      return LayoutBuilder(
+        builder: (context, constraints) => slidable(
+          tightTrackActionExtent(
+            2 + (canAdd ? 1 : 0) + (onMoveToPlaylist == null ? 0 : 1),
+            constraints.maxWidth,
+            textScale: MediaQuery.textScalerOf(context).scale(12) / 12,
+          ),
+        ),
+      );
+    }
+    return slidable(
+      playlistMode ? (onMoveToPlaylist == null ? 0.22 : 0.66) : 0.4,
     );
   }
 

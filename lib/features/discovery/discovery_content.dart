@@ -6,7 +6,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/api/music_api.dart';
 import '../../core/models/enums.dart';
 import '../../core/models/playlist_summary.dart';
+import '../../core/storage/settings_store.dart';
 import '../../core/ui/app_refresh_indicator.dart';
+import '../../core/ui/app_toast.dart';
 import '../../core/ui/car_display_layout.dart';
 import '../../theme/app_motion.dart';
 import '../shell/shell_bottom_area.dart';
@@ -26,6 +28,8 @@ class DiscoveryContent extends ConsumerStatefulWidget {
 
 class _DiscoveryContentState extends ConsumerState<DiscoveryContent> {
   late final PageController _pageController;
+  final _batches =
+      <(MusicSource, String), ({int page, List<PlaylistSummary> items})>{};
 
   /// 抑制 onPageChanged → provider → animateToPage 的回环。
   bool _syncingFromPager = false;
@@ -78,18 +82,30 @@ class _DiscoveryContentState extends ConsumerState<DiscoveryContent> {
     return Consumer(
       builder: (context, ref, _) {
         final categoryId = ref.watch(selectedDiscoveryCategoryProvider(source));
+        final catalog = (source, categoryId);
+        final batch = _batches[catalog];
+        final size = MediaQuery.sizeOf(context);
+        final carPad = ref.watch(
+          settingsProvider.select((settings) => settings.carPadModeEnabled),
+        );
         // 页面骨架常驻：切换歌单分类只让「精选歌单」区块进入加载态，
         // 上方的官方排行榜不随之卸载重建。
         return _DiscoveryList(
           source: source,
-          featured: ref.watch(featuredPlaylistsProvider(source)),
-          onRefresh: () async {
-            ref.invalidate(featuredPlaylistsProvider(source));
-            ref.invalidate(leaderboardBoardsProvider(source));
-            await Future.wait([
-              ref.read(featuredPlaylistsProvider(source).future),
-              ref.read(leaderboardBoardsProvider(source).future),
-            ]);
+          categoryId: categoryId,
+          firstPage: batch?.page ?? 1,
+          compactLandscape:
+              size.width > size.height &&
+              size.shortestSide < 600 &&
+              !carPad &&
+              !CarDisplayLayout.enabledOf(context),
+          featured: batch == null
+              ? ref.watch(featuredPlaylistsProvider(source))
+              : AsyncData(batch.items),
+          onRefreshBoards: () =>
+              ref.invalidate(leaderboardBoardsProvider(source)),
+          onBatchChanged: (page, items) {
+            setState(() => _batches[catalog] = (page: page, items: items));
           },
           onRetry: () => ref.invalidate(featuredPlaylistsProvider(source)),
           onLoadMore: (page) => ref
@@ -139,17 +155,25 @@ class _DiscoveryContentState extends ConsumerState<DiscoveryContent> {
 class _DiscoveryList extends StatefulWidget {
   const _DiscoveryList({
     required this.source,
+    required this.categoryId,
+    required this.firstPage,
+    required this.compactLandscape,
     required this.featured,
-    required this.onRefresh,
+    required this.onRefreshBoards,
+    required this.onBatchChanged,
     required this.onRetry,
     required this.onLoadMore,
   });
 
   final MusicSource source;
+  final String categoryId;
+  final int firstPage;
+  final bool compactLandscape;
 
   /// 当前分类的首页数据；loading / error 只影响歌单区块。
   final AsyncValue<List<PlaylistSummary>> featured;
-  final Future<void> Function() onRefresh;
+  final VoidCallback onRefreshBoards;
+  final void Function(int page, List<PlaylistSummary> items) onBatchChanged;
   final VoidCallback onRetry;
   final Future<List<PlaylistSummary>> Function(int page) onLoadMore;
 
@@ -162,6 +186,8 @@ class _DiscoveryListState extends State<_DiscoveryList> {
   late List<PlaylistSummary> _items;
   var _nextPage = 2;
   var _loadingMore = false;
+  var _refreshing = false;
+  var _generation = 0;
   var _hasMore = true;
   Object? _loadMoreError;
 
@@ -190,6 +216,8 @@ class _DiscoveryListState extends State<_DiscoveryList> {
         ? null
         : oldWidget.featured.asData?.value;
     if (oldWidget.source != widget.source ||
+        oldWidget.categoryId != widget.categoryId ||
+        oldWidget.firstPage != widget.firstPage ||
         !identical(oldItems, _loadedItems)) {
       _reset(_loadedItems);
       _scheduleFillViewport();
@@ -205,9 +233,11 @@ class _DiscoveryListState extends State<_DiscoveryList> {
   }
 
   void _reset(List<PlaylistSummary>? items) {
+    _generation++;
     _items = List<PlaylistSummary>.from(items ?? const <PlaylistSummary>[]);
-    _nextPage = 2;
+    _nextPage = widget.firstPage + 1;
     _loadingMore = false;
+    _refreshing = false;
     _hasMore = items != null && items.isNotEmpty;
     _loadMoreError = null;
   }
@@ -226,15 +256,58 @@ class _DiscoveryListState extends State<_DiscoveryList> {
     _loadMore();
   }
 
+  Future<void> _refresh() async {
+    if (_refreshing) return;
+    widget.onRefreshBoards();
+    if (_loadedItems == null) {
+      widget.onRetry();
+      return;
+    }
+    // A page requested before this pull must not append to the new batch.
+    final generation = ++_generation;
+    setState(() {
+      _refreshing = true;
+      _loadingMore = false;
+      _loadMoreError = null;
+    });
+    try {
+      var page = _hasMore && _items.isNotEmpty ? _nextPage : 1;
+      var items = await widget.onLoadMore(page);
+      if (!mounted || generation != _generation) return;
+      if (page > 1) {
+        final seen = _items.map((item) => item.key).toSet();
+        items = items.where((item) => seen.add(item.key)).toList();
+        if (items.isEmpty) {
+          page = 1;
+          items = await widget.onLoadMore(page);
+          if (!mounted || generation != _generation) return;
+        }
+      }
+      widget.onBatchChanged(page, items);
+    } catch (error) {
+      if (!mounted || generation != _generation) return;
+      showAppToast(
+        context,
+        discoveryFriendlyError(error),
+        type: AppToastType.error,
+      );
+    } finally {
+      if (mounted && generation == _generation) {
+        setState(() => _refreshing = false);
+      }
+    }
+  }
+
   Future<void> _loadMore() async {
-    if (_loadingMore || !_hasMore) return;
+    if (_refreshing || _loadingMore || !_hasMore) return;
+    final generation = _generation;
     setState(() {
       _loadingMore = true;
       _loadMoreError = null;
     });
     try {
       final page = await widget.onLoadMore(_nextPage);
-      if (!mounted) return;
+      if (!mounted || generation != _generation) return;
       final seen = _items.map((item) => item.key).toSet();
       final additions = [
         for (final item in page)
@@ -247,10 +320,12 @@ class _DiscoveryListState extends State<_DiscoveryList> {
       });
       if (_hasMore) _scheduleFillViewport();
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _generation) return;
       setState(() => _loadMoreError = error);
     } finally {
-      if (mounted) setState(() => _loadingMore = false);
+      if (mounted && generation == _generation) {
+        setState(() => _loadingMore = false);
+      }
     }
   }
 
@@ -275,7 +350,10 @@ class _DiscoveryListState extends State<_DiscoveryList> {
             context,
             maxWidth: 960,
           ),
-          child: MasonryPlaylistGrid(items: _items),
+          child: MasonryPlaylistGrid(
+            items: _items,
+            compactLandscape: widget.compactLandscape,
+          ),
         ),
       ),
       if (_loadingMore)
@@ -300,7 +378,7 @@ class _DiscoveryListState extends State<_DiscoveryList> {
   @override
   Widget build(BuildContext context) {
     return AppRefreshIndicator(
-      onRefresh: widget.onRefresh,
+      onRefresh: _refresh,
       child: ListView(
         key: PageStorageKey('discovery-${widget.source.code}-scroll'),
         controller: _scrollController,
@@ -320,10 +398,13 @@ class _DiscoveryListState extends State<_DiscoveryList> {
                 context,
                 maxWidth: 960,
               ),
-              child: LeaderboardSpotlight(source: widget.source),
+              child: LeaderboardSpotlight(
+                source: widget.source,
+                compactLandscape: widget.compactLandscape,
+              ),
             ),
           ),
-          const SizedBox(height: 20),
+          SizedBox(height: widget.compactLandscape ? 8 : 20),
           Center(
             child: ConstrainedBox(
               constraints: CarDisplayLayout.contentConstraints(
