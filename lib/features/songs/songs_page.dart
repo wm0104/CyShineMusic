@@ -23,6 +23,7 @@ import '../playlists/playlist_models.dart';
 import '../playlists/online_playlist_updater.dart';
 import '../playlists/resolved_playlist_track.dart';
 import '../playlists/playlist_store.dart';
+import '../playlists/spotify_track_match_picker.dart';
 import '../shell/shell_toolbar_visibility.dart';
 import '../shell/shell_bottom_area.dart';
 import '../shell/shell_navigation.dart';
@@ -1229,6 +1230,20 @@ class _SongsPageState extends ConsumerState<SongsPage> {
                             )
                           : null,
                       onPlay: () => _play(entry, songs),
+                      onMatch: selectedPlaylistId != null &&
+                              track != null &&
+                              track.spotify != null
+                          ? () => editSavedSpotifyTrackMatch(
+                              this.context,
+                              ref,
+                              playlistId: selectedPlaylistId,
+                              track: track,
+                              isCurrentPlaylist: () =>
+                                  ref.read(songsLibraryPlaylistIdProvider) ==
+                                  selectedPlaylistId,
+                            )
+                          : null,
+                      tapToMatch: track?.isUnmatchedSpotify ?? false,
                       onDelete: playlistMode
                           ? () {
                               if (track != null) {

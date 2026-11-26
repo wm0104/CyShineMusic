@@ -294,16 +294,7 @@ class PlaylistTrackTile extends ConsumerWidget {
                 label: '移动到歌单',
                 flex: tightTrackActionFlex('移动到歌单'),
               ),
-            if (canReplace)
-              SlidableAction(
-                padding: tightTrackActionPadding,
-                onPressed: (_) => onMatch!(),
-                backgroundColor: scheme.secondaryContainer,
-                foregroundColor: scheme.onSecondaryContainer,
-                icon: Icons.search_rounded,
-                label: '更换匹配',
-                flex: tightTrackActionFlex('更换匹配'),
-              ),
+            if (canReplace) replaceTrackMatchAction(context, onMatch!),
             SlidableAction(
               padding: tightTrackActionPadding,
               key: const ValueKey('playlist-remove-action'),

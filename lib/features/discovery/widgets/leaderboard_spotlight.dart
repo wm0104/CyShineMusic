@@ -14,13 +14,23 @@ import '../discovery_controller.dart';
 import 'leaderboard_artwork.dart';
 
 class LeaderboardSpotlight extends ConsumerWidget {
-  const LeaderboardSpotlight({super.key, required this.source});
+  const LeaderboardSpotlight({
+    super.key,
+    required this.source,
+    required this.compactLandscape,
+  });
 
   final MusicSource source;
+  final bool compactLandscape;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final boards = ref.watch(leaderboardBoardsProvider(source));
+    final textScale = math.max(
+      1.0,
+      MediaQuery.textScalerOf(context).scale(12) / 12,
+    );
+    final trackHeight = compactLandscape ? 18 * textScale : 22.0;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -48,9 +58,10 @@ class LeaderboardSpotlight extends ConsumerWidget {
           ),
         ),
         SizedBox(
-          height: 154,
+          height: compactLandscape ? 116 * textScale : 154,
           child: boards.when(
-            loading: () => const _SpotlightLoading(),
+            loading: () =>
+                _SpotlightLoading(cardWidth: compactLandscape ? 268 : 310),
             error: (_, _) => _SpotlightError(
               onRetry: () => ref.invalidate(leaderboardBoardsProvider(source)),
             ),
@@ -61,7 +72,9 @@ class LeaderboardSpotlight extends ConsumerWidget {
                   final visibleCards = (constraints.maxWidth / 300)
                       .floor()
                       .clamp(1, 4);
-                  final cardWidth = CarDisplayLayout.enabledOf(context)
+                  final cardWidth = compactLandscape
+                      ? 268.0
+                      : CarDisplayLayout.enabledOf(context)
                       ? (constraints.maxWidth - 4 - 10 * (visibleCards - 1)) /
                             visibleCards
                       : math.min(
@@ -80,6 +93,8 @@ class LeaderboardSpotlight extends ConsumerWidget {
                       child: _LeaderboardPreviewCard(
                         board: featured[index],
                         index: index,
+                        compactLandscape: compactLandscape,
+                        trackHeight: trackHeight,
                       ),
                     ),
                   );
@@ -94,10 +109,17 @@ class LeaderboardSpotlight extends ConsumerWidget {
 }
 
 class _LeaderboardPreviewCard extends ConsumerWidget {
-  const _LeaderboardPreviewCard({required this.board, required this.index});
+  const _LeaderboardPreviewCard({
+    required this.board,
+    required this.index,
+    required this.compactLandscape,
+    required this.trackHeight,
+  });
 
   final LeaderboardSummary board;
   final int index;
+  final bool compactLandscape;
+  final double trackHeight;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -147,7 +169,7 @@ class _LeaderboardPreviewCard extends ConsumerWidget {
         child: Row(
           children: [
             SizedBox(
-              width: 118,
+              width: compactLandscape ? 84 : 118,
               height: double.infinity,
               child: Hero(
                 tag: onlinePlaylistArtworkHeroTag(
@@ -172,7 +194,9 @@ class _LeaderboardPreviewCard extends ConsumerWidget {
             ),
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(13, 11, 11, 10),
+                padding: compactLandscape
+                    ? const EdgeInsets.fromLTRB(10, 7, 8, 7)
+                    : const EdgeInsets.fromLTRB(13, 11, 11, 10),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -197,11 +221,12 @@ class _LeaderboardPreviewCard extends ConsumerWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 7),
+                    SizedBox(height: compactLandscape ? 4 : 7),
                     if (tracks.isNotEmpty)
                       for (var rank = 0; rank < 3; rank++)
                         _PreviewTrackRow(
                           rank: rank,
+                          height: trackHeight,
                           track: rank < tracks.length ? tracks[rank] : null,
                         )
                     else if (failed)
@@ -220,7 +245,7 @@ class _LeaderboardPreviewCard extends ConsumerWidget {
                       )
                     else
                       for (var rank = 0; rank < 3; rank++)
-                        const _PreviewTrackSkeleton(),
+                        _PreviewTrackSkeleton(height: trackHeight),
                     const Spacer(),
                     Text(
                       resolved?.updateFrequency ??
@@ -245,10 +270,15 @@ class _LeaderboardPreviewCard extends ConsumerWidget {
 }
 
 class _PreviewTrackRow extends StatelessWidget {
-  const _PreviewTrackRow({required this.rank, required this.track});
+  const _PreviewTrackRow({
+    required this.rank,
+    required this.track,
+    required this.height,
+  });
 
   final int rank;
   final MusicInfo? track;
+  final double height;
 
   @override
   Widget build(BuildContext context) {
@@ -263,7 +293,7 @@ class _PreviewTrackRow extends StatelessWidget {
       _ => scheme.secondary,
     };
     return SizedBox(
-      height: 22,
+      height: height,
       child: Row(
         children: [
           SizedBox(
@@ -297,7 +327,9 @@ class _PreviewTrackRow extends StatelessWidget {
 }
 
 class _PreviewTrackSkeleton extends StatelessWidget {
-  const _PreviewTrackSkeleton();
+  const _PreviewTrackSkeleton({required this.height});
+
+  final double height;
 
   @override
   Widget build(BuildContext context) {
@@ -305,7 +337,7 @@ class _PreviewTrackSkeleton extends StatelessWidget {
       context,
     ).colorScheme.onSurfaceVariant.withValues(alpha: 0.12);
     return SizedBox(
-      height: 22,
+      height: height,
       child: Align(
         alignment: Alignment.centerLeft,
         child: FractionallySizedBox(
@@ -324,7 +356,9 @@ class _PreviewTrackSkeleton extends StatelessWidget {
 }
 
 class _SpotlightLoading extends StatelessWidget {
-  const _SpotlightLoading();
+  const _SpotlightLoading({required this.cardWidth});
+
+  final double cardWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -335,7 +369,7 @@ class _SpotlightLoading extends StatelessWidget {
       itemCount: 2,
       separatorBuilder: (_, _) => const SizedBox(width: 10),
       itemBuilder: (_, _) => Container(
-        width: 310,
+        width: cardWidth,
         decoration: BoxDecoration(
           color: scheme.surfaceContainer,
           borderRadius: BorderRadius.circular(14),

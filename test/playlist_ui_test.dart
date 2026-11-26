@@ -17,6 +17,7 @@ import 'package:cy_shine_music/core/music_sources/music_source_controller.dart';
 import 'package:cy_shine_music/core/services/download_service.dart';
 import 'package:cy_shine_music/core/storage/settings_store.dart';
 import 'package:cy_shine_music/features/downloads/download_history_store.dart';
+import 'package:cy_shine_music/features/player/player_audio_handler.dart';
 import 'package:cy_shine_music/features/playlists/online_playlist_import_page.dart';
 import 'package:cy_shine_music/features/playlists/lx_playlist_import.dart';
 import 'package:cy_shine_music/features/playlists/playlist_browser_sheet.dart';
@@ -26,6 +27,8 @@ import 'package:cy_shine_music/features/playlists/playlist_management_page.dart'
 import 'package:cy_shine_music/features/playlists/playlist_models.dart';
 import 'package:cy_shine_music/features/playlists/playlist_store.dart';
 import 'package:cy_shine_music/features/playlists/widgets/playlist_track_tile.dart';
+import 'package:cy_shine_music/features/songs/widgets/song_row.dart';
+import 'package:cy_shine_music/router.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -879,6 +882,106 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
     },
   );
+
+  testWidgets('songs list changes only the selected Spotify occurrence', (
+    tester,
+  ) async {
+    await _useCompactViewport(tester, size: const Size(360, 800));
+    Future<void> settle() async {
+      for (var i = 0; i < 12; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    final previous = _playlistMusic('previous', '旧版本');
+    final tracks = [
+      for (var index = 0; index < 3; index++)
+        PlaylistTrack.fromSpotify(
+          SpotifyTrackMetadata(
+            uri: 'spotify:track:same',
+            title: 'ENDLESS VOID',
+            artist: '原始歌手',
+            occurrence: index,
+          ),
+          index == 2 ? null : previous,
+        ),
+      PlaylistTrack.fromMusicInfo(_playlistMusic('ordinary', '普通歌曲')),
+    ];
+    final prefs = await _prefsWith([
+      _playlist(
+        id: 'phonk',
+        name: 'Phonk',
+        tracks: tracks,
+        originPlaylistId: 'source',
+        originSourceCode: 'spotify',
+      ),
+      _playlist(id: 'other', name: '其他歌单'),
+    ]);
+    final handler = PlayerAudioHandler();
+    final router = createAppRouter(initialLocation: '/songs');
+    final container = ProviderContainer(
+      overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        playerAudioHandlerProvider.overrideWithValue(handler),
+        musicApiProvider.overrideWithValue(_ManualMatchMusicApi()),
+      ],
+    );
+    addTearDown(() {
+      router.dispose();
+      container.dispose();
+      unawaited(handler.disposeHandler());
+    });
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await settle();
+    await tester.tap(find.byKey(const ValueKey('library-view-menu-anchor')));
+    await settle();
+    await tester.tap(find.text('Phonk'));
+    await settle();
+    Finder row(int index) =>
+        find.byKey(ValueKey('playlist:phonk:${tracks[index].identityKey}'));
+
+    await tester.tap(row(2));
+    await settle();
+    expect(find.text('第一候选'), findsWidgets);
+    await tester.binding.handlePopRoute();
+    await settle();
+    final store = container.read(localPlaylistsProvider.notifier);
+    expect(store.byId('phonk')!.tracks[2].isUnmatchedSpotify, isTrue);
+
+    await tester.drag(row(3), const Offset(-300, 0));
+    await settle();
+    expect(find.text('更换匹配').hitTestable(), findsNothing);
+    await tester.drag(row(1), const Offset(-300, 0));
+    await settle();
+    await tester.tap(find.text('更换匹配').hitTestable());
+    await settle();
+    await tester.tap(find.text('第二候选').first);
+    await settle();
+
+    expect(router.routeInformationProvider.value.uri.path, '/songs');
+    expect(tester.widget<SongRow>(row(0)).entry.musicId, 'previous');
+    expect(tester.widget<SongRow>(row(1)).entry.musicId, 'candidate-2');
+    expect(handler.queue.value, isEmpty);
+    final restarted = ProviderContainer(
+      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+    );
+    addTearDown(restarted.dispose);
+    final saved = restarted.read(localPlaylistsProvider.notifier).byId('phonk')!;
+    expect(
+      saved.tracks.map((track) => track.id),
+      tracks.map((track) => track.id),
+    );
+    expect(saved.tracks[0].spotifyMatchIsManual, isFalse);
+    expect(saved.tracks[1].spotifyMatchIsManual, isTrue);
+    expect(saved.tracks[1].musicId, 'candidate-2');
+    expect(saved.tracks[2].isUnmatchedSpotify, isTrue);
+    await tester.pump(const Duration(seconds: 5));
+  });
 
   testWidgets('playlist detail copies one song and moves the batch', (
     tester,

@@ -128,6 +128,59 @@ void main() {
   });
 
   testWidgets(
+    'phone landscape compacts discovery cards within the available width',
+    (tester) async {
+      await _useViewport(tester, const Size(932, 430));
+      final prefs = await _freshPreferences();
+      final container = ProviderContainer(
+        overrides: [
+          discoverySourcesProvider.overrideWithValue(_testDiscoverySources),
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          musicApiProvider.overrideWithValue(_FakeDiscoveryApi()),
+        ],
+      );
+      addTearDown(container.dispose);
+      addTearDown(tester.view.resetPadding);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await tester.pumpWidget(
+        _appWithContainer(container, const SafeArea(child: DiscoveryContent())),
+      );
+      await tester.pumpAndSettle();
+      final board = find.byKey(const ValueKey('leaderboard-preview-kw:1'));
+      final playlist = find.byKey(const ValueKey('discovery-card-kw:1'));
+      int columns() => _cardPositions(
+        tester,
+        MusicSource.kw,
+        9,
+      ).values.map((offset) => offset.dx.round()).toSet().length;
+      expect(columns(), 5);
+      expect(tester.getSize(playlist).width, inInclusiveRange(165, 205));
+      tester.view.padding = const FakeViewPadding(
+        left: 59,
+        right: 59,
+        bottom: 21,
+      );
+      await tester.pumpAndSettle();
+      expect(columns(), 4);
+      expect(tester.getSize(playlist).width, inInclusiveRange(175, 205));
+      expect(tester.getSize(board).height, lessThan(130));
+      expect(tester.getSize(board).width, lessThan(290));
+      expect(find.textContaining('榜单歌曲 3'), findsWidgets);
+      tester.platformDispatcher.textScaleFactorTestValue = 2.0;
+      await tester.pumpAndSettle();
+      expect(tester.getSize(board).height, greaterThan(154));
+      expect(tester.takeException(), isNull);
+      tester.platformDispatcher.clearTextScaleFactorTestValue();
+      await container
+          .read(settingsProvider.notifier)
+          .setCarPadModeEnabled(true);
+      await tester.pumpAndSettle();
+      expect(columns(), 3);
+      expect(tester.getSize(board), const Size(336, 154));
+    },
+  );
+
+  testWidgets(
     'discovery shows independent leaderboard previews above playlists',
     (tester) async {
       await _useViewport(tester, const Size(390, 844));
@@ -536,7 +589,9 @@ void main() {
   ) async {
     await _useViewport(tester, const Size(390, 844));
     final prefs = await _freshPreferences();
-    final fake = _FakeDiscoveryApi(paginateFeatured: true);
+    final fake = _FakeDiscoveryApi(
+      featuredPageCount: (page, limit) => page == 1 ? limit : 5,
+    );
     final container = ProviderContainer(
       overrides: [
         discoverySourcesProvider.overrideWithValue(_testDiscoverySources),
@@ -563,6 +618,141 @@ void main() {
     expect(fake.featuredPages, contains(2));
     expect(find.byKey(const ValueKey('discovery-card-kw:31')), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  group('discovery pull-to-refresh', () {
+    Future<ProviderContainer> showCatalog(
+      WidgetTester tester,
+      _FakeDiscoveryApi api,
+      MusicSource source,
+    ) async {
+      await _useViewport(tester, const Size(390, 844));
+      final prefs = await _freshPreferences();
+      final container = ProviderContainer(
+        overrides: [
+          discoverySourcesProvider.overrideWithValue([source]),
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          musicApiProvider.overrideWithValue(api),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _appWithContainer(container, const DiscoveryContent()),
+      );
+      await tester.pumpAndSettle();
+      return container;
+    }
+
+    Future<void> pull(WidgetTester tester, Finder list) async {
+      await tester.timedDragFrom(
+        tester.getTopLeft(list) + const Offset(40, 40),
+        const Offset(0, 600),
+        const Duration(milliseconds: 450),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+
+    testWidgets('replaces the batch, appends on scroll and wraps at the end', (
+      tester,
+    ) async {
+      final fake = _FakeDiscoveryApi(
+        featuredPageCount: (page, limit) => page <= 3 ? limit : 0,
+      );
+      await showCatalog(tester, fake, MusicSource.wy);
+      final list = find.byKey(const PageStorageKey('discovery-wy-scroll'));
+      Finder card(int id) => find.byKey(ValueKey('discovery-card-wy:$id'));
+      expect(card(1), findsOneWidget);
+
+      await pull(tester, list);
+      await tester.pumpAndSettle();
+      expect(card(1), findsNothing);
+      expect(card(31), findsOneWidget);
+      expect(fake.featuredPages, [1, 2]);
+
+      final position = tester.widget<ListView>(list).controller!.position;
+      position.jumpTo(position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(card(31), findsOneWidget);
+      expect(card(61), findsOneWidget);
+      expect(fake.featuredPages, [1, 2, 3]);
+
+      position.jumpTo(0);
+      await tester.pumpAndSettle();
+      await pull(tester, list);
+      await tester.pumpAndSettle();
+      expect(card(1), findsOneWidget);
+      expect(card(31), findsNothing);
+      expect(card(61), findsNothing);
+      expect(fake.featuredPages, [1, 2, 3, 4, 1]);
+    });
+
+    testWidgets('keeps the displayed batch and retries the failed page', (
+      tester,
+    ) async {
+      var attempts = 0;
+      final fake = _FakeDiscoveryApi(
+        featuredPageCount: (page, limit) {
+          if (page == 2 && ++attempts == 1) throw Exception('加载失败');
+          return limit;
+        },
+      );
+      await showCatalog(tester, fake, MusicSource.wy);
+      final list = find.byKey(const PageStorageKey('discovery-wy-scroll'));
+      final first = find.byKey(const ValueKey('discovery-card-wy:1'));
+      final next = find.byKey(const ValueKey('discovery-card-wy:31'));
+      await pull(tester, list);
+      await tester.pumpAndSettle();
+      expect(first, findsOneWidget);
+      expect(next, findsNothing);
+      expect(find.text('加载失败'), findsOneWidget);
+
+      await pull(tester, list);
+      await tester.pumpAndSettle();
+      expect(first, findsNothing);
+      expect(next, findsOneWidget);
+      expect(fake.featuredPages, [1, 2, 2]);
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('discards a pending batch when the category changes', (
+      tester,
+    ) async {
+      final pending = Completer<int>();
+      final fake = _FakeDiscoveryApi(
+        featuredPageCount: (page, limit) => page == 2 ? pending.future : limit,
+      );
+      final container = await showCatalog(tester, fake, MusicSource.kw);
+      final list = find.byKey(const PageStorageKey('discovery-kw-scroll'));
+      final first = find.byKey(const ValueKey('discovery-card-kw:1'));
+      final next = find.byKey(const ValueKey('discovery-card-kw:31'));
+      await pull(tester, list);
+      expect(fake.featuredPages, [1, 2]);
+      final category = container.read(
+        selectedDiscoveryCategoryProvider(MusicSource.kw).notifier,
+      );
+      category.state = 'hot';
+      await tester.pump();
+      await tester.pump();
+      expect(fake.featuredCategories, ['new', 'new', 'hot']);
+
+      pending.complete(30);
+      await tester.pumpAndSettle();
+      expect(first, findsOneWidget);
+      expect(next, findsNothing);
+      await pull(tester, list);
+      await tester.pumpAndSettle();
+      expect(next, findsOneWidget);
+      expect(fake.featuredPages, [1, 2, 1, 2]);
+
+      category.state = 'new';
+      await tester.pumpAndSettle();
+      expect(first, findsOneWidget);
+      category.state = 'hot';
+      await tester.pumpAndSettle();
+      expect(next, findsOneWidget);
+    });
   });
 
   testWidgets(
@@ -1209,7 +1399,7 @@ class _FakeDiscoveryApi extends MusicApi {
     this.delayDetail = false,
     this.resolveCovers = false,
     this.detailCoverUrl,
-    this.paginateFeatured = false,
+    this.featuredPageCount,
     this.detailTrackCount = 10,
   });
 
@@ -1217,7 +1407,7 @@ class _FakeDiscoveryApi extends MusicApi {
   final bool delayDetail;
   final bool resolveCovers;
   final String? detailCoverUrl;
-  final bool paginateFeatured;
+  final FutureOr<int> Function(int page, int limit)? featuredPageCount;
   final int detailTrackCount;
   final Completer<SearchResponse> _search = Completer<SearchResponse>();
   final Completer<PlaylistInfo> _detail = Completer<PlaylistInfo>();
@@ -1248,8 +1438,9 @@ class _FakeDiscoveryApi extends MusicApi {
   }) async {
     featuredPages.add(page);
     featuredCategories.add(categoryId);
-    final start = paginateFeatured ? (page - 1) * limit + 1 : 1;
-    final count = paginateFeatured ? (page == 1 ? limit : 5) : 9;
+    final pageCount = featuredPageCount;
+    final start = pageCount == null ? 1 : (page - 1) * limit + 1;
+    final count = pageCount == null ? 9 : await pageCount(page, limit);
     return [
       for (var index = start; index < start + count; index++)
         PlaylistSummary(

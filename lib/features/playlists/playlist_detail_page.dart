@@ -586,7 +586,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           onToggleSelected: () => _toggleSelection(item),
           onPlay: () => _playTrack(context, ref, item, queue),
           onMatch: item.track.spotify != null
-              ? () => _pickTrackMatch(playlist.id, item.track)
+              ? () => editSavedSpotifyTrackMatch(
+                  context,
+                  ref,
+                  playlistId: playlist.id,
+                  track: item.track,
+                  isCurrentPlaylist: () => widget.playlistId == playlist.id,
+                )
               : null,
           onAddToPlaylist: canTransfer
               ? () => unawaited(
@@ -1332,25 +1338,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     await ref
         .read(playerControllerProvider.notifier)
         .playFromPlaylistQueue(entry, queue);
-  }
-
-  Future<void> _pickTrackMatch(String playlistId, PlaylistTrack track) async {
-    final picked = await pickSpotifyTrackMatch(context, track);
-    if (picked == null || !mounted || widget.playlistId != playlistId) return;
-    try {
-      final updated = await ref
-          .read(localPlaylistsProvider.notifier)
-          .setSpotifyTrackMatch(playlistId, expected: track, music: picked);
-      if (!mounted || widget.playlistId != playlistId) return;
-      showAppToast(
-        context,
-        updated ? '已更新「${track.name}」的匹配' : '歌单歌曲已变化，请重新选择',
-        type: updated ? AppToastType.success : AppToastType.warning,
-      );
-    } catch (error) {
-      if (!mounted || widget.playlistId != playlistId) return;
-      showAppToast(context, '保存匹配失败：$error', type: AppToastType.error);
-    }
   }
 
   Future<void> _removeTrack(
