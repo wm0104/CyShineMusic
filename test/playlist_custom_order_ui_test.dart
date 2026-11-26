@@ -94,7 +94,13 @@ void main() {
       of: find.byType(PlaylistTrackTile), matching: find.text('Bravo'),
     );
     expect(track, findsOneWidget);
-    await tester.longPress(track);
+    final gesture = await tester.startGesture(tester.getCenter(track));
+    await tester.pump(const Duration(milliseconds: 600));
+    await gesture.moveBy(const Offset(0, 80));
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(tester.widget<EditableText>(find.byType(EditableText)).controller.text, 'Bravo');
     expect(find.text('Alpha'), findsNothing);
     expect(find.byType(SongsSearchBar), findsOneWidget);
     expect(find.byType(ReorderableDelayedDragStartListener), findsNothing);
