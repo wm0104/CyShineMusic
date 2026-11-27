@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,6 +9,7 @@ import '../../../core/storage/settings_store.dart';
 import '../../../theme/app_motion.dart';
 import '../lyric_parser.dart';
 import '../player_controller.dart';
+import 'karaoke_line_text.dart';
 import 'player_layout.dart';
 
 /// Blur applied directly to the previous and next lyric text. Increase this
@@ -27,13 +29,59 @@ const double _miniLyricBlurBleed = 4;
 const double _miniLyricViewportExtent =
     _miniLyricVisibleLineCount * _miniLyricLineExtent + _miniLyricBlurBleed;
 
-class MiniLyricsPanel extends ConsumerWidget {
+class MiniLyricsPanel extends ConsumerStatefulWidget {
   const MiniLyricsPanel({super.key, required this.onOpenLyrics});
 
   final VoidCallback onOpenLyrics;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MiniLyricsPanel> createState() => _MiniLyricsPanelState();
+}
+
+class _MiniLyricsPanelState extends ConsumerState<MiniLyricsPanel> {
+  // Same clock plumbing as KaraokeLyricsView: playback time reaches the
+  // karaoke painter through listenables, so progress never rebuilds the panel.
+  late final ValueNotifier<int> _anchorMs;
+  final ValueNotifier<bool> _playing = ValueNotifier(false);
+  final ValueNotifier<bool> _buffering = ValueNotifier(false);
+
+  @override
+  void initState() {
+    super.initState();
+    final initial = ref.read(playerControllerProvider);
+    _anchorMs = ValueNotifier<int>(initial.position.inMilliseconds);
+    _playing.value = initial.playing;
+    _buffering.value = initial.buffering;
+    ref.listenManual(playerControllerProvider.select((s) => s.position), (
+      previous,
+      next,
+    ) {
+      _anchorMs.value = next.inMilliseconds;
+    });
+    ref.listenManual(playerControllerProvider.select((s) => s.playing), (
+      previous,
+      next,
+    ) {
+      _playing.value = next;
+    });
+    ref.listenManual(playerControllerProvider.select((s) => s.buffering), (
+      previous,
+      next,
+    ) {
+      _buffering.value = next;
+    });
+  }
+
+  @override
+  void dispose() {
+    _anchorMs.dispose();
+    _playing.dispose();
+    _buffering.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final enabled = ref.watch(
       settingsProvider.select((settings) => settings.showMiniLyrics),
     );
@@ -62,7 +110,7 @@ class MiniLyricsPanel extends ConsumerWidget {
           color: Colors.transparent,
           child: InkWell(
             key: const ValueKey('player-mini-lyrics'),
-            onTap: onOpenLyrics,
+            onTap: widget.onOpenLyrics,
             child: SizedBox(
               height: 84,
               child: Padding(
@@ -75,6 +123,9 @@ class MiniLyricsPanel extends ConsumerWidget {
                   child: _MiniLyricsScroller(
                     lyrics: vm.lyrics,
                     activeIndex: vm.activeIndex,
+                    anchorMs: _anchorMs,
+                    playing: _playing,
+                    buffering: _buffering,
                   ),
                 ),
               ),
@@ -87,10 +138,19 @@ class MiniLyricsPanel extends ConsumerWidget {
 }
 
 class _MiniLyricsScroller extends StatefulWidget {
-  const _MiniLyricsScroller({required this.lyrics, required this.activeIndex});
+  const _MiniLyricsScroller({
+    required this.lyrics,
+    required this.activeIndex,
+    required this.anchorMs,
+    required this.playing,
+    required this.buffering,
+  });
 
   final KaraokeLyrics lyrics;
   final int activeIndex;
+  final ValueListenable<int> anchorMs;
+  final ValueListenable<bool> playing;
+  final ValueListenable<bool> buffering;
 
   @override
   State<_MiniLyricsScroller> createState() => _MiniLyricsScrollerState();
@@ -187,11 +247,13 @@ class _MiniLyricsScrollerState extends State<_MiniLyricsScroller> {
           curve: AppMotion.emphasized,
           child: Align(
             alignment: Alignment.centerLeft,
-            child: Text(
-              lines[index].text,
+            child: _MiniLyricLine(
               key: ValueKey('player-mini-lyric-line-$index'),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+              line: lines[index],
+              active: active,
+              anchorMs: widget.anchorMs,
+              playing: widget.playing,
+              buffering: widget.buffering,
               style: TextStyle(
                 color: active
                     ? scheme.onSurface
@@ -217,5 +279,71 @@ class _MiniLyricsScrollerState extends State<_MiniLyricsScroller> {
         );
       },
     );
+  }
+}
+
+/// One row of the mini panel. The active row reuses the shared karaoke
+/// renderer, so it fills per word exactly like the full lyrics page; the
+/// neighbouring rows stay plain text so only the current line sweeps.
+class _MiniLyricLine extends StatelessWidget {
+  const _MiniLyricLine({
+    super.key,
+    required this.line,
+    required this.active,
+    required this.anchorMs,
+    required this.playing,
+    required this.buffering,
+    required this.style,
+  });
+
+  final KaraokeLyricLine line;
+  final bool active;
+  final ValueListenable<int> anchorMs;
+  final ValueListenable<bool> playing;
+  final ValueListenable<bool> buffering;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Text(
+      line.text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: style,
+    );
+    if (!active) return text;
+
+    return DefaultTextStyle(
+      key: const ValueKey('player-mini-lyric-active-style'),
+      style: style,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // The karaoke paragraph has no maxLines, so a line that cannot fit
+          // the 22px row keeps the plain ellipsised text instead of wrapping
+          // over its neighbours.
+          if (!_fitsSingleLine(context, constraints.maxWidth)) return text;
+          return KaraokeLineText(
+            line: line,
+            anchorMs: anchorMs,
+            playing: playing,
+            buffering: buffering,
+            active: true,
+          );
+        },
+      ),
+    );
+  }
+
+  bool _fitsSingleLine(BuildContext context, double maxWidth) {
+    if (!maxWidth.isFinite) return true;
+    final painter = TextPainter(
+      text: TextSpan(text: line.text, style: style),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width <= maxWidth;
   }
 }

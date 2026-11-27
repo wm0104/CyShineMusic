@@ -324,19 +324,21 @@ void main() {
       find.byKey(const ValueKey('player-mini-lyric-line-3')),
     );
     expect(fourthLine.top, greaterThanOrEqualTo(miniViewport.bottom));
-    expect(
-      tester
-          .widget<Text>(find.byKey(const ValueKey('player-mini-lyric-line-1')))
-          .style
-          ?.fontWeight,
-      FontWeight.w400,
+    final activeLineStyle = tester
+        .widget<DefaultTextStyle>(
+          find.byKey(const ValueKey('player-mini-lyric-active-style')),
+        )
+        .style;
+    expect(activeLineStyle.fontWeight, FontWeight.w400);
+    expect(activeLineStyle.fontSize, 14);
+    final miniKaraokeLine = find.descendant(
+      of: find.byKey(const ValueKey('player-mini-lyrics-scroll')),
+      matching: find.byType(KaraokeLineText),
     );
+    expect(miniKaraokeLine, findsOneWidget);
     expect(
-      tester
-          .widget<Text>(find.byKey(const ValueKey('player-mini-lyric-line-1')))
-          .style
-          ?.fontSize,
-      14,
+      tester.widget<KaraokeLineText>(miniKaraokeLine).line.text,
+      '第二句歌词',
     );
     expect(
       tester
@@ -372,11 +374,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(scrollState.position.pixels, closeTo(22, 0.01));
     expect(
-      tester
-          .widget<Text>(find.byKey(const ValueKey('player-mini-lyric-line-2')))
-          .style
-          ?.fontSize,
-      14,
+      tester.widget<KaraokeLineText>(miniKaraokeLine).line.text,
+      '第三句歌词',
     );
     expect(
       tester
