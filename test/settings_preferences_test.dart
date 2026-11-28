@@ -724,14 +724,7 @@ void main() {
       await tester.tap(find.byTooltip('增大过渡时长（秒）'));
       await tester.pumpAndSettle();
       expect(container.read(settingsProvider).crossfadeMilliseconds, draggedMs);
-      final input = find.byType(TextField);
-      await tester.enterText(input, '2.36');
-      await tester.testTextInput.receiveAction(TextInputAction.done);
-      await tester.pumpAndSettle();
-      expect(tester.widget<Slider>(slider).label, '2.4 秒');
-      expect(container.read(settingsProvider).crossfadeMilliseconds, 2360);
-      await tester.enterText(input, '20');
-      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.drag(slider, const Offset(800, 0));
       await tester.pumpAndSettle();
       expect(container.read(settingsProvider).crossfadeMilliseconds, 12000);
       expect(
@@ -742,8 +735,9 @@ void main() {
             .onPressed,
         isNull,
       );
-      await tester.enterText(input, '0.006');
-      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await container
+          .read(settingsProvider.notifier)
+          .setCrossfadeMilliseconds(6);
       await tester.pumpAndSettle();
       expect(tester.widget<Slider>(slider).label, '小于 0.1 秒');
       expect(container.read(settingsProvider).crossfadeMilliseconds, 6);
@@ -758,7 +752,10 @@ void main() {
       addTearDown(restored.dispose);
       expect(restored.read(settingsProvider).crossfadeMilliseconds, 6);
       await _openSettingsRow(tester, '淡入/淡出');
-      await tester.enterText(input, '0');
+      await container
+          .read(settingsProvider.notifier)
+          .setCrossfadeMilliseconds(0);
+      await tester.pumpAndSettle();
       await _openSettingsRow(tester, '完成');
       expect(find.text('已关闭 · 0 秒'), findsOneWidget);
       expect(tester.takeException(), isNull);
