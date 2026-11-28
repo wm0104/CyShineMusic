@@ -66,10 +66,11 @@ const kLyricTranslationFontSizeMin = 7.0;
 const kLyricTranslationFontSizeMax = 56.0;
 const kLyricTranslationFontSizeDefault = 14.0;
 
+// Weights are continuous between kLyricFontWeightMin and
+// kLyricFontWeightMax: Flutter builds a FontWeight from any integer in
+// 1..1000 and variable fonts honour the value through the wght axis.
 double normalizeLyricFontWeight(double value) =>
-    (value.clamp(kLyricFontWeightMin, kLyricFontWeightMax) / 100)
-        .roundToDouble() *
-    100;
+    value.clamp(kLyricFontWeightMin, kLyricFontWeightMax).roundToDouble();
 
 double lyricRomanizationFontWeight(double originalWeight) =>
     (originalWeight - 100).clamp(kLyricFontWeightMin, kLyricFontWeightMax);
@@ -540,6 +541,14 @@ class SettingsNotifier extends Notifier<AppSettings> {
         state.lyricTranslationFontSize == nextTranslationSize) {
       return;
     }
+    // Publish first: dragging the lyric sliders has to repaint on the same
+    // frame, not after four preference writes have landed.
+    state = state.copyWith(
+      lyricFontWeight: nextWeight,
+      lyricTranslationFontWeight: nextTranslationWeight,
+      lyricFontSize: nextSize,
+      lyricTranslationFontSize: nextTranslationSize,
+    );
     await _prefs.setDouble(
       _kLyricTranslationFontWeightKey,
       nextTranslationWeight,
@@ -547,12 +556,6 @@ class SettingsNotifier extends Notifier<AppSettings> {
     await _prefs.setDouble(_kLyricTranslationFontSizeKey, nextTranslationSize);
     await _prefs.setDouble(_kLyricFontWeightKey, nextWeight);
     await _prefs.setDouble(_kLyricFontSizeKey, nextSize);
-    state = state.copyWith(
-      lyricFontWeight: nextWeight,
-      lyricTranslationFontWeight: nextTranslationWeight,
-      lyricFontSize: nextSize,
-      lyricTranslationFontSize: nextTranslationSize,
-    );
   }
 
   Future<void> setCarPadModeEnabled(bool value) async {

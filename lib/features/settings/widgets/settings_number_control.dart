@@ -12,6 +12,7 @@ class SettingsNumberControl extends StatefulWidget {
     required this.step,
     required this.onChanged,
     this.continuousLabel,
+    this.commitOnRelease = true,
   });
 
   final IconData icon;
@@ -21,8 +22,11 @@ class SettingsNumberControl extends StatefulWidget {
   final double max;
   final double step;
   final ValueChanged<double> onChanged;
-  // A continuous slider previews locally and commits its position on release.
+  // A continuous slider has no ticks: the thumb stays where the finger is.
   final String Function(double)? continuousLabel;
+  // Continuous controls either preview locally and commit on release, or land
+  // every move. The lyric sheet needs the latter so it tracks the finger.
+  final bool commitOnRelease;
 
   @override
   State<SettingsNumberControl> createState() => SettingsNumberControlState();
@@ -35,7 +39,9 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
   final _focus = FocusNode();
 
   double? _dragValue;
+  int? _lastCommitted;
   bool get _continuous => widget.continuousLabel != null;
+  bool get _live => _continuous && !widget.commitOnRelease;
 
   String _inputText(double value) => _continuous
       ? value.toStringAsFixed(3).replaceFirst(RegExp(r'\.?0+$'), '')
@@ -82,6 +88,29 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
   void _onTextChanged(String value) {
     final parsed = double.tryParse(value.replaceAll(',', '.'));
     if (parsed != null) widget.onChanged(_snap(parsed));
+  }
+
+  // A continuous drag moves the thumb 1:1 with the finger and lands the
+  // rounded position, so the preview follows the finger instead of stepping.
+  void _onSlide(double value) {
+    if (!_continuous) {
+      setValue(value);
+      return;
+    }
+    final next = value.clamp(widget.min, widget.max);
+    setState(() => _dragValue = next);
+    if (!_live) return;
+    final rounded = next.round();
+    if (rounded == _lastCommitted) return;
+    _lastCommitted = rounded;
+    widget.onChanged(rounded.toDouble());
+  }
+
+  void _onSlideEnd(double value) {
+    if (!_continuous) return;
+    setState(() => _dragValue = null);
+    _lastCommitted = null;
+    if (!_live) widget.onChanged(value.clamp(widget.min, widget.max));
   }
 
   @override
@@ -227,7 +256,9 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
                   ),
                   activeTickMarkColor: Colors.transparent,
                   inactiveTickMarkColor: Colors.transparent,
-                  showValueIndicator: _continuous
+                  // Live sliders hide the bubble as well: nothing numeric pops
+                  // up while adjusting, the preview itself is the feedback.
+                  showValueIndicator: _continuous && widget.commitOnRelease
                       ? ShowValueIndicator.onDrag
                       : ShowValueIndicator.never,
                   valueIndicatorShape:
@@ -246,15 +277,8 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
                   semanticFormatterCallback:
                       widget.continuousLabel ?? _inputText,
                   onChangeStart: _continuous ? (_) => _focus.unfocus() : null,
-                  onChanged: _continuous
-                      ? (value) => setState(() => _dragValue = value)
-                      : setValue,
-                  onChangeEnd: _continuous
-                      ? (value) {
-                          setState(() => _dragValue = null);
-                          widget.onChanged(value);
-                        }
-                      : null,
+                  onChanged: _onSlide,
+                  onChangeEnd: _continuous ? _onSlideEnd : null,
                 ),
               ),
             ),

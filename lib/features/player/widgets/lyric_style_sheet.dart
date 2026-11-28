@@ -160,8 +160,12 @@ class _PlayerLyricStyleSheetState extends ConsumerState<_PlayerLyricStyleSheet> 
                               min: kLyricFontSizeMin,
                               max: kLyricFontSizeMax,
                               step: 1,
-                              onChanged: (value) =>
-                                  unawaited(_apply(size: value)),
+                              continuousLabel: (value) =>
+                                  value.round().toString(),
+                              commitOnRelease: false,
+                              onChanged: (value) => unawaited(
+                                _apply(size: value.roundToDouble()),
+                              ),
                             ),
                             divider,
                             SettingsNumberControl(
@@ -171,9 +175,16 @@ class _PlayerLyricStyleSheetState extends ConsumerState<_PlayerLyricStyleSheet> 
                               value: settings.lyricFontWeight,
                               min: kLyricFontWeightMin,
                               max: kLyricFontWeightMax,
-                              step: 100,
-                              onChanged: (value) =>
-                                  unawaited(_apply(weight: value)),
+                              // Unquantised and live: the thumb tracks the
+                              // finger and every rounded value lands at once,
+                              // so the lyrics above resize while dragging.
+                              step: 10,
+                              continuousLabel: (value) =>
+                                  value.round().toString(),
+                              commitOnRelease: false,
+                              onChanged: (value) => unawaited(
+                                _apply(weight: value.roundToDouble()),
+                              ),
                             ),
                             divider,
                             SettingsNumberControl(
@@ -184,8 +195,12 @@ class _PlayerLyricStyleSheetState extends ConsumerState<_PlayerLyricStyleSheet> 
                               min: kLyricTranslationFontSizeMin,
                               max: kLyricTranslationFontSizeMax,
                               step: 1,
-                              onChanged: (value) =>
-                                  unawaited(_apply(translationSize: value)),
+                              continuousLabel: (value) =>
+                                  value.round().toString(),
+                              commitOnRelease: false,
+                              onChanged: (value) => unawaited(
+                                _apply(translationSize: value.roundToDouble()),
+                              ),
                             ),
                             divider,
                             SettingsNumberControl(
@@ -195,9 +210,15 @@ class _PlayerLyricStyleSheetState extends ConsumerState<_PlayerLyricStyleSheet> 
                               value: settings.lyricTranslationFontWeight,
                               min: kLyricFontWeightMin,
                               max: kLyricFontWeightMax,
-                              step: 100,
-                              onChanged: (value) =>
-                                  unawaited(_apply(translationWeight: value)),
+                              step: 10,
+                              continuousLabel: (value) =>
+                                  value.round().toString(),
+                              commitOnRelease: false,
+                              onChanged: (value) => unawaited(
+                                _apply(
+                                  translationWeight: value.roundToDouble(),
+                                ),
+                              ),
                             ),
                           ],
                         ),
