@@ -130,7 +130,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                 child: Column(
                   children: [
                     TopChromeRow(
-                      onOpenSongs: () => widget.onDismissRequested('/songs'),
                       onOpenArtist: () => unawaited(_openArtist()),
                       openingArtist: _openingArtist,
                     ),
