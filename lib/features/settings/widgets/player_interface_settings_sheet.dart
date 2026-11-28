@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/storage/settings_store.dart';
-import 'lyric_settings_sheet.dart';
 import 'settings_action.dart';
 
 Future<void> showPlayerInterfaceSettingsSheet(BuildContext context) =>
@@ -54,30 +53,6 @@ class _PlayerInterfaceSettingsSheet extends ConsumerWidget {
                     : '使用随播放旋转的圆形封面',
                 value: settings.squareAlbumCoverEnabled,
                 onChanged: notifier.setSquareAlbumCoverEnabled,
-              ),
-              SettingsAction(
-                key: const ValueKey('lyric-interface-setting'),
-                icon: Icons.lyrics_outlined,
-                title: '歌词界面设置',
-                subtitle:
-                    '原歌词 ${settings.lyricFontSize.round()} · 粗细 ${settings.lyricFontWeight.round()}\n'
-                    '译文 ${settings.lyricTranslationFontSize.round()} · 粗细 ${settings.lyricTranslationFontWeight.round()}',
-                trailing: Icons.chevron_right_rounded,
-                onTap: () async {
-                  final selected = await showLyricSettingsSheet(
-                    context,
-                    weight: settings.lyricFontWeight,
-                    size: settings.lyricFontSize,
-                    translationWeight: settings.lyricTranslationFontWeight,
-                    translationSize: settings.lyricTranslationFontSize,
-                  );
-                  await notifier.setLyricFontStyle(
-                    weight: selected.weight,
-                    size: selected.size,
-                    translationWeight: selected.translationWeight,
-                    translationSize: selected.translationSize,
-                  );
-                },
               ),
               SettingsSwitchAction(
                 key: const ValueKey('flowing-light-setting'),

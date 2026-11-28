@@ -4,7 +4,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:material_symbols_icons/symbols.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:cy_shine_music/core/storage/settings_store.dart';
@@ -630,11 +629,6 @@ void main() {
       ),
       findsNothing,
     );
-    final topQueueIcon = find.descendant(
-      of: find.byTooltip('本地歌曲'),
-      matching: find.byIcon(Symbols.library_music_rounded),
-    );
-    expect(tester.widget<Icon>(topQueueIcon).color, darkScheme.onSurface);
     expect(tester.takeException(), isNull);
   });
 

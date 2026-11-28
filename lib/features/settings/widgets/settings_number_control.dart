@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
+/// A labelled slider with fine-step buttons.
+///
+/// There is deliberately no numeric field: the value is read from whatever the
+/// setting drives (the lyric preview, the crossfade length), so no digits pop
+/// up before, during or after a drag.
 class SettingsNumberControl extends StatefulWidget {
   const SettingsNumberControl({
     super.key,
@@ -12,6 +16,7 @@ class SettingsNumberControl extends StatefulWidget {
     required this.step,
     required this.onChanged,
     this.continuousLabel,
+    this.commitOnRelease = true,
   });
 
   final IconData icon;
@@ -21,25 +26,21 @@ class SettingsNumberControl extends StatefulWidget {
   final double max;
   final double step;
   final ValueChanged<double> onChanged;
-  // A continuous slider previews locally and commits its position on release.
+  // A continuous slider has no ticks: the thumb stays where the finger is.
   final String Function(double)? continuousLabel;
+  // Continuous controls either preview locally and commit on release, or land
+  // every move. The lyric sheet needs the latter so it tracks the finger.
+  final bool commitOnRelease;
 
   @override
   State<SettingsNumberControl> createState() => SettingsNumberControlState();
 }
 
 class SettingsNumberControlState extends State<SettingsNumberControl> {
-  late final _controller = TextEditingController(
-    text: _inputText(widget.value),
-  );
-  final _focus = FocusNode();
-
   double? _dragValue;
+  int? _lastCommitted;
   bool get _continuous => widget.continuousLabel != null;
-
-  String _inputText(double value) => _continuous
-      ? value.toStringAsFixed(3).replaceFirst(RegExp(r'\.?0+$'), '')
-      : value.round().toString();
+  bool get _live => _continuous && !widget.commitOnRelease;
 
   double _snap(double value) => _continuous
       ? value.clamp(widget.min, widget.max)
@@ -47,155 +48,50 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
                 widget.step)
             .clamp(widget.min, widget.max);
 
-  @override
-  void initState() {
-    super.initState();
-    _focus.addListener(_handleFocus);
-  }
+  String _format(double value) =>
+      widget.continuousLabel?.call(value) ?? value.round().toString();
 
-  @override
-  void didUpdateWidget(covariant SettingsNumberControl oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!_focus.hasFocus && widget.value != oldWidget.value) {
-      _controller.text = _inputText(widget.value);
+  /// Used by the lyric sheet's reset button.
+  void setValue(double value) => widget.onChanged(_snap(value));
+
+  // A continuous drag moves the thumb 1:1 with the finger and lands the
+  // rounded position, so the preview follows the finger instead of stepping.
+  void _onSlide(double value) {
+    if (!_continuous) {
+      setValue(value);
+      return;
     }
+    final next = value.clamp(widget.min, widget.max);
+    setState(() => _dragValue = next);
+    if (!_live) return;
+    final rounded = next.round();
+    if (rounded == _lastCommitted) return;
+    _lastCommitted = rounded;
+    widget.onChanged(rounded.toDouble());
   }
 
-  void _handleFocus() {
-    if (!_focus.hasFocus) commitInput();
-  }
-
-  void commitInput() {
-    final parsed = double.tryParse(_controller.text.replaceAll(',', '.'));
-    final value = _snap(parsed ?? widget.value);
-    _controller.text = _inputText(value);
-    if (value != widget.value) widget.onChanged(value);
-  }
-
-  void setValue(double value) {
-    final next = _snap(value);
-    _controller.text = _inputText(next);
-    _focus.unfocus();
-    widget.onChanged(next);
-  }
-
-  void _onTextChanged(String value) {
-    final parsed = double.tryParse(value.replaceAll(',', '.'));
-    if (parsed != null) widget.onChanged(_snap(parsed));
-  }
-
-  @override
-  void dispose() {
-    _focus.removeListener(_handleFocus);
-    _focus.dispose();
-    _controller.dispose();
-    super.dispose();
+  void _onSlideEnd(double value) {
+    if (!_continuous) return;
+    setState(() => _dragValue = null);
+    _lastCommitted = null;
+    if (!_live) widget.onChanged(value.clamp(widget.min, widget.max));
   }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final theme = Theme.of(context).textTheme;
-    final border = OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
-      borderSide: BorderSide.none,
-    );
     return Column(
       children: [
         Row(
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(widget.icon, size: 18, color: scheme.primary),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          widget.label,
-                          style: theme.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    _continuous
-                        ? '${widget.min.round()}–${widget.max.round()}'
-                        : '${widget.min.round()}–${widget.max.round()} · 每次 ${widget.step.round()}',
-                    style: theme.bodySmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            Visibility(
-              visible: _dragValue == null,
-              maintainState: true,
-              maintainAnimation: true,
-              maintainSize: true,
-              child: SizedBox(
-                width: 102,
-                child: Semantics(
-                  label: widget.label,
-                  child: TextField(
-                    controller: _controller,
-                    focusNode: _focus,
-                    selectAllOnFocus: true,
-                    keyboardType: _continuous
-                        ? const TextInputType.numberWithOptions(decimal: true)
-                        : TextInputType.number,
-                    textInputAction: TextInputAction.done,
-                    textAlign: TextAlign.center,
-                    maxLines: 1,
-                    style: theme.titleMedium?.copyWith(
-                      color: scheme.primary,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    inputFormatters: [
-                      TextInputFormatter.withFunction(
-                        (oldValue, newValue) =>
-                            (_continuous
-                                    ? RegExp(r'^\d{0,4}([.,]\d{0,3})?$')
-                                    : RegExp(r'^\d{0,4}$'))
-                                .hasMatch(newValue.text)
-                            ? newValue
-                            : oldValue,
-                      ),
-                    ],
-                    decoration: InputDecoration(
-                      filled: true,
-                      fillColor: scheme.surfaceContainerHighest,
-                      isDense: true,
-                      contentPadding: const EdgeInsets.fromLTRB(12, 12, 0, 12),
-                      border: border,
-                      enabledBorder: border,
-                      focusedBorder: border.copyWith(
-                        borderSide: BorderSide(
-                          color: scheme.primary,
-                          width: 1.5,
-                        ),
-                      ),
-                      suffixIcon: Icon(
-                        Icons.edit_outlined,
-                        size: 14,
-                        color: scheme.onSurfaceVariant,
-                      ),
-                      suffixIconConstraints: const BoxConstraints(minWidth: 28),
-                    ),
-                    onChanged: _onTextChanged,
-                    onSubmitted: (_) {
-                      commitInput();
-                      _focus.unfocus();
-                    },
-                    onTapOutside: (_) => _focus.unfocus(),
-                  ),
+            Icon(widget.icon, size: 18, color: scheme.primary),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                widget.label,
+                style: theme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ),
@@ -227,7 +123,9 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
                   ),
                   activeTickMarkColor: Colors.transparent,
                   inactiveTickMarkColor: Colors.transparent,
-                  showValueIndicator: _continuous
+                  // Live sliders hide the bubble as well: nothing numeric pops
+                  // up while adjusting, the preview itself is the feedback.
+                  showValueIndicator: _continuous && widget.commitOnRelease
                       ? ShowValueIndicator.onDrag
                       : ShowValueIndicator.never,
                   valueIndicatorShape:
@@ -243,18 +141,9 @@ class SettingsNumberControlState extends State<SettingsNumberControl> {
                   divisions: _continuous
                       ? null
                       : ((widget.max - widget.min) / widget.step).round(),
-                  semanticFormatterCallback:
-                      widget.continuousLabel ?? _inputText,
-                  onChangeStart: _continuous ? (_) => _focus.unfocus() : null,
-                  onChanged: _continuous
-                      ? (value) => setState(() => _dragValue = value)
-                      : setValue,
-                  onChangeEnd: _continuous
-                      ? (value) {
-                          setState(() => _dragValue = null);
-                          widget.onChanged(value);
-                        }
-                      : null,
+                  semanticFormatterCallback: _format,
+                  onChanged: _onSlide,
+                  onChangeEnd: _continuous ? _onSlideEnd : null,
                 ),
               ),
             ),

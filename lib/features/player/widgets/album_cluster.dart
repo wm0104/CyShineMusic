@@ -7,16 +7,22 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/storage/settings_store.dart';
 import '../../shell/player_pull_scope.dart';
 import '../../shell/player_transition.dart';
+import '../lyrics_translation_provider.dart';
 import '../player_album_navigation.dart';
 import '../player_controller.dart';
-import 'mini_lyrics_panel.dart';
+import 'karaoke_lyrics_view.dart';
 import 'player_palette.dart';
 import 'player_cover_actions_sheet.dart';
 import 'spinning_cover_art.dart';
 import 'track_change_switcher.dart';
 
-const double _compactAlbumContentLift = 36;
-const double _miniLyricsBottomInset = 20;
+/// How many lyric rows the portrait cover page shows. The landscape pane takes
+/// whatever space the artwork leaves, so it needs no row count.
+const double _portraitLyricRows = 3;
+/// The portrait pane sits in a narrower column than the lyrics page, so it
+/// renders the same view at a slightly smaller type size.
+const double _portraitLyricScale = 0.8;
+const double _coverLyricsBottomInset = 20;
 
 class AlbumPage extends ConsumerWidget {
   const AlbumPage({
@@ -36,7 +42,8 @@ class AlbumPage extends ConsumerWidget {
       playerControllerProvider.select(
         (state) => (
           track: state.track,
-          miniLyricsReady: !state.lyricLoading && state.lyrics.hasLineTiming,
+          lyrics: state.lyrics,
+          lyricsReady: !state.lyricLoading && state.lyrics.hasLineTiming,
         ),
       ),
     );
@@ -46,12 +53,24 @@ class AlbumPage extends ConsumerWidget {
     final square = ref.watch(
       settingsProvider.select((settings) => settings.squareAlbumCoverEnabled),
     );
+    final lyricFontSize = ref.watch(
+      settingsProvider.select((settings) => settings.lyricFontSize),
+    );
+    final showTranslation = ref.watch(lyricsTranslationProvider);
     final track = player.track;
-    final showMiniLyrics =
-        !wide &&
-        onOpenLyrics != null &&
-        miniLyricsEnabled &&
-        player.miniLyricsReady;
+    final lyrics = player.lyrics;
+    final hasExtraLyrics = lyrics.lines.any((line) {
+      final translation = line.translation?.trim();
+      final roman = line.roman?.trim();
+      return (translation != null && translation.isNotEmpty) ||
+          (roman != null && roman.isNotEmpty);
+    });
+    final showLyrics =
+        !wide && onOpenLyrics != null && miniLyricsEnabled && player.lyricsReady;
+    // Height of the three-row portrait pane, derived from the lyric settings so
+    // it grows with the type size instead of clipping it.
+    final portraitLyricHeight =
+        lyricFontSize * _portraitLyricScale * 1.75 * _portraitLyricRows + 12;
 
     final metadataKey = track == null
         ? 'album-metadata:loading'
@@ -80,16 +99,17 @@ class AlbumPage extends ConsumerWidget {
         if (phoneLandscape) {
           // Size the square in the space left after the caption is laid out,
           // including text scaling and the phone's landscape safe insets.
+          final coverWidth = math.min(
+            constraints.maxHeight,
+            constraints.maxWidth * 0.62,
+          );
           return Stack(
             children: [
               Positioned(
                 right: 0,
-                width: math.min(
-                  constraints.maxHeight,
-                  constraints.maxWidth * 0.60,
-                ),
-                top: 4,
-                bottom: 2,
+                width: coverWidth,
+                top: 0,
+                bottom: 0,
                 child: Align(
                   alignment: Alignment.centerRight,
                   child: Column(
@@ -108,12 +128,19 @@ class AlbumPage extends ConsumerWidget {
                   ),
                 ),
               ),
-              if (showMiniLyrics)
+              if (showLyrics)
                 Positioned(
+                  key: const ValueKey('player-cover-lyrics'),
                   left: 0,
-                  bottom: 12,
-                  width: math.min(320, constraints.maxWidth * 0.35),
-                  child: MiniLyricsPanel(onOpenLyrics: onOpenLyrics!),
+                  right: coverWidth + 16,
+                  top: 0,
+                  bottom: 0,
+                  child: KaraokeLyricsView(
+                    key: const ValueKey('player-cover-lyrics-view'),
+                    lyrics: lyrics,
+                    showTranslation: hasExtraLyrics && showTranslation,
+                    horizontalPadding: 0,
+                  ),
                 ),
             ],
           );
@@ -139,7 +166,7 @@ class AlbumPage extends ConsumerWidget {
               child: Transform.translate(
                 offset: Offset(
                   0,
-                  showMiniLyrics ? -_compactAlbumContentLift : 0,
+                  showLyrics ? -portraitLyricHeight * 0.5 : 0,
                 ),
                 child: SingleChildScrollView(
                   physics: const BouncingScrollPhysics(),
@@ -151,12 +178,24 @@ class AlbumPage extends ConsumerWidget {
                 ),
               ),
             ),
-            if (showMiniLyrics)
+            if (showLyrics)
               Positioned(
+                key: const ValueKey('player-cover-lyrics'),
                 left: 0,
-                bottom: _miniLyricsBottomInset,
-                width: math.min(320, constraints.maxWidth * 0.78),
-                child: MiniLyricsPanel(onOpenLyrics: onOpenLyrics!),
+                right: constraints.maxWidth * 0.14,
+                bottom: _coverLyricsBottomInset,
+                height: portraitLyricHeight,
+                child: MediaQuery(
+                  data: MediaQuery.of(context).copyWith(
+                    textScaler: const TextScaler.linear(_portraitLyricScale),
+                  ),
+                  child: KaraokeLyricsView(
+                    key: const ValueKey('player-cover-lyrics-view'),
+                    lyrics: lyrics,
+                    showTranslation: false,
+                    horizontalPadding: 0,
+                  ),
+                ),
               ),
           ],
         );

@@ -126,108 +126,6 @@ void main() {
     },
   );
 
-  testWidgets('lyric settings preview, save and reset independent styles', (
-    tester,
-  ) async {
-    await tester.binding.setSurfaceSize(const Size(430, 900));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    final prefs = await SharedPreferences.getInstance();
-    final container = _settingsContainer(prefs);
-    addTearDown(container.dispose);
-    await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: MaterialApp(theme: AppTheme.light(), home: const SettingsPage()),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final playerRow = find.byKey(const ValueKey('player-interface-setting'));
-    await tester.ensureVisible(playerRow);
-    await tester.pumpAndSettle();
-    await tester.tap(playerRow);
-    await tester.pumpAndSettle();
-    final lyricRow = find.byKey(const ValueKey('lyric-interface-setting'));
-    await tester.tap(lyricRow);
-    await tester.pumpAndSettle();
-
-    final weightLabels = find.text('字体粗细');
-    expect(weightLabels, findsNWidgets(2));
-    final positions = [
-      tester.getTopLeft(find.text('原歌词大小')).dy,
-      tester.getTopLeft(weightLabels.first).dy,
-      tester.getTopLeft(find.text('译文大小')).dy,
-      tester.getTopLeft(weightLabels.last).dy,
-    ];
-    expect(positions, [...positions]..sort());
-
-    TextStyle previewStyle(String sample) =>
-        tester.widget<Text>(find.text(sample)).style!;
-    const original = 'Hear what you love';
-    const translation = '听见热爱';
-    expect(previewStyle(original).fontSize, 32);
-    expect(previewStyle(translation).fontSize, 14);
-    expect(previewStyle(original).fontWeight, FontWeight.w500);
-    expect(previewStyle(translation).fontWeight, FontWeight.w400);
-
-    final originalIncrease = find.byTooltip('增大原歌词大小');
-    await tester.ensureVisible(originalIncrease);
-    await tester.pumpAndSettle();
-    await tester.tap(originalIncrease);
-    await tester.pumpAndSettle();
-    expect(previewStyle(original).fontSize, 33);
-    expect(previewStyle(translation).fontSize, 14);
-
-    final originalWeightIncrease = find.byTooltip('增大字体粗细').first;
-    await tester.ensureVisible(originalWeightIncrease);
-    await tester.pumpAndSettle();
-    await tester.tap(originalWeightIncrease);
-    await tester.pumpAndSettle();
-    expect(previewStyle(original).fontWeight, FontWeight.w600);
-    expect(previewStyle(translation).fontWeight, FontWeight.w400);
-
-    Finder styleField(String label) => find.descendant(
-      of: find.byWidgetPredicate(
-        (widget) => widget is Semantics && widget.properties.label == label,
-      ),
-      matching: find.byType(TextField),
-    );
-    final translationSize = styleField('译文大小');
-    await tester.ensureVisible(translationSize);
-    await tester.pumpAndSettle();
-    await tester.enterText(translationSize, '27');
-    await tester.pumpAndSettle();
-    expect(previewStyle(original).fontSize, 33);
-    expect(previewStyle(translation).fontSize, 27);
-
-    final translationWeight = styleField('字体粗细').last;
-    await tester.ensureVisible(translationWeight);
-    await tester.pumpAndSettle();
-    await tester.enterText(translationWeight, '800');
-    await tester.pumpAndSettle();
-    expect(previewStyle(original).fontWeight, FontWeight.w600);
-    expect(previewStyle(translation).fontWeight, FontWeight.w800);
-
-    await tester.tap(find.widgetWithText(FilledButton, '完成').last);
-    await tester.pumpAndSettle();
-    expect(container.read(settingsProvider).lyricFontSize, 33);
-    expect(container.read(settingsProvider).lyricTranslationFontSize, 27);
-    expect(container.read(settingsProvider).lyricFontWeight, 600);
-    expect(container.read(settingsProvider).lyricTranslationFontWeight, 800);
-
-    await tester.tap(lyricRow);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('重置'));
-    await tester.pumpAndSettle();
-    expect(previewStyle(original).fontWeight, FontWeight.w500);
-    expect(previewStyle(translation).fontWeight, FontWeight.w400);
-    await tester.tap(find.widgetWithText(FilledButton, '完成').last);
-    await tester.pumpAndSettle();
-    expect(container.read(settingsProvider).lyricFontWeight, 500);
-    expect(container.read(settingsProvider).lyricTranslationFontWeight, 400);
-    expect(tester.takeException(), isNull);
-  });
-
   testWidgets(
     'full lyrics render translation style independently of original and roman',
     (tester) async {
@@ -826,14 +724,7 @@ void main() {
       await tester.tap(find.byTooltip('增大过渡时长（秒）'));
       await tester.pumpAndSettle();
       expect(container.read(settingsProvider).crossfadeMilliseconds, draggedMs);
-      final input = find.byType(TextField);
-      await tester.enterText(input, '2.36');
-      await tester.testTextInput.receiveAction(TextInputAction.done);
-      await tester.pumpAndSettle();
-      expect(tester.widget<Slider>(slider).label, '2.4 秒');
-      expect(container.read(settingsProvider).crossfadeMilliseconds, 2360);
-      await tester.enterText(input, '20');
-      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.drag(slider, const Offset(800, 0));
       await tester.pumpAndSettle();
       expect(container.read(settingsProvider).crossfadeMilliseconds, 12000);
       expect(
@@ -844,8 +735,9 @@ void main() {
             .onPressed,
         isNull,
       );
-      await tester.enterText(input, '0.006');
-      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await container
+          .read(settingsProvider.notifier)
+          .setCrossfadeMilliseconds(6);
       await tester.pumpAndSettle();
       expect(tester.widget<Slider>(slider).label, '小于 0.1 秒');
       expect(container.read(settingsProvider).crossfadeMilliseconds, 6);
@@ -860,7 +752,10 @@ void main() {
       addTearDown(restored.dispose);
       expect(restored.read(settingsProvider).crossfadeMilliseconds, 6);
       await _openSettingsRow(tester, '淡入/淡出');
-      await tester.enterText(input, '0');
+      await container
+          .read(settingsProvider.notifier)
+          .setCrossfadeMilliseconds(0);
+      await tester.pumpAndSettle();
       await _openSettingsRow(tester, '完成');
       expect(find.text('已关闭 · 0 秒'), findsOneWidget);
       expect(tester.takeException(), isNull);

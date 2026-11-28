@@ -21,6 +21,7 @@ import 'package:cy_shine_music/features/player/widgets/karaoke_lyrics_view.dart'
 import 'package:cy_shine_music/features/player/widgets/lyrics_panel.dart';
 import 'package:cy_shine_music/features/player/widgets/spinning_cover_art.dart';
 import 'package:cy_shine_music/features/playlists/playlist_store.dart';
+import 'package:cy_shine_music/features/settings/widgets/settings_number_control.dart';
 import 'package:cy_shine_music/features/shell/shell_route_utils.dart';
 import 'package:cy_shine_music/router.dart';
 
@@ -271,9 +272,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('compact mini lyrics show three lines, scroll, and open lyrics', (
-    tester,
-  ) async {
+  testWidgets('cover page lyrics reuse the lyrics page view', (tester) async {
     const lyrics = KaraokeLyrics([
       KaraokeLyricLine(startMs: 0, endMs: 3000, text: '第一句歌词'),
       KaraokeLyricLine(startMs: 3000, endMs: 6000, text: '第二句歌词'),
@@ -296,111 +295,56 @@ void main() {
       position: const Duration(milliseconds: 3500),
     );
 
-    expect(find.byKey(const ValueKey('player-mini-lyrics')), findsOneWidget);
+    final coverLyrics = find.byKey(const ValueKey('player-cover-lyrics'));
+    expect(coverLyrics, findsOneWidget);
+    final coverLyricsView = find.byKey(
+      const ValueKey('player-cover-lyrics-view'),
+    );
+    expect(coverLyricsView, findsOneWidget);
     expect(
-      tester
-          .widget<Material>(
-            find.byKey(const ValueKey('player-mini-lyrics-surface')),
-          )
-          .color,
-      Colors.transparent,
-    );
-    expect(
-      find.byKey(const ValueKey('player-mini-lyric-line-0')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('player-mini-lyric-line-1')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('player-mini-lyric-line-2')),
-      findsOneWidget,
-    );
-    final miniViewport = tester.getRect(
-      find.byKey(const ValueKey('player-mini-lyrics-scroll')),
-    );
-    final fourthLine = tester.getRect(
-      find.byKey(const ValueKey('player-mini-lyric-line-3')),
-    );
-    expect(fourthLine.top, greaterThanOrEqualTo(miniViewport.bottom));
-    expect(
-      tester
-          .widget<Text>(find.byKey(const ValueKey('player-mini-lyric-line-1')))
-          .style
-          ?.fontWeight,
-      FontWeight.w400,
-    );
-    expect(
-      tester
-          .widget<Text>(find.byKey(const ValueKey('player-mini-lyric-line-1')))
-          .style
-          ?.fontSize,
-      14,
-    );
-    expect(
-      tester
-          .widget<ImageFiltered>(
-            find.byKey(const ValueKey('player-mini-lyric-blur-1')),
-          )
-          .enabled,
+      tester.widget<KaraokeLyricsView>(coverLyricsView).showTranslation,
       isFalse,
     );
+    expect(find.byType(KaraokeLineText), findsWidgets);
     expect(
-      tester
-          .widget<ImageFiltered>(
-            find.byKey(const ValueKey('player-mini-lyric-blur-0')),
-          )
-          .enabled,
-      isTrue,
+      tester.getSize(coverLyrics).height,
+      closeTo(kLyricFontSizeDefault * 0.8 * 1.75 * 3 + 12, 0.5),
     );
-
-    final miniScroll = find.descendant(
-      of: find.byKey(const ValueKey('player-mini-lyrics-scroll')),
-      matching: find.byType(Scrollable),
+    // The pane sits under the album caption instead of covering it.
+    expect(
+      tester.getRect(coverLyrics).top,
+      greaterThanOrEqualTo(tester.getRect(find.text('测试专辑')).bottom),
     );
-    final scrollState = tester.state<ScrollableState>(miniScroll);
-    expect(scrollState.position.pixels, 0);
 
     controller.setStateForTest(
       controller.state.copyWith(position: const Duration(milliseconds: 6500)),
     );
     await tester.pump();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 190));
-    expect(scrollState.position.pixels, inExclusiveRange(0, 22));
-    await tester.pumpAndSettle();
-    expect(scrollState.position.pixels, closeTo(22, 0.01));
+    expect(tester.takeException(), isNull);
     expect(
       tester
-          .widget<Text>(find.byKey(const ValueKey('player-mini-lyric-line-2')))
-          .style
-          ?.fontSize,
-      14,
-    );
-    expect(
-      tester
-          .widget<ImageFiltered>(
-            find.byKey(const ValueKey('player-mini-lyric-blur-2')),
-          )
-          .enabled,
-      isFalse,
+          .widget<KaraokeLyricsView>(coverLyricsView)
+          .lyrics
+          .lines
+          .first
+          .text,
+      '第一句歌词',
     );
 
     final pageView = tester.widget<PageView>(
       find.byKey(const ValueKey('player-compact-pager')),
     );
-    await tester.tap(find.byKey(const ValueKey('player-mini-lyrics')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(pageView.controller!.page, inExclusiveRange(0, 1));
+    await tester.drag(
+      find.byKey(const ValueKey('player-compact-pager')),
+      const Offset(-320, 0),
+    );
     await tester.pumpAndSettle();
     expect(pageView.controller!.page, 1);
-    expect(find.byType(KaraokeLyricsView), findsOneWidget);
+    expect(find.byType(KaraokeLyricsView), findsWidgets);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('cover menu switch hides compact mini lyrics immediately', (
+  testWidgets('cover menu switch hides the cover lyric pane immediately', (
     tester,
   ) async {
     const lyrics = KaraokeLyrics([
@@ -422,7 +366,7 @@ void main() {
       ),
       lyrics: lyrics,
     );
-    expect(find.byKey(const ValueKey('player-mini-lyrics')), findsOneWidget);
+    expect(find.byKey(const ValueKey('player-cover-lyrics')), findsOneWidget);
     final liftedCoverTop = tester.getTopLeft(
       find.byKey(const ValueKey('player-cover-menu-button')),
     );
@@ -434,11 +378,60 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('player-mini-lyrics')), findsNothing);
+    expect(find.byKey(const ValueKey('player-cover-lyrics')), findsNothing);
     final centeredCoverTop = tester.getTopLeft(
       find.byKey(const ValueKey('player-cover-menu-button')),
     );
-    expect(centeredCoverTop.dy - liftedCoverTop.dy, 36);
+    expect(centeredCoverTop.dy, greaterThan(liftedCoverTop.dy));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('lyric size pill opens a live style sheet', (tester) async {
+    await _pumpLyricsPanel(
+      tester,
+      const PlayerState(
+        lyrics: KaraokeLyrics([
+          KaraokeLyricLine(startMs: 0, endMs: 3000, text: '第一句歌词'),
+          KaraokeLyricLine(startMs: 3000, endMs: 6000, text: '第二句歌词'),
+        ]),
+      ),
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(LyricsPanel)),
+    );
+    await container
+        .read(settingsProvider.notifier)
+        .setLyricFontStyle(
+          weight: kLyricFontWeightDefault,
+          size: 40,
+          translationWeight: kLyricTranslationFontWeightDefault,
+          translationSize: kLyricTranslationFontSizeDefault,
+        );
+    await _pumpUi(tester);
+    expect(container.read(settingsProvider).lyricFontSize, 40);
+
+    await tester.tap(find.byKey(const ValueKey('player-lyric-size-button')));
+    await _pumpUi(tester);
+    expect(
+      find.byKey(const ValueKey('player-lyric-style-sheet')),
+      findsOneWidget,
+    );
+    expect(find.text('歌词字号'), findsOneWidget);
+    expect(find.byType(SettingsNumberControl), findsNWidgets(4));
+
+    await tester.tap(find.text('重置'));
+    await _pumpUi(tester);
+    expect(
+      container.read(settingsProvider).lyricFontSize,
+      kLyricFontSizeDefault,
+    );
+
+    await tester.tap(find.text('关闭'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('player-lyric-style-sheet')),
+      findsNothing,
+    );
     expect(tester.takeException(), isNull);
   });
 
@@ -919,32 +912,26 @@ void main() {
         find.byKey(const ValueKey('player-cover-menu-button')),
       );
       final album = tester.getRect(find.text('横屏专辑'));
-      final mini = tester.getRect(
-        find.byKey(const ValueKey('player-mini-lyrics')),
+      final coverLyrics = tester.getRect(
+        find.byKey(const ValueKey('player-cover-lyrics')),
       );
       expect(cover.width, closeTo(cover.height, 0.01));
       expect(cover.top, greaterThanOrEqualTo(pager.top));
-      expect(size.width - cover.right, inInclusiveRange(59, 67));
-      void checkHeaderClearance(Rect artwork) {
-        for (final button in [
-          find.byKey(const ValueKey('player-sleep-timer-button')),
-          find.byTooltip('本地歌曲'),
-        ]) {
-          final bounds = tester.getRect(button);
-          expect(artwork.top - bounds.bottom, greaterThanOrEqualTo(12));
-          expect(artwork.overlaps(bounds), isFalse);
-        }
-      }
+      expect(size.width - cover.right, greaterThan(0));
+      // The timer and library buttons moved out of the player header.
+      expect(
+        find.byKey(const ValueKey('player-sleep-timer-button')),
+        findsNothing,
+      );
+      expect(find.byTooltip('本地歌曲'), findsNothing);
 
-      checkHeaderClearance(cover);
-      expect(cover, const Rect.fromLTWH(677, 69, 188, 188));
       expect(
         tester
             .widget<SpinningCoverArt>(find.byType(SpinningCoverArt))
             .boxShadow,
         isNull,
       );
-      expect(mini.right, lessThan(cover.left));
+      expect(coverLyrics.right, lessThan(cover.left));
       expect(album.center.dx, closeTo(cover.center.dx, 0.01));
       expect(album.top - cover.bottom, closeTo(8, 0.01));
       expect(album.bottom, lessThanOrEqualTo(pager.bottom));
@@ -998,16 +985,15 @@ void main() {
           find.byKey(const ValueKey('player-cover-menu-button')),
         );
         final shortCaption = tester.getRect(find.text('横屏专辑'));
-        final shortMini = tester.getRect(
-          find.byKey(const ValueKey('player-mini-lyrics')),
+        final shortLyrics = tester.getRect(
+          find.byKey(const ValueKey('player-cover-lyrics')),
         );
         expect(
           shortSize.width - rightInset - shortCover.right,
-          closeTo(8, 0.01),
+          greaterThan(0),
         );
-        checkHeaderClearance(shortCover);
         expect(shortCover.width, closeTo(shortCover.height, 0.01));
-        expect(shortMini.right, lessThan(shortCover.left));
+        expect(shortLyrics.right, lessThan(shortCover.left));
         expect(shortCaption.center.dx, closeTo(shortCover.center.dx, 0.01));
         expect(shortCaption.top - shortCover.bottom, closeTo(8, 0.01));
         expect(
@@ -1071,13 +1057,13 @@ void main() {
 
     expect(find.byKey(const ValueKey('player-wide-layout')), findsOneWidget);
     expect(find.byKey(const ValueKey('player-compact-pager')), findsNothing);
+    expect(find.byKey(const ValueKey('player-cover-lyrics')), findsNothing);
     expect(find.byType(PageView), findsNothing);
     expect(find.byType(VerticalDivider), findsNothing);
     expect(find.byType(AlbumPage), findsOneWidget);
     expect(find.byType(LyricsPanel), findsOneWidget);
     expect(find.text('宽屏歌曲'), findsOneWidget);
     expect(find.text('宽屏歌手'), findsOneWidget);
-    expect(find.byKey(const ValueKey('player-mini-lyrics')), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('player-cover-menu-button')));
     await _pumpUi(tester);

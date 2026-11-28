@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../theme/app_motion.dart';
+import '../lyrics_translation_provider.dart';
 import '../player_controller.dart';
 import 'karaoke_lyrics_view.dart';
+import 'lyric_style_sheet.dart';
 import 'player_layout.dart';
 import 'player_palette.dart';
 import 'track_change_switcher.dart';
@@ -23,10 +27,9 @@ class LyricsPanel extends ConsumerStatefulWidget {
 }
 
 class _LyricsPanelState extends ConsumerState<LyricsPanel> {
-  bool _showTranslation = true;
-
   @override
   Widget build(BuildContext context) {
+    final showTranslation = ref.watch(lyricsTranslationProvider);
     // Everything here changes only on track switch / lyric load; the
     // per-tick `position` is consumed inside KaraokeLyricsView.
     final vm = ref.watch(
@@ -74,21 +77,40 @@ class _LyricsPanelState extends ConsumerState<LyricsPanel> {
             child: KaraokeLyricsView(
               key: ValueKey('lyrics-view-$lyricsKey'),
               lyrics: vm.lyrics,
-              showTranslation: hasExtraLyrics && _showTranslation,
+              showTranslation: hasExtraLyrics && showTranslation,
               edgeFadeEnabled: widget.edgeFadeEnabled,
               horizontalPadding: widget.horizontalPadding,
             ),
           ),
-          if (hasExtraLyrics)
-            _LyricsTranslationToggle(
-              horizontalPadding: widget.horizontalPadding,
-              showTranslation: _showTranslation,
-              hasTranslation: hasTranslation,
-              hasRoman: hasRoman,
-              onTap: () {
-                setState(() => _showTranslation = !_showTranslation);
-              },
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              widget.horizontalPadding,
+              4,
+              widget.horizontalPadding,
+              10,
             ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                _LyricSizePill(
+                  key: const ValueKey('player-lyric-size-button'),
+                  onTap: () => unawaited(showPlayerLyricStyleSheet(context)),
+                ),
+                if (hasExtraLyrics) ...[
+                  const SizedBox(width: 8),
+                  _LyricsTranslationToggle(
+                    showTranslation: showTranslation,
+                    hasTranslation: hasTranslation,
+                    hasRoman: hasRoman,
+                    onTap: () {
+                      ref.read(lyricsTranslationProvider.notifier).state =
+                          !showTranslation;
+                    },
+                  ),
+                ],
+              ],
+            ),
+          ),
         ],
       );
     }
@@ -102,9 +124,43 @@ class _LyricsPanelState extends ConsumerState<LyricsPanel> {
   }
 }
 
+class _LyricSizePill extends StatelessWidget {
+  const _LyricSizePill({super.key, required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ink = playerInk(context);
+    return _LyricActionPill(
+      tooltip: '歌词字号',
+      onTap: onTap,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.format_size_rounded,
+            color: ink.withValues(alpha: 0.76),
+            size: 16,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '字号',
+            style: TextStyle(
+              color: ink.withValues(alpha: 0.78),
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              height: 1,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _LyricsTranslationToggle extends StatelessWidget {
   const _LyricsTranslationToggle({
-    required this.horizontalPadding,
     required this.showTranslation,
     required this.hasTranslation,
     required this.hasRoman,
@@ -112,7 +168,6 @@ class _LyricsTranslationToggle extends StatelessWidget {
   });
 
   final bool showTranslation;
-  final double horizontalPadding;
   final bool hasTranslation;
   final bool hasRoman;
   final VoidCallback onTap;
@@ -140,82 +195,97 @@ class _LyricsTranslationToggle extends StatelessWidget {
         ? Duration.zero
         : AppMotion.medium;
     final buttonText = _buttonText;
-    final tooltipMessage = _tooltipMessage;
-    return Padding(
-      padding: EdgeInsets.fromLTRB(horizontalPadding, 4, horizontalPadding, 10),
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: Tooltip(
-          message: tooltipMessage,
-          child: AnimatedContainer(
+    return _LyricActionPill(
+      tooltip: _tooltipMessage,
+      highlighted: showTranslation,
+      onTap: onTap,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AnimatedRotation(
+            turns: showTranslation ? 0 : -0.08,
             duration: duration,
             curve: AppMotion.emphasized,
-            decoration: BoxDecoration(
-              color: playerInk(
-                context,
-              ).withValues(alpha: showTranslation ? 0.11 : 0.06),
-              borderRadius: BorderRadius.circular(999),
+            child: Icon(
+              Icons.translate_rounded,
+              color: playerInk(context).withValues(alpha: 0.76),
+              size: 16,
             ),
-            child: Material(
-              color: Colors.transparent,
-              borderRadius: BorderRadius.circular(999),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: onTap,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 7,
+          ),
+          const SizedBox(width: 6),
+          AnimatedSize(
+            duration: duration,
+            curve: AppMotion.emphasized,
+            child: AnimatedSwitcher(
+              duration: duration,
+              switchInCurve: AppMotion.emphasizedDecelerate,
+              switchOutCurve: AppMotion.emphasizedAccelerate,
+              transitionBuilder: (child, animation) {
+                return FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0, 0.18),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: child,
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      AnimatedRotation(
-                        turns: showTranslation ? 0 : -0.08,
-                        duration: duration,
-                        curve: AppMotion.emphasized,
-                        child: Icon(
-                          Icons.translate_rounded,
-                          color: playerInk(context).withValues(alpha: 0.76),
-                          size: 16,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      AnimatedSize(
-                        duration: duration,
-                        curve: AppMotion.emphasized,
-                        child: AnimatedSwitcher(
-                          duration: duration,
-                          switchInCurve: AppMotion.emphasizedDecelerate,
-                          switchOutCurve: AppMotion.emphasizedAccelerate,
-                          transitionBuilder: (child, animation) {
-                            return FadeTransition(
-                              opacity: animation,
-                              child: SlideTransition(
-                                position: Tween<Offset>(
-                                  begin: const Offset(0, 0.18),
-                                  end: Offset.zero,
-                                ).animate(animation),
-                                child: child,
-                              ),
-                            );
-                          },
-                          child: Text(
-                            buttonText,
-                            key: ValueKey(buttonText),
-                            style: TextStyle(
-                              color: playerInk(context).withValues(alpha: 0.78),
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              height: 1,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                );
+              },
+              child: Text(
+                buttonText,
+                key: ValueKey(buttonText),
+                style: TextStyle(
+                  color: playerInk(context).withValues(alpha: 0.78),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  height: 1,
                 ),
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LyricActionPill extends StatelessWidget {
+  const _LyricActionPill({
+    required this.tooltip,
+    required this.onTap,
+    required this.child,
+    this.highlighted = true,
+  });
+
+  final String tooltip;
+  final VoidCallback onTap;
+  final Widget child;
+  final bool highlighted;
+
+  @override
+  Widget build(BuildContext context) {
+    final duration = MediaQuery.disableAnimationsOf(context)
+        ? Duration.zero
+        : AppMotion.medium;
+    return Tooltip(
+      message: tooltip,
+      child: AnimatedContainer(
+        duration: duration,
+        curve: AppMotion.emphasized,
+        decoration: BoxDecoration(
+          color: playerInk(context).withValues(alpha: highlighted ? 0.11 : 0.06),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              child: child,
             ),
           ),
         ),
